@@ -275,6 +275,8 @@ impl App {
         let free = area.width() - gap * (self.modules.len().saturating_sub(1)) as f32;
         let mut x = area.left();
         let mut toasts = Vec::new();
+        let before = self.settings.clone();
+        let settings = &mut self.settings;
         for (i, module) in self.modules.iter_mut().enumerate() {
             let width = free * module.weight() / total;
             let rect = Rect::from_min_size(Pos2::new(x, area.top()), Vec2::new(width, area.height()));
@@ -288,12 +290,15 @@ impl App {
                 ui.set_clip_rect(ui.max_rect().intersect(rect.expand(1.0)));
                 w::section_label(ui, module.title(t));
                 ui.add_space(4.0);
-                let mut cx = Ctx { t, lang, monitor: device, toasts: &mut toasts };
+                let mut cx = Ctx { t, lang, monitor: device, toasts: &mut toasts, settings: &mut *settings };
                 module.ui(ui, &mut cx);
             });
         }
         for (text, tone) in toasts {
             self.toasts.push(text, tone);
+        }
+        if self.settings != before {
+            self.save();
         }
     }
 

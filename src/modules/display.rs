@@ -1,11 +1,13 @@
 // Экран: разрешение, частота и масштаб. После смены режима — «Оставить?» с обратным отсчётом,
 // как в Windows: если картинка пропала, через 15 с всё вернётся само.
+// Избранное — до трёх разрешений на монитор чипами сверху. Частота запоминается для каждого
+// разрешения (то, что сейчас стоит и не ждёт «Оставить»), и при переходе на него ставится она.
 
 use std::time::{Duration, Instant};
 
 use anvil_ui::widgets::{self as w, Kind};
 use anvil_ui::{Palette, Tone};
-use eframe::egui::{self, Ui};
+use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 
 use super::{Ctx, Module, chips, row};
 use crate::sys::display::{self, Mode, Scale};
@@ -72,6 +74,47 @@ pub fn rates(modes: &[Mode], w: u32, h: u32) -> Vec<u32> {
 pub fn mode_for(modes: &[Mode], w: u32, h: u32, hz: u32) -> Option<Mode> {
     let same = modes.iter().find(|m| m.width == w && m.height == h && m.hz == hz);
     same.or_else(|| modes.iter().filter(|m| m.width == w && m.height == h).max_by_key(|m| m.hz)).copied()
+}
+
+/// Пятиконечная звезда: залитая — избранное, контур — можно добавить. Своя: в наборе такой нет.
+fn paint_star(painter: &egui::Painter, rect: Rect, filled: bool, color: Color32) {
+    let c = rect.center();
+    let (outer, inner) = (rect.height() * 0.48, rect.height() * 0.2);
+    let pts: Vec<Pos2> = (0..10)
+        .map(|i| {
+            let r = if i % 2 == 0 { outer } else { inner };
+            let a = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / 5.0;
+            Pos2::new(c.x + r * a.cos(), c.y + r * a.sin())
+        })
+        .collect();
+    if filled {
+        // Звезда не выпуклая — заливаем треугольниками от центра.
+        for i in 0..10 {
+            let tri = vec![c, pts[i], pts[(i + 1) % 10]];
+            painter.add(egui::Shape::convex_polygon(tri, color, Stroke::NONE));
+        }
+    }
+    painter.add(egui::Shape::closed_line(pts, Stroke::new(1.3, color)));
+}
+
+/// Звёздочка в правом конце строки разрешения. Возвращает щелчок по ней.
+fn star(ui: &mut Ui, row: Rect, id: egui::Id, favorite: bool, hint: &str) -> bool {
+    let p = Palette::of(ui);
+    let rect = Rect::from_center_size(Pos2::new(row.right() - 18.0, row.center().y), Vec2::splat(24.0));
+    let r = ui.interact(rect, id, Sense::click());
+    let row_hot = ui.rect_contains_pointer(row);
+    // Не избранное — звёздочка видна только под мышью, чтобы список не пестрел.
+    if favorite || row_hot {
+        let color = if favorite {
+            p.accent
+        } else if r.hovered() {
+            p.text
+        } else {
+            p.faint
+        };
+        paint_star(ui.painter(), rect.shrink(5.0), favorite, color);
+    }
+    r.on_hover_text(hint).on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
 }
 
 impl Display {
@@ -196,6 +239,39 @@ impl Module for Display {
             w::note(ui, t.failed);
             return;
         };
+        // Стоит и не ждёт ответа — значит, это частота этого разрешения.
+        cx.settings.remember_hz(&device, cur.width, cur.height, cur.hz);
+
+        // Избранное: чипы «2560 × 1440 · 144 Гц», щелчок — сразу этот режим.
+        let favorites = cx.settings.favorites_of(&device);
+        w::section_label(ui, t.favorites);
+        if favorites.is_empty() {
+            w::note(ui, t.favorites_hint);
+        } else {
+            let targets: Vec<(u32, u32, Option<Mode>)> = favorites
+                .iter()
+                .map(|&(fw, fh)| {
+                    let hz = cx.settings.remembered_hz(&device, fw, fh).unwrap_or(cur.hz);
+                    (fw, fh, mode_for(&self.modes, fw, fh, hz))
+                })
+                .collect();
+            let labels: Vec<String> = targets
+                .iter()
+                .map(|(fw, fh, m)| match m {
+                    Some(m) => format!("{fw} × {fh} · {} {}", m.hz, t.hz),
+                    None => format!("{fw} × {fh}"),
+                })
+                .collect();
+            let opts: Vec<((u32, u32), &str)> =
+                targets.iter().zip(&labels).map(|((fw, fh, _), l)| ((*fw, *fh), l.as_str())).collect();
+            let mut want = (cur.width, cur.height);
+            if chips(ui, &mut want, &opts)
+                && let Some((_, _, Some(m))) = targets.iter().find(|(fw, fh, _)| (*fw, *fh) == want)
+            {
+                self.apply(&device, *m, cx);
+            }
+        }
+        ui.add_space(8.0);
 
         let list_w = (ui.available_width() * 0.48).max(170.0);
         ui.horizontal_top(|ui| {
@@ -209,13 +285,21 @@ impl Module for Display {
                         for (i, (rw, rh)) in resolutions(&self.modes).into_iter().enumerate() {
                             let id = ui.id().with(("res", rw, rh));
                             let on = rw == cur.width && rh == cur.height;
+                            let fav = cx.settings.is_favorite(&device, rw, rh);
                             let resp = anvil_ui::motion::widgets::enter(ui, ("res", rw, rh), i, |ui| {
-                                row(ui, id, on, &format!("{rw} × {rh}"), aspect(rw, rh))
+                                row(ui, id, on, &format!("{rw} × {rh}"), aspect(rw, rh), 28.0)
                             });
-                            if resp.clicked()
-                                && let Some(m) = mode_for(&self.modes, rw, rh, cur.hz)
-                            {
-                                self.apply(&device, m, cx);
+                            let hint = if fav { t.star_remove } else { t.star_add };
+                            if star(ui, resp.rect, id.with("star"), fav, hint) {
+                                if cx.settings.toggle_favorite(&device, rw, rh).is_err() {
+                                    cx.toasts.push((t.favorites_full.to_string(), Tone::Warning));
+                                }
+                            } else if resp.clicked() {
+                                // Частота — та, что была у этого разрешения в прошлый раз.
+                                let hz = cx.settings.remembered_hz(&device, rw, rh).unwrap_or(cur.hz);
+                                if let Some(m) = mode_for(&self.modes, rw, rh, hz) {
+                                    self.apply(&device, m, cx);
+                                }
                             }
                         }
                     });

@@ -159,7 +159,8 @@ impl Module for Audio {
             for (i, d) in self.state.devices.iter().enumerate() {
                 let on = self.state.default_id.as_deref() == Some(d.id.as_str());
                 let id = ui.id().with(("dev", &d.id));
-                let resp = anvil_ui::motion::widgets::enter(ui, ("dev", &d.id), i, |ui| row(ui, id, on, &d.name, ""));
+                let resp =
+                    anvil_ui::motion::widgets::enter(ui, ("dev", &d.id), i, |ui| row(ui, id, on, &d.name, "", 0.0));
                 if resp.clicked() && !on {
                     pick = Some(d.id.clone());
                 }

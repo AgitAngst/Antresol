@@ -8,6 +8,42 @@ use anvil_ui::{CommonSettings, Icon, Lang, ThemeChoice};
 pub const MIN_WIDTH: f32 = 560.0;
 pub const MIN_HEIGHT: f32 = 150.0;
 pub const MAX_HEIGHT: f32 = 520.0;
+/// Сколько любимых разрешений у одного монитора.
+pub const MAX_FAVORITES: usize = 3;
+
+/// Разрешение конкретного монитора: `\\.\DISPLAYn`, ширина, высота.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Res {
+    pub device: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl Res {
+    pub fn new(device: &str, width: u32, height: u32) -> Res {
+        Res { device: device.to_string(), width, height }
+    }
+
+    fn matches(&self, device: &str, width: u32, height: u32) -> bool {
+        self.device.eq_ignore_ascii_case(device) && self.width == width && self.height == height
+    }
+
+    /// Разбор `\\.\DISPLAY1 2560x1440` — то, что стоит после `favorite=` и в начале `rate=`.
+    fn parse(words: &[&str]) -> Option<Res> {
+        let (w, h) = words.get(1)?.split_once('x')?;
+        Some(Res { device: words.first()?.to_string(), width: w.parse().ok()?, height: h.parse().ok()? })
+    }
+}
+
+impl std::fmt::Display for Res {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} {}x{}", self.device, self.width, self.height)
+    }
+}
+
+/// Избранное переполнено: больше [`MAX_FAVORITES`] у монитора не бывает.
+#[derive(Debug, PartialEq)]
+pub struct FavoritesFull;
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Settings {
@@ -24,6 +60,52 @@ pub struct Settings {
     pub hide_delay_ms: u32,
     /// Не выезжать, когда на мониторе игра или видео во весь экран.
     pub fullscreen_guard: bool,
+    /// Любимые разрешения, до трёх на монитор, в порядке добавления.
+    pub favorites: Vec<Res>,
+    /// Какая частота была у разрешения в последний раз — её и ставим, когда на него переходят.
+    pub rates: Vec<(Res, u32)>,
+}
+
+impl Settings {
+    pub fn favorites_of(&self, device: &str) -> Vec<(u32, u32)> {
+        self.favorites.iter().filter(|f| f.device.eq_ignore_ascii_case(device)).map(|f| (f.width, f.height)).collect()
+    }
+
+    pub fn is_favorite(&self, device: &str, width: u32, height: u32) -> bool {
+        self.favorites.iter().any(|f| f.matches(device, width, height))
+    }
+
+    /// Поставить или снять звёздочку. Ответ — стало ли разрешение избранным.
+    pub fn toggle_favorite(&mut self, device: &str, width: u32, height: u32) -> Result<bool, FavoritesFull> {
+        if let Some(i) = self.favorites.iter().position(|f| f.matches(device, width, height)) {
+            self.favorites.remove(i);
+            return Ok(false);
+        }
+        if self.favorites_of(device).len() >= MAX_FAVORITES {
+            return Err(FavoritesFull);
+        }
+        self.favorites.push(Res::new(device, width, height));
+        Ok(true)
+    }
+
+    pub fn remembered_hz(&self, device: &str, width: u32, height: u32) -> Option<u32> {
+        self.rates.iter().find(|(r, _)| r.matches(device, width, height)).map(|(_, hz)| *hz)
+    }
+
+    /// Запомнить частоту разрешения. Ответ — изменилось ли что-нибудь (надо ли сохранять).
+    pub fn remember_hz(&mut self, device: &str, width: u32, height: u32, hz: u32) -> bool {
+        match self.rates.iter_mut().find(|(r, _)| r.matches(device, width, height)) {
+            Some((_, old)) if *old == hz => false,
+            Some((_, old)) => {
+                *old = hz;
+                true
+            }
+            None => {
+                self.rates.push((Res::new(device, width, height), hz));
+                true
+            }
+        }
+    }
 }
 
 impl Default for Settings {
@@ -36,6 +118,8 @@ impl Default for Settings {
             show_delay_ms: 150,
             hide_delay_ms: 450,
             fullscreen_guard: true,
+            favorites: Vec::new(),
+            rates: Vec::new(),
         }
     }
 }
@@ -78,6 +162,21 @@ pub fn parse(text: &str) -> Settings {
             "show_delay_ms" => s.show_delay_ms = value.parse().unwrap_or(s.show_delay_ms),
             "hide_delay_ms" => s.hide_delay_ms = value.parse().unwrap_or(s.hide_delay_ms),
             "fullscreen_guard" => s.fullscreen_guard = value != "false",
+            "favorite" => {
+                let words: Vec<&str> = value.split_whitespace().collect();
+                if let Some(r) = Res::parse(&words)
+                    && s.favorites_of(&r.device).len() < MAX_FAVORITES
+                    && !s.is_favorite(&r.device, r.width, r.height)
+                {
+                    s.favorites.push(r);
+                }
+            }
+            "rate" => {
+                let words: Vec<&str> = value.split_whitespace().collect();
+                if let (Some(r), Some(Ok(hz))) = (Res::parse(&words), words.get(2).map(|h| h.parse())) {
+                    s.remember_hz(&r.device, r.width, r.height, hz);
+                }
+            }
             _ => {}
         }
     }
@@ -93,7 +192,7 @@ pub fn format(s: &Settings) -> String {
         ThemeChoice::System => "system",
     };
     let lang = if s.common.language == Lang::En { "en" } else { "ru" };
-    format!(
+    let mut out = format!(
         "lang={lang}\ntheme={theme}\nwidth={}\nheight={}\nmonitor={}\nshow_delay_ms={}\nhide_delay_ms={}\nfullscreen_guard={}\n",
         s.width.round(),
         s.height.round(),
@@ -101,7 +200,14 @@ pub fn format(s: &Settings) -> String {
         s.show_delay_ms,
         s.hide_delay_ms,
         s.fullscreen_guard
-    )
+    );
+    for f in &s.favorites {
+        out.push_str(&format!("favorite={f}\n"));
+    }
+    for (r, hz) in &s.rates {
+        out.push_str(&format!("rate={r} {hz}\n"));
+    }
+    out
 }
 
 pub fn save(s: &Settings) {
@@ -266,6 +372,40 @@ mod tests {
         s.common.theme = ThemeChoice::Dark;
         s.common.language = Lang::En;
         assert_eq!(parse(&format(&s)), s);
+    }
+
+    #[test]
+    fn favorites_and_rates_round_trip() {
+        let d1 = r"\\.\DISPLAY1";
+        let mut s = Settings::default();
+        assert_eq!(s.toggle_favorite(d1, 2560, 1440), Ok(true));
+        assert_eq!(s.toggle_favorite(d1, 1920, 1080), Ok(true));
+        assert!(s.remember_hz(d1, 2560, 1440, 144));
+        assert!(!s.remember_hz(d1, 2560, 1440, 144), "та же частота — сохранять нечего");
+        assert!(s.remember_hz(d1, 1920, 1080, 60));
+        let back = parse(&format(&s));
+        assert_eq!(back, s);
+        assert_eq!(back.favorites_of(d1), vec![(2560, 1440), (1920, 1080)]);
+        assert_eq!(back.remembered_hz(d1, 2560, 1440), Some(144));
+        assert_eq!(back.remembered_hz(r"\\.\DISPLAY2", 2560, 1440), None);
+    }
+
+    #[test]
+    fn favorites_limit_per_monitor() {
+        let (d1, d2) = (r"\\.\DISPLAY1", r"\\.\DISPLAY2");
+        let mut s = Settings::default();
+        for (w, h) in [(2560, 1440), (1920, 1080), (1280, 720)] {
+            assert_eq!(s.toggle_favorite(d1, w, h), Ok(true));
+        }
+        assert_eq!(s.toggle_favorite(d1, 800, 600), Err(FavoritesFull));
+        // У другого монитора — своё избранное.
+        assert_eq!(s.toggle_favorite(d2, 800, 600), Ok(true));
+        // Сняли звёздочку — место освободилось.
+        assert_eq!(s.toggle_favorite(d1, 1920, 1080), Ok(false));
+        assert_eq!(s.toggle_favorite(d1, 800, 600), Ok(true));
+        // Лишние строки, дописанные в файл руками, — не больше трёх и без повторов.
+        let text = "favorite=A 1x1\nfavorite=A 2x2\nfavorite=A 3x3\nfavorite=A 4x4\nfavorite=A 1x1\n";
+        assert_eq!(parse(text).favorites_of("A").len(), 3);
     }
 
     #[test]

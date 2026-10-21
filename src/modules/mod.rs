@@ -18,10 +18,13 @@ pub struct Ctx<'a> {
     pub monitor: &'a str,
     /// Сообщения внизу экрана: ошибки и «готово».
     pub toasts: &'a mut Vec<(String, Tone)>,
+    /// Настройки программы: модуль может хранить в них своё (избранное, частоты).
+    /// Изменил — панель сама сохранит файл.
+    pub settings: &'a mut crate::config::Settings,
 }
 
 pub trait Module {
-    /// Ключ для `Id` и для порядка в настройках.
+    /// Ключ для `Id` (появление карточки).
     fn key(&self) -> &'static str;
     fn title(&self, t: &Tr) -> &'static str;
     /// Доля ширины панели относительно соседей.
@@ -50,14 +53,15 @@ pub fn all() -> Vec<Box<dyn Module>> {
 }
 
 /// Строка списка с текстом слева и пометкой справа; выбранная — с полоской акцента.
-pub fn row(ui: &mut Ui, id: egui::Id, selected: bool, label: &str, trailing: &str) -> egui::Response {
+/// `reserve` — место справа под свой значок строки (звёздочку), пометка встаёт левее.
+pub fn row(ui: &mut Ui, id: egui::Id, selected: bool, label: &str, trailing: &str, reserve: f32) -> egui::Response {
     let p = anvil_ui::Palette::of(ui);
     let r = anvil_ui::widgets::list_row(ui, id, selected, 28.0, label);
     let font = egui::FontId::proportional(13.5);
     let color = if selected { p.text } else { p.weak };
-    let mut room = r.rect.width() - 22.0;
+    let mut room = r.rect.width() - 22.0 - reserve;
     if !trailing.is_empty() {
-        let right = r.rect.right_center() - egui::vec2(10.0, 0.0);
+        let right = r.rect.right_center() - egui::vec2(10.0 + reserve, 0.0);
         let g =
             ui.painter().text(right, egui::Align2::RIGHT_CENTER, trailing, egui::FontId::proportional(12.0), p.faint);
         room -= g.width() + 8.0;
