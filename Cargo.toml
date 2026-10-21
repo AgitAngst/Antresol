@@ -1,0 +1,41 @@
+[package]
+name = "antresol"
+version = "0.1.0"
+edition = "2024"
+description = "Quick-access panel at the top edge of the monitor"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "antresol"
+path = "src/main.rs"
+
+[dependencies]
+# Общий вид семьи Anvil. Правка набора на живую — `[patch]` в .cargo/config.toml (не в git).
+anvil-ui = { git = "https://github.com/AgitAngst/Anvil", tag = "kit-v0.6.1" }
+eframe = "0.36.2"
+
+# Win32: мониторы, режимы экрана и масштаб, Core Audio (COM), запуск, горячая клавиша, автозапуск.
+[target.'cfg(windows)'.dependencies]
+# windows-core — для макроса `interface` (IPolicyConfig: смена устройства звука); та же версия, что у windows.
+windows-core = "0.62.2"
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Devices_Display",
+    "Win32_Devices_FunctionDiscovery",
+    "Win32_Media_Audio",
+    "Win32_Media_Audio_Endpoints",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Registry",
+    "Win32_System_Variant",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[profile.release]
+opt-level = 3
+lto = true
