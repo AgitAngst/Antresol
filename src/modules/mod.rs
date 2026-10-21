@@ -70,3 +70,43 @@ pub fn row(ui: &mut Ui, id: egui::Id, selected: bool, label: &str, trailing: &st
     ui.painter().galley(left, galley, color);
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
+
+/// Выбор одного из нескольких — «чипами», которые переносятся на новую строку, когда не влезают
+/// (у `segmented` набора полоса одна и обрезается). Выбранный — как ползунок `segmented`:
+/// `card` с рамкой `border_strong`, текст `text`; остальные — `raised`, текст `weak`.
+pub fn chips<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: &[(T, &str)]) -> bool {
+    let p = anvil_ui::Palette::of(ui);
+    let motion = anvil_ui::motion::Motion::of(ui.ctx());
+    let mut changed = false;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+        for (i, (option, label)) in options.iter().enumerate() {
+            let font = egui::FontId::proportional(13.0);
+            let text_w = ui.painter().layout_no_wrap(label.to_string(), font.clone(), p.text).size().x;
+            let (rect, r) = ui.allocate_exact_size(egui::vec2(text_w + 20.0, 28.0), egui::Sense::click());
+            let on = *value == *option;
+            let hovered = r.hovered();
+            let fill = if on {
+                p.card
+            } else if hovered {
+                p.hover
+            } else {
+                p.raised
+            };
+            let id = ui.id().with(("chip", i, *label));
+            let fill = motion.color(ui.ctx(), id.with("fill"), fill, anvil_ui::motion::HOVER);
+            let stroke = if on { p.border_strong } else { p.border };
+            ui.painter().rect(rect, 6, fill, egui::Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
+            let color = if on || hovered { p.text } else { p.weak };
+            ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, *label, font, color);
+            anvil_ui::widgets::focus_ring(ui, rect, &r, 6);
+            let r = r.on_hover_cursor(egui::CursorIcon::PointingHand);
+            r.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, on, *label));
+            if r.clicked() && !on {
+                *value = *option;
+                changed = true;
+            }
+        }
+    });
+    changed
+}

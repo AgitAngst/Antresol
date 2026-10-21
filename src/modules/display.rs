@@ -7,7 +7,7 @@ use anvil_ui::widgets::{self as w, Kind};
 use anvil_ui::{Palette, Tone};
 use eframe::egui::{self, Ui};
 
-use super::{Ctx, Module, row};
+use super::{Ctx, Module, chips, row};
 use crate::sys::display::{self, Mode, Scale};
 use crate::sys::monitor;
 use crate::texts::{self, Tr};
@@ -229,11 +229,9 @@ impl Module for Display {
                 w::section_label(ui, t.refresh);
                 let hz = rates(&self.modes, cur.width, cur.height);
                 let labels: Vec<String> = hz.iter().map(|h| format!("{h} {}", t.hz)).collect();
-                let opts: Vec<(u32, Option<anvil_ui::Icon>, &str)> =
-                    hz.iter().zip(&labels).map(|(h, l)| (*h, None, l.as_str())).collect();
+                let opts: Vec<(u32, &str)> = hz.iter().zip(&labels).map(|(h, l)| (*h, l.as_str())).collect();
                 let mut want = cur.hz;
-                // Не влезает — листается вбок, а не обрезается.
-                egui::ScrollArea::horizontal().id_salt("hz").show(ui, |ui| w::segmented(ui, &mut want, &opts));
+                chips(ui, &mut want, &opts);
                 if want != cur.hz
                     && let Some(m) = mode_for(&self.modes, cur.width, cur.height, want)
                 {
@@ -244,10 +242,10 @@ impl Module for Display {
                 w::section_label(ui, t.scale);
                 if let Some(scale) = self.scale.clone() {
                     let labels: Vec<String> = scale.options.iter().map(|s| format!("{s}%")).collect();
-                    let opts: Vec<(u32, Option<anvil_ui::Icon>, &str)> =
-                        scale.options.iter().zip(&labels).map(|(s, l)| (*s, None, l.as_str())).collect();
+                    let opts: Vec<(u32, &str)> =
+                        scale.options.iter().zip(&labels).map(|(s, l)| (*s, l.as_str())).collect();
                     let mut want = scale.current;
-                    egui::ScrollArea::horizontal().id_salt("scale").show(ui, |ui| w::segmented(ui, &mut want, &opts));
+                    chips(ui, &mut want, &opts);
                     if want != scale.current {
                         match display::set_scale(&device, want) {
                             Ok(()) => {
