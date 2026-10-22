@@ -20,8 +20,8 @@ $scenes = @(
   @{ n = "color-light-en";   lang = "en"; theme = "light"; view = "color" },
   @{ n = "strip-media-dark"; lang = "ru"; theme = "dark";  view = "strip-media" },
   @{ n = "strip-banner-light"; lang = "en"; theme = "light"; view = "strip-banner" },
-  @{ n = "cards2-dark-ru"; lang = "ru"; theme = "dark"; view = ""; extra = @("modules=quick,sound,snippets,tools,display") },
-  @{ n = "cards2-light-en"; lang = "en"; theme = "light"; view = ""; extra = @("modules=quick,sound,snippets,tools,display") }
+  @{ n = "cards2-dark-ru"; lang = "ru"; theme = "dark"; view = ""; extra = @("modules=quick,sound,snippets,tools,clocks,display") },
+  @{ n = "cards2-light-en"; lang = "en"; theme = "light"; view = ""; extra = @("modules=quick,sound,snippets,tools,clocks,display") }
 )
 foreach ($s in $scenes) {
   if ($Only -and $s.n -ne $Only) { continue }

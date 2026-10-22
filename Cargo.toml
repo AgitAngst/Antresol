@@ -1,6 +1,6 @@
 [package]
 name = "antresol"
-version = "1.6.0"
+version = "1.7.0"
 edition = "2024"
 description = "Quick-access panel at the top edge of the monitor"
 license = "MIT"
@@ -50,6 +50,7 @@ windows = { version = "0.62.2", features = [
     "Win32_System_Registry",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
+    "Win32_System_Time",
     "Win32_System_WinRT",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",

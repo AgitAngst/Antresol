@@ -183,6 +183,13 @@ pub struct Tr {
     pub screen_text_done: &'static str,
     pub screen_text_none: &'static str,
     pub screen_text_no_lang: &'static str,
+    pub clocks: &'static str,
+    pub clocks_empty: &'static str,
+    pub clock_add: &'static str,
+    pub clock_remove: &'static str,
+    pub clock_search: &'static str,
+    pub clock_unknown: &'static str,
+    pub temperature: &'static str,
     pub accents: [&'static str; 5],
 }
 
@@ -367,6 +374,13 @@ const RU: Tr = Tr {
     screen_text_done: "Текст в буфере обмена.",
     screen_text_none: "Текст на снимке не найден.",
     screen_text_no_lang: "В Windows нет языка для распознавания текста — добавьте его в «Параметры → Время и язык».",
+    clocks: "Часы",
+    clocks_empty: "Добавьте пояс — будет видно, который там час.",
+    clock_add: "Добавить пояс",
+    clock_remove: "Убрать часы",
+    clock_search: "Пояс, например Tokyo",
+    clock_unknown: "Пояс не найден",
+    temperature: "Температура",
     accents: ["Лайм", "Фиолетовый", "Индиго", "Фуксия", "Лазурь"],
 };
 
@@ -551,6 +565,13 @@ const EN: Tr = Tr {
     screen_text_done: "The text is in the clipboard.",
     screen_text_none: "No text found in the snip.",
     screen_text_no_lang: "Windows has no text-recognition language — add one in Settings → Time & language.",
+    clocks: "Clocks",
+    clocks_empty: "Add a time zone to see the time there.",
+    clock_add: "Add time zone",
+    clock_remove: "Remove clock",
+    clock_search: "Zone, e.g. Tokyo",
+    clock_unknown: "Time zone not found",
+    temperature: "Temperature",
     accents: ["Lime", "Violet", "Indigo", "Fuchsia", "Sky"],
 };
 
@@ -576,6 +597,24 @@ pub fn more_cards(lang: Lang, n: usize) -> String {
     match lang {
         Lang::Ru => format!("Ещё {n}"),
         Lang::En => format!("{n} more"),
+    }
+}
+
+/// Разница поясов словами: «+6 ч», «−1 ч 30 мин», «как здесь».
+pub fn time_diff(lang: Lang, minutes: i32) -> String {
+    if minutes == 0 {
+        return match lang {
+            Lang::Ru => "как здесь".into(),
+            Lang::En => "same as here".into(),
+        };
+    }
+    let sign = if minutes > 0 { "+" } else { "−" };
+    let (h, m) = (minutes.abs() / 60, minutes.abs() % 60);
+    match (lang, m) {
+        (Lang::Ru, 0) => format!("{sign}{h} ч"),
+        (Lang::Ru, _) => format!("{sign}{h} ч {m} мин"),
+        (Lang::En, 0) => format!("{sign}{h} h"),
+        (Lang::En, _) => format!("{sign}{h} h {m} min"),
     }
 }
 

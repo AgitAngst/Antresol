@@ -95,6 +95,8 @@ pub struct Settings {
     pub kamerton: String,
     /// Заготовки текста (карточка «Заготовки»): щелчок кладёт в буфер обмена.
     pub snippets: Vec<String>,
+    /// Часы других поясов (карточка «Часы»).
+    pub clocks: Vec<Clock>,
 }
 
 /// Заготовка в одну строку файла: `\\` — обратная косая, `\n` — перевод строки.
@@ -121,6 +123,16 @@ pub fn unescape(s: &str) -> String {
 
 /// Сколько заготовок держим.
 pub const MAX_SNIPPETS: usize = 30;
+
+/// Часы другого пояса: своё название и ключ пояса Windows («Tokyo Standard Time»).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Clock {
+    pub name: String,
+    pub zone: String,
+}
+
+/// Сколько часов держим.
+pub const MAX_CLOCKS: usize = 8;
 
 // ─── Профили экрана ─────────────────────────────────────────────────────────
 
@@ -308,6 +320,7 @@ impl Default for Settings {
             media_strip: false,
             kamerton: String::new(),
             snippets: Vec::new(),
+            clocks: Vec::new(),
         }
     }
 }
@@ -389,6 +402,14 @@ pub fn parse(text: &str) -> Settings {
             "media_strip" => s.media_strip = value == "true",
             "kamerton" => s.kamerton = value.to_string(),
             "snippet" if !value.is_empty() && s.snippets.len() < MAX_SNIPPETS => s.snippets.push(unescape(value)),
+            "clock" if s.clocks.len() < MAX_CLOCKS => {
+                if let Some((name, zone)) = value.split_once('|') {
+                    let (name, zone) = (name.trim(), zone.trim());
+                    if !name.is_empty() && !zone.is_empty() {
+                        s.clocks.push(Clock { name: name.replace('|', " "), zone: zone.to_string() });
+                    }
+                }
+            }
             "modules" => s.order = list(value),
             "hidden" => s.hidden = list(value),
             // Только похожее на «владелец/имя»: кривое из файла не идёт в адрес запроса.
@@ -450,6 +471,9 @@ pub fn format(s: &Settings) -> String {
     }
     for sn in &s.snippets {
         out.push_str(&format!("snippet={}\n", escape(sn)));
+    }
+    for c in &s.clocks {
+        out.push_str(&format!("clock={} | {}\n", c.name.replace(['|', '\n'], " "), c.zone));
     }
     out.push_str(&format!(
         "modules={}\nhidden={}\ngithub={}\n",
@@ -725,6 +749,7 @@ mod tests {
             media_strip: true,
             kamerton: r"C:\Demo\kamerton.exe".into(),
             snippets: vec!["Привет!\nСтрока 2".into(), r"C:\path\n".into(), "с пробелами внутри".into()],
+            clocks: vec![Clock { name: "Токио".into(), zone: "Tokyo Standard Time".into() }],
             ..Default::default()
         };
         let back = parse(&format(&s));

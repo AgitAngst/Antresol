@@ -41,6 +41,8 @@ pub struct Snapshot {
     pub net: Option<(f64, f64)>,
     /// Заряд 0..100 и от сети ли; `None` — батареи нет.
     pub battery: Option<(u8, bool)>,
+    /// Самая горячая тепловая зона ACPI, °C; `None` — Windows зон не отдаёт.
+    pub temp: Option<f32>,
     /// Диски: буква, свободно, всего.
     pub disks: Vec<(char, u64, u64)>,
 }
@@ -62,22 +64,66 @@ pub struct Sampler {
     demo_tick: u32,
     gpu: Option<(PDH_HQUERY, PDH_HCOUNTER)>,
     gpu_primed: bool,
+    thermal: Option<(PDH_HQUERY, PDH_HCOUNTER)>,
+}
+
+/// Запрос PDH с одним счётчиком (английское имя — не зависит от языка Windows).
+fn pdh_counter(path: PCWSTR) -> Option<(PDH_HQUERY, PDH_HCOUNTER)> {
+    unsafe {
+        let mut q = PDH_HQUERY::default();
+        let mut c = PDH_HCOUNTER::default();
+        (PdhOpenQueryW(PCWSTR::null(), 0, &mut q) == 0 && PdhAddEnglishCounterW(q, path, 0, &mut c) == 0)
+            .then_some((q, c))
+    }
+}
+
+/// Значения счётчика по всем экземплярам (годные: «данные верны» и «новые»). Пусто — `Some(vec![])`.
+fn counter_values(c: PDH_HCOUNTER) -> Option<Vec<f64>> {
+    unsafe {
+        // Первый вызов — размер буфера; пока между вызовами появились новые экземпляры (PDH_MORE_DATA),
+        // берём больше и пробуем снова.
+        let (mut size, mut count) = (0u32, 0u32);
+        let first = PdhGetFormattedCounterArrayW(c, PDH_FMT_DOUBLE, &mut size, &mut count, None);
+        if size == 0 {
+            return (first == PDH_MORE_DATA || first == 0).then(Vec::new);
+        }
+        for _ in 0..3 {
+            // Буфер в байтах: элементы и строки имён за ними.
+            let items = (size as usize).div_ceil(size_of::<PDH_FMT_COUNTERVALUE_ITEM_W>()) + 1;
+            let mut buf = vec![PDH_FMT_COUNTERVALUE_ITEM_W::default(); items];
+            match PdhGetFormattedCounterArrayW(c, PDH_FMT_DOUBLE, &mut size, &mut count, Some(buf.as_mut_ptr())) {
+                0 => {
+                    return Some(
+                        buf[..(count as usize).min(items)]
+                            .iter()
+                            .filter(|it| it.FmtValue.CStatus <= 1)
+                            .map(|it| it.FmtValue.Anonymous.doubleValue)
+                            .collect(),
+                    );
+                }
+                PDH_MORE_DATA => continue,
+                _ => return None,
+            }
+        }
+        None
+    }
+}
+
+/// Кельвины тепловых зон → самая горячая в °C; явно негодные (0 K, выше 150 °C) отбрасываются.
+pub fn hottest(kelvins: &[f64]) -> Option<f32> {
+    kelvins
+        .iter()
+        .map(|k| k - 273.15)
+        .filter(|c| *c > -50.0 && *c < 150.0)
+        .fold(None, |m: Option<f64>, c| Some(m.map_or(c, |m| m.max(c))))
+        .map(|c| c as f32)
 }
 
 impl Default for Sampler {
     fn default() -> Self {
-        let gpu = unsafe {
-            let mut q = PDH_HQUERY::default();
-            let mut c = PDH_HCOUNTER::default();
-            if PdhOpenQueryW(PCWSTR::null(), 0, &mut q) == 0
-                && PdhAddEnglishCounterW(q, w!(r"\GPU Engine(*engtype_3D)\Utilization Percentage"), 0, &mut c) == 0
-            {
-                Some((q, c))
-            } else {
-                None
-            }
-        };
-        Sampler { cpu: None, net: None, demo_tick: 0, gpu, gpu_primed: false }
+        let gpu = pdh_counter(w!(r"\GPU Engine(*engtype_3D)\Utilization Percentage"));
+        let thermal = pdh_counter(w!(r"\Thermal Zone Information(*)\Temperature"));
+        Sampler { cpu: None, net: None, demo_tick: 0, gpu, gpu_primed: false, thermal }
     }
 }
 
@@ -98,6 +144,9 @@ impl Sampler {
                 s.mem_used = m.ullTotalPhys.saturating_sub(m.ullAvailPhys);
             }
             s.gpu = self.gpu_share();
+            s.temp = self.thermal.and_then(|(q, c)| {
+                (PdhCollectQueryData(q) == 0).then(|| counter_values(c)).flatten().and_then(|v| hottest(&v))
+            });
             s.net = self.net_rate();
             let mut p = SYSTEM_POWER_STATUS::default();
             if GetSystemPowerStatus(&mut p).is_ok() && p.BatteryLifePercent <= 100 && p.BatteryFlag != 128 {
@@ -131,6 +180,7 @@ impl Sampler {
                 gpu: Some(0.12),
                 net: Some((2.4 * 1024.0 * 1024.0, 180.0 * 1024.0)),
                 battery: None,
+                temp: Some(46.0),
                 disks: vec![('C', 120 << 30, 500 << 30), ('D', 800 << 30, 2000 << 30)],
             };
         }
@@ -148,33 +198,9 @@ impl Sampler {
                 self.gpu_primed = true;
                 return None;
             }
-            // Первый вызов — размер буфера; пока между вызовами появились новые процессы (PDH_MORE_DATA),
-            // берём больше и пробуем снова.
-            let (mut size, mut count) = (0u32, 0u32);
-            let first = PdhGetFormattedCounterArrayW(c, PDH_FMT_DOUBLE, &mut size, &mut count, None);
-            if size == 0 {
-                // Нет ни одного процесса на видеокарте — 0 %; другая ошибка — не знаем.
-                return (first == PDH_MORE_DATA || first == 0).then_some(0.0);
-            }
-            for _ in 0..3 {
-                // Буфер в байтах: элементы и строки имён за ними.
-                let items = (size as usize).div_ceil(size_of::<PDH_FMT_COUNTERVALUE_ITEM_W>()) + 1;
-                let mut buf = vec![PDH_FMT_COUNTERVALUE_ITEM_W::default(); items];
-                match PdhGetFormattedCounterArrayW(c, PDH_FMT_DOUBLE, &mut size, &mut count, Some(buf.as_mut_ptr())) {
-                    0 => {
-                        // Годные значения — с состоянием «данные верны» (0) или «новые» (1).
-                        let sum: f64 = buf[..count as usize]
-                            .iter()
-                            .filter(|it| it.FmtValue.CStatus <= 1)
-                            .map(|it| it.FmtValue.Anonymous.doubleValue)
-                            .sum();
-                        return Some((sum / 100.0).clamp(0.0, 1.0) as f32);
-                    }
-                    PDH_MORE_DATA => continue,
-                    _ => return None,
-                }
-            }
-            None
+            // Нет ни одного процесса на видеокарте — 0 %.
+            let values = counter_values(c)?;
+            Some((values.iter().sum::<f64>() / 100.0).clamp(0.0, 1.0) as f32)
         }
     }
 
@@ -266,5 +292,18 @@ mod tests {
         assert_eq!(bytes(1536.0, true), "1,5 КБ");
         assert_eq!(bytes(5.0 * 1024.0 * 1024.0 * 1024.0, false), "5.0 GB");
         assert_eq!(bytes(250.0 * 1024.0 * 1024.0, false), "250 MB");
+    }
+}
+
+#[cfg(test)]
+mod thermal_tests {
+    use super::*;
+
+    #[test]
+    fn hottest_zone() {
+        assert_eq!(hottest(&[]), None);
+        assert_eq!(hottest(&[0.0]), None, "0 K — нет данных");
+        let t = hottest(&[300.15, 353.15, 500.0]).unwrap();
+        assert!((t - 80.0).abs() < 0.01, "500 K отброшено, самая горячая — 80 °C");
     }
 }

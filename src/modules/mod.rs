@@ -5,6 +5,7 @@ pub mod bluetooth;
 pub mod brightness;
 pub mod buttons;
 pub mod clipboard;
+pub mod clocks;
 pub mod display;
 pub mod github;
 pub mod media;
@@ -113,6 +114,7 @@ pub fn icon_of(key: &str) -> Icon {
         "quick" => Icon::Tiles,
         "snippets" => Icon::File,
         "tools" => Icon::Target,
+        "clocks" => Icon::Clock,
         _ => Icon::Rocket,
     }
 }
@@ -155,6 +157,7 @@ pub fn all() -> Vec<Box<dyn Module>> {
         Box::new(tools::Tools::default()),
         Box::new(bluetooth::Bluetooth::default()),
         Box::new(timers::Timers::default()),
+        Box::new(clocks::Clocks::default()),
         Box::new(github::Github::default()),
         Box::new(buttons::Buttons::default()),
     ]

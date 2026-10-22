@@ -13,6 +13,7 @@ pub mod nightlight;
 pub mod ocr;
 pub mod res;
 pub mod system;
+pub mod tz;
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};

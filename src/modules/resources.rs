@@ -120,6 +120,10 @@ impl Module for Resources {
                 let v = format!("↓ {}{per}  ↑ {}{per}", res::bytes(down, ru), res::bytes(up, ru));
                 meter(ui, t.network, &v, None);
             }
+            if let Some(c) = s.temp {
+                let v = format!("{c:.0} °C");
+                meter(ui, t.temperature, &v, None);
+            }
             if let Some((charge, plugged)) = s.battery {
                 let v = if plugged { format!("{charge}% · {}", t.plugged) } else { format!("{charge}%") };
                 meter(ui, t.battery, &v, Some(charge as f32 / 100.0));
