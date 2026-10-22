@@ -3,9 +3,11 @@
 
 pub mod brightness;
 pub mod buttons;
+pub mod clipboard;
 pub mod display;
 pub mod media;
 pub mod resources;
+pub mod tray;
 
 use anvil_ui::Tone;
 use eframe::egui::{self, Ui};
@@ -28,6 +30,8 @@ pub struct Ctx<'a> {
 /// Команда модулю извне карточки: например, клавиша профиля нажата при спрятанной панели.
 pub enum Command {
     ApplyProfile(usize),
+    /// Файлы бросили на панель (полные пути).
+    Dropped(Vec<String>),
 }
 
 pub trait Module {
@@ -54,6 +58,8 @@ pub trait Module {
         false
     }
     fn command(&mut self, _cmd: &Command, _cx: &mut Ctx) {}
+    /// Каждый кадр панели, даже спрятанной: дешёвая слежка (номер копирования буфера).
+    fn background(&mut self, _settings: &crate::config::Settings) {}
 }
 
 pub fn all() -> Vec<Box<dyn Module>> {
@@ -62,6 +68,8 @@ pub fn all() -> Vec<Box<dyn Module>> {
         Box::new(brightness::Brightness::default()),
         Box::new(media::Media::default()),
         Box::new(resources::Resources::default()),
+        Box::new(clipboard::Clipboard::default()),
+        Box::new(tray::Tray::default()),
         Box::new(buttons::Buttons::default()),
     ]
 }

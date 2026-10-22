@@ -10,7 +10,8 @@ python E:/dev_personal/tools/checks.py --repo . -j 4 fmt test clippy
 Тесты — логика показа/скрытия (`panel.rs`), разбор файлов (`config.rs`), выбор режима и масштаба
 (`modules/display.rs`, `sys/display.rs`), профили и сочетания клавиш (`config.rs`, `modules/display.rs`),
 коды клавиш (`sys/mod.rs`), входы DDC/CI (`sys/ddc.rs`), имя программы и мониторы (`sys/monitor.rs`), PNG
-снимка (`shot.rs`), ключ трека (`modules/media.rs`), ресурсы (`sys/res.rs` — в том числе настоящий замер этого ПК).
+снимка (`shot.rs`), ключ трека (`modules/media.rs`), ресурсы (`sys/res.rs` — в том числе настоящий замер этого ПК), история буфера
+(`modules/clipboard.rs`), лоток (`modules/tray.rs`).
 
 ## Живая проверка
 

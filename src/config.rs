@@ -69,6 +69,10 @@ pub struct Settings {
     pub exclude: Vec<String>,
     /// Своя клавиша показа панели; `None` — первая свободная из готовых.
     pub panel_hotkey: Option<Hotkey>,
+    /// Запоминать скопированные тексты (только в памяти, на диск не пишутся).
+    pub clipboard: bool,
+    /// Лоток файлов: полные пути, новые сверху.
+    pub tray: Vec<String>,
     /// Любимые разрешения, до трёх на монитор, в порядке добавления.
     pub favorites: Vec<Res>,
     /// Какая частота была у разрешения в последний раз — её и ставим, когда на него переходят.
@@ -250,6 +254,8 @@ impl Default for Settings {
             strip: true,
             exclude: Vec::new(),
             panel_hotkey: None,
+            clipboard: true,
+            tray: Vec::new(),
             favorites: Vec::new(),
             rates: Vec::new(),
             profiles: Vec::new(),
@@ -301,6 +307,8 @@ pub fn parse(text: &str) -> Settings {
                 s.exclude.dedup();
             }
             "panel_hotkey" => s.panel_hotkey = Hotkey::parse(value),
+            "clipboard" => s.clipboard = value != "false",
+            "tray" if !value.is_empty() && s.tray.len() < crate::modules::tray::KEEP => s.tray.push(value.to_string()),
             "favorite" => {
                 let words: Vec<&str> = value.split_whitespace().collect();
                 if let Some(r) = Res::parse(&words)
@@ -347,7 +355,10 @@ pub fn format(s: &Settings) -> String {
         s.hide_delay_ms,
         s.fullscreen_guard
     );
-    out.push_str(&format!("strip={}\nexclude={}\n", s.strip, s.exclude.join(",")));
+    out.push_str(&format!("strip={}\nexclude={}\nclipboard={}\n", s.strip, s.exclude.join(","), s.clipboard));
+    for t in &s.tray {
+        out.push_str(&format!("tray={t}\n"));
+    }
     if let Some(h) = &s.panel_hotkey {
         out.push_str(&format!("panel_hotkey={h}\n"));
     }
@@ -604,6 +615,8 @@ mod tests {
             exclude: vec!["game.exe".into(), "obs64.exe".into()],
             panel_hotkey: Hotkey::parse("Ctrl+Alt+Q"),
             monitor: ALL_MONITORS.into(),
+            clipboard: false,
+            tray: vec![r"C:\Demo\a.txt".into(), r"D:\b c.pdf".into()],
             ..Default::default()
         };
         let back = parse(&format(&s));

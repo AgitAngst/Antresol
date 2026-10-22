@@ -19,6 +19,8 @@ fn main() -> eframe::Result<()> {
         .with_always_on_top()
         .with_taskbar(false)
         .with_resizable(false)
+        // Файлы можно бросить на панель — в лоток.
+        .with_drag_and_drop(true)
         .with_inner_size([s.width, s.height])
         // До первого кадра — выше края экрана, чтобы не мелькнуть в углу.
         .with_position([0.0, -s.height - 100.0]);

@@ -226,6 +226,10 @@ impl App {
             self.monitors = monitor::monitors();
             self.monitors_at = Some(now);
         }
+        for module in &mut self.modules {
+            module.background(&self.settings);
+        }
+        self.take_dropped(ctx);
         let cursor = monitor::cursor();
         // «Все мониторы»: пока панель спрятана, она живёт у монитора под курсором.
         if self.settings.monitor == ALL_MONITORS
@@ -383,6 +387,29 @@ impl App {
     }
 
     /// Ждём сочетание для профиля: первая клавиша с Ctrl или Alt; Esc — отмена.
+    /// Файлы бросили на панель — отдать лотку.
+    fn take_dropped(&mut self, ctx: &egui::Context) {
+        let files: Vec<String> = ctx.input(|i| {
+            i.raw.dropped_files.iter().map(|f| f.path().display().to_string()).filter(|p| !p.is_empty()).collect()
+        });
+        if files.is_empty() {
+            return;
+        }
+        let t = texts::tr(self.lang());
+        let lang = self.lang();
+        let device = self.monitor().map(|m| m.device.clone()).unwrap_or_default();
+        let mut toasts = Vec::new();
+        let cmd = Command::Dropped(files);
+        for module in &mut self.modules {
+            let mut cx = Ctx { t, lang, monitor: &device, toasts: &mut toasts, settings: &mut self.settings };
+            module.command(&cmd, &mut cx);
+        }
+        for (text, tone) in toasts {
+            self.toasts.push(text, tone);
+        }
+        self.save();
+    }
+
     /// Ждём сочетание для показа панели: то же правило, что у профилей; сочетание профиля — нельзя.
     fn capture_panel_key(&mut self, ui: &Ui) {
         if !self.capture_panel {
@@ -701,6 +728,7 @@ impl App {
                 }
                 w::switch(ui, &mut self.settings.fullscreen_guard, t.fullscreen_guard);
                 w::switch(ui, &mut self.settings.strip, t.strip);
+                w::switch(ui, &mut self.settings.clipboard, t.clipboard_remember);
                 self.exclude_ui(ui);
                 ui.horizontal(|ui| {
                     ui.label(t.show_delay);

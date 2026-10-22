@@ -435,6 +435,7 @@ impl Module for Display {
                     self.apply_profile(&profile, cx);
                 }
             }
+            Command::Dropped(_) => {}
         }
     }
 
