@@ -10,8 +10,10 @@ pub mod github;
 pub mod media;
 pub mod quick;
 pub mod resources;
+pub mod snippets;
 pub mod sound;
 pub mod timers;
+pub mod tools;
 pub mod tray;
 
 use anvil_ui::{Icon, Tone};
@@ -109,6 +111,8 @@ pub fn icon_of(key: &str) -> Icon {
         "timers" => Icon::Clock,
         "github" => Icon::Branch,
         "quick" => Icon::Tiles,
+        "snippets" => Icon::File,
+        "tools" => Icon::Target,
         _ => Icon::Rocket,
     }
 }
@@ -146,7 +150,9 @@ pub fn all() -> Vec<Box<dyn Module>> {
         Box::new(sound::Sound::default()),
         Box::new(resources::Resources::default()),
         Box::new(clipboard::Clipboard::default()),
+        Box::new(snippets::Snippets),
         Box::new(tray::Tray::default()),
+        Box::new(tools::Tools::default()),
         Box::new(bluetooth::Bluetooth::default()),
         Box::new(timers::Timers::default()),
         Box::new(github::Github::default()),

@@ -93,7 +93,34 @@ pub struct Settings {
     pub media_strip: bool,
     /// Где лежит `kamerton.exe` — для «Запустить Kamerton» в карточке «Звук»; пусто — не знаем.
     pub kamerton: String,
+    /// Заготовки текста (карточка «Заготовки»): щелчок кладёт в буфер обмена.
+    pub snippets: Vec<String>,
 }
+
+/// Заготовка в одну строку файла: `\\` — обратная косая, `\n` — перевод строки.
+pub fn escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('\r', "").replace('\n', "\\n")
+}
+
+pub fn unescape(s: &str) -> String {
+    let mut out = String::new();
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some(other) => out.push(other),
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Сколько заготовок держим.
+pub const MAX_SNIPPETS: usize = 30;
 
 // ─── Профили экрана ─────────────────────────────────────────────────────────
 
@@ -280,6 +307,7 @@ impl Default for Settings {
             accent: crate::look::LIME.name.to_string(),
             media_strip: false,
             kamerton: String::new(),
+            snippets: Vec::new(),
         }
     }
 }
@@ -360,6 +388,7 @@ pub fn parse(text: &str) -> Settings {
             "accent" if crate::look::valid(value) => s.accent = value.to_lowercase(),
             "media_strip" => s.media_strip = value == "true",
             "kamerton" => s.kamerton = value.to_string(),
+            "snippet" if !value.is_empty() && s.snippets.len() < MAX_SNIPPETS => s.snippets.push(unescape(value)),
             "modules" => s.order = list(value),
             "hidden" => s.hidden = list(value),
             // Только похожее на «владелец/имя»: кривое из файла не идёт в адрес запроса.
@@ -418,6 +447,9 @@ pub fn format(s: &Settings) -> String {
     out.push_str(&format!("accent={}\nmedia_strip={}\n", s.accent, s.media_strip));
     if !s.kamerton.is_empty() {
         out.push_str(&format!("kamerton={}\n", s.kamerton));
+    }
+    for sn in &s.snippets {
+        out.push_str(&format!("snippet={}\n", escape(sn)));
     }
     out.push_str(&format!(
         "modules={}\nhidden={}\ngithub={}\n",
@@ -692,6 +724,7 @@ mod tests {
             accent: "#123456".into(),
             media_strip: true,
             kamerton: r"C:\Demo\kamerton.exe".into(),
+            snippets: vec!["Привет!\nСтрока 2".into(), r"C:\path\n".into(), "с пробелами внутри".into()],
             ..Default::default()
         };
         let back = parse(&format(&s));

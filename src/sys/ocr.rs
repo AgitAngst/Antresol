@@ -1,0 +1,196 @@
+// Текст с экрана: выделить область «Ножницами» (`ms-screenclip:` кладёт снимок в буфер обмена),
+// взять картинку из буфера (CF_DIB) и распознать текст Windows.Media.Ocr на языках профиля.
+// WinRT отвечает асинхронно — звать из потока модуля (после `media::init_thread`).
+
+use std::time::{Duration, Instant};
+
+use windows::Graphics::Imaging::{BitmapAlphaMode, BitmapPixelFormat, SoftwareBitmap};
+use windows::Media::Ocr::OcrEngine;
+use windows::Security::Cryptography::CryptographicBuffer;
+use windows::Win32::Foundation::HGLOBAL;
+use windows::Win32::System::DataExchange::{
+    CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
+};
+use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+use windows::Win32::System::Ole::CF_DIB;
+use windows::core::{Error, HRESULT, Result};
+
+const TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Картинка: ширина, высота и пиксели BGRA сверху вниз.
+pub struct Image {
+    pub width: u32,
+    pub height: u32,
+    pub bgra: Vec<u8>,
+}
+
+fn u32_at(b: &[u8], i: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(b.get(i..i + 4)?.try_into().ok()?))
+}
+
+fn u16_at(b: &[u8], i: usize) -> Option<u16> {
+    Some(u16::from_le_bytes(b.get(i..i + 2)?.try_into().ok()?))
+}
+
+/// CF_DIB (BITMAPINFOHEADER и пиксели) → BGRA сверху вниз. Только 24 и 32 бита без палитры.
+pub fn dib_to_bgra(b: &[u8]) -> Option<Image> {
+    let header = u32_at(b, 0)? as usize;
+    let width = i32::from_le_bytes(b.get(4..8)?.try_into().ok()?);
+    let height = i32::from_le_bytes(b.get(8..12)?.try_into().ok()?);
+    let bits = u16_at(b, 14)?;
+    let compression = u32_at(b, 16)?;
+    if width <= 0
+        || height == 0
+        || header < 40
+        || !(bits == 24 || bits == 32)
+        || !(compression == 0 || compression == 3)
+    {
+        return None;
+    }
+    // BI_BITFIELDS с заголовком 40 — за ним три маски.
+    let start = header + if compression == 3 && header == 40 { 12 } else { 0 };
+    let (w, h) = (width as usize, height.unsigned_abs() as usize);
+    let bpp = bits as usize / 8;
+    let stride = (w * bpp).div_ceil(4) * 4;
+    let pixels = b.get(start..start + stride * h)?;
+    let mut out = vec![0u8; w * h * 4];
+    for y in 0..h {
+        // Положительная высота — строки снизу вверх.
+        let src_y = if height > 0 { h - 1 - y } else { y };
+        let row = &pixels[src_y * stride..src_y * stride + w * bpp];
+        for x in 0..w {
+            let s = &row[x * bpp..x * bpp + 3];
+            let d = &mut out[(y * w + x) * 4..(y * w + x) * 4 + 4];
+            d.copy_from_slice(&[s[0], s[1], s[2], 255]);
+        }
+    }
+    Some(Image { width: w as u32, height: h as u32, bgra: out })
+}
+
+/// Картинка из буфера обмена; не картинка или буфер занят — `None`.
+pub fn clipboard_image() -> Option<Image> {
+    unsafe {
+        OpenClipboard(None).ok()?;
+        let img = (|| {
+            IsClipboardFormatAvailable(CF_DIB.0 as u32).ok()?;
+            let h = GetClipboardData(CF_DIB.0 as u32).ok()?;
+            let g = HGLOBAL(h.0);
+            let p = GlobalLock(g) as *const u8;
+            if p.is_null() {
+                return None;
+            }
+            let bytes = std::slice::from_raw_parts(p, GlobalSize(g)).to_vec();
+            let _ = GlobalUnlock(g);
+            dib_to_bgra(&bytes)
+        })();
+        let _ = CloseClipboard();
+        img
+    }
+}
+
+/// Распознать текст картинки; строки — через перевод строки.
+pub fn recognize(img: &Image) -> Result<String> {
+    let engine = OcrEngine::TryCreateFromUserProfileLanguages()?;
+    let buf = CryptographicBuffer::CreateFromByteArray(&img.bgra)?;
+    let bmp = SoftwareBitmap::CreateCopyWithAlphaFromBuffer(
+        &buf,
+        BitmapPixelFormat::Bgra8,
+        img.width as i32,
+        img.height as i32,
+        BitmapAlphaMode::Premultiplied,
+    )?;
+    let op = engine.RecognizeAsync(&bmp)?;
+    let start = Instant::now();
+    let result = loop {
+        match op.Status()?.0 {
+            0 if start.elapsed() < TIMEOUT => std::thread::sleep(Duration::from_millis(20)),
+            0 => {
+                let _ = op.Cancel();
+                break Err(Error::new(HRESULT(0x8000_0005u32 as i32), "ocr timed out"));
+            }
+            _ => break op.GetResults(),
+        }
+    }?;
+    let mut lines = Vec::new();
+    for l in result.Lines()? {
+        lines.push(l.Text()?.to_string());
+    }
+    Ok(lines.join("\n"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dib(w: i32, h: i32, bits: u16, pixels: &[u8]) -> Vec<u8> {
+        let mut b = vec![0u8; 40];
+        b[0..4].copy_from_slice(&40u32.to_le_bytes());
+        b[4..8].copy_from_slice(&w.to_le_bytes());
+        b[8..12].copy_from_slice(&h.to_le_bytes());
+        b[12..14].copy_from_slice(&1u16.to_le_bytes());
+        b[14..16].copy_from_slice(&bits.to_le_bytes());
+        b.extend_from_slice(pixels);
+        b
+    }
+
+    #[test]
+    fn bottom_up_24bit() {
+        // 2 × 2, строки по 6 байт + 2 выравнивания; снизу вверх: нижняя строка первая.
+        let px = [1, 2, 3, 4, 5, 6, 0, 0, 7, 8, 9, 10, 11, 12, 0, 0];
+        let img = dib_to_bgra(&dib(2, 2, 24, &px)).unwrap();
+        assert_eq!((img.width, img.height), (2, 2));
+        assert_eq!(&img.bgra[0..4], &[7, 8, 9, 255], "верхняя строка — вторая в файле");
+        assert_eq!(&img.bgra[12..16], &[4, 5, 6, 255]);
+    }
+
+    /// Живое распознавание: строка, нарисованная GDI в памяти (ни экран, ни буфер не трогаются).
+    /// Не в общем прогоне — `cargo test -- --ignored`.
+    #[test]
+    #[ignore]
+    fn recognizes_drawn_text() {
+        use windows::Win32::Graphics::Gdi::{
+            BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC,
+            DeleteObject, PatBlt, SelectObject, TextOutW, WHITENESS,
+        };
+        crate::sys::media::init_thread();
+        let (w, h) = (480i32, 80i32);
+        let info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w,
+                biHeight: -h,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let bgra = unsafe {
+            let dc = CreateCompatibleDC(None);
+            let mut bits = std::ptr::null_mut();
+            let bmp = CreateDIBSection(Some(dc), &info, DIB_RGB_COLORS, &mut bits, None, 0).unwrap();
+            let old = SelectObject(dc, bmp.into());
+            let _ = PatBlt(dc, 0, 0, w, h, WHITENESS);
+            let text: Vec<u16> = "ANTRESOL 2026".encode_utf16().collect();
+            let _ = TextOutW(dc, 20, 30, &text);
+            let px = std::slice::from_raw_parts(bits as *const u8, (w * h * 4) as usize).to_vec();
+            SelectObject(dc, old);
+            let _ = DeleteObject(bmp.into());
+            let _ = DeleteDC(dc);
+            px
+        };
+        let bgra: Vec<u8> = bgra.chunks(4).flat_map(|p| [p[0], p[1], p[2], 255]).collect();
+        let text = recognize(&Image { width: w as u32, height: h as u32, bgra }).unwrap();
+        assert!(text.to_uppercase().contains("ANTRESOL"), "распознано: {text:?}");
+    }
+
+    #[test]
+    fn top_down_32bit_and_rejects() {
+        let px = [1, 2, 3, 0, 4, 5, 6, 0];
+        let img = dib_to_bgra(&dib(2, -1, 32, &px)).unwrap();
+        assert_eq!(&img.bgra, &[1, 2, 3, 255, 4, 5, 6, 255]);
+        assert!(dib_to_bgra(&dib(2, 1, 8, &px)).is_none(), "палитра — нет");
+        assert!(dib_to_bgra(&dib(4, 4, 32, &px)).is_none(), "пикселей не хватает");
+    }
+}

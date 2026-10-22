@@ -8,8 +8,8 @@
 | `src/app.rs` | окно-панель: место у края, выезд, шапка с профилями, карточки модулей, настройки, «Свой цвет…», полоска (простая, с медиа, плашка таймера), ручки размера |
 | `src/look.rs` | цвет программы: пять готовых (лайм — по умолчанию) и свой — вывод под тему с контрастом 4,5:1, HSV, `accent=` |
 | `src/panel.rs` | логика «показана / спрятана» без окна (тесты) |
-| `src/modules/` | модули: `display.rs`, `brightness.rs`, `media.rs`, `resources.rs`, `clipboard.rs`, `tray.rs`, `bluetooth.rs`, `timers.rs`, `github.rs`, `buttons.rs`, `sound.rs`, `quick.rs` (быстрые настройки); общий `Module` в `mod.rs` |
-| `src/sys/` | Windows: `monitor.rs` (мониторы, курсор, полноэкранное), `display.rs` (режимы, масштаб), `ddc.rs` (DDC/CI; HMONITOR берётся из `Monitor::handle`), `media.rs` (медиа-сеансы WinRT, обложка через WIC), `kamerton.rs` (канал к Kamerton), `nightlight.rs` (ночной свет), `system.rs` («не спать», тема, уведомления, план питания), `net.rs` (Wi‑Fi, VPN), `res.rs` (ресурсы), `clip.rs` (буфер обмена), `bt.rs` (Bluetooth), `gh.rs` (GitHub по WinHTTP), `mod.rs` (запуск, горячая клавиша, автозапуск, скругление окна, цвет акцента Windows) |
+| `src/modules/` | модули: `display.rs`, `brightness.rs`, `media.rs`, `resources.rs`, `clipboard.rs`, `tray.rs`, `bluetooth.rs`, `timers.rs`, `github.rs`, `buttons.rs`, `sound.rs`, `quick.rs` (быстрые настройки), `snippets.rs`, `tools.rs` (пипетка, текст с экрана); общий `Module` в `mod.rs` |
+| `src/sys/` | Windows: `monitor.rs` (мониторы, курсор, полноэкранное), `display.rs` (режимы, масштаб), `ddc.rs` (DDC/CI; HMONITOR берётся из `Monitor::handle`), `media.rs` (медиа-сеансы WinRT, обложка через WIC), `kamerton.rs` (канал к Kamerton), `nightlight.rs` (ночной свет), `system.rs` («не спать», тема, уведомления, план питания), `net.rs` (Wi‑Fi, VPN), `ocr.rs` (картинка из буфера, распознавание текста), `res.rs` (ресурсы), `clip.rs` (буфер обмена), `bt.rs` (Bluetooth), `gh.rs` (GitHub по WinHTTP), `mod.rs` (запуск, горячая клавиша, автозапуск, скругление окна, цвет акцента Windows) |
 | `src/config.rs` | `config.txt` (в том числе профили `profile=`, избранное `favorite=`, частоты `rate=`, лоток `tray=`) и `buttons.txt` |
 | `src/texts.rs` | строки RU/EN |
 | `src/shot.rs` | `ANTRESOL_SHOT`: снимок своего окна в PNG (для документации) |
@@ -92,6 +92,11 @@
 - Wi‑Fi — WinRT `Windows.Devices.Radios` (`RequestAccessAsync`, `SetStateAsync`), имя сети —
   `NetworkInformation.GetInternetConnectionProfile`. VPN — RAS (`RasEnumEntriesW`, `RasEnumConnectionsW`),
   вкл/выкл — `rasdial имя [/disconnect]` без окна. Всё это — в потоке модуля «Быстрые настройки».
+- Пипетка — `GetPixel` экранного контекста (`GetDC(NULL)`) в точке курсора, пока тянут круг (окно держит мышь
+  с нажатой кнопкой и вне себя).
+- Текст с экрана — `ms-screenclip:`, ждём смены номера буфера и картинки `CF_DIB` (24/32 бита →
+  BGRA, `ocr::dib_to_bgra`), `OcrEngine.TryCreateFromUserProfileLanguages` → `RecognizeAsync` по
+  `SoftwareBitmap` из буфера байтов; текст — в буфер. В потоке модуля «Инструменты».
 - Звук — через Kamerton: именованный канал `\\.\pipe\kamerton-ipc`, одна строка запроса (`state`, `volume`,
   `mute`, `app-volume`, `app-mute`, `open`; поля через табуляцию), ответ до закрытия канала (`sys::kamerton`).
   Канала нет — «не запущен». Запросы — в потоке модуля «Звук»; скопившиеся громкости одной цели сводятся к

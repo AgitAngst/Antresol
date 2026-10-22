@@ -10,6 +10,7 @@ pub mod media;
 pub mod monitor;
 pub mod net;
 pub mod nightlight;
+pub mod ocr;
 pub mod res;
 pub mod system;
 

@@ -1,6 +1,6 @@
 [package]
 name = "antresol"
-version = "1.5.0"
+version = "1.6.0"
 edition = "2024"
 description = "Quick-access panel at the top edge of the monitor"
 license = "MIT"
@@ -22,7 +22,11 @@ windows = { version = "0.62.2", features = [
     "Devices_Radios",
     "Foundation",
     "Foundation_Collections",
+    "Globalization",
+    "Graphics_Imaging",
+    "Media_Ocr",
     "Networking_Connectivity",
+    "Security_Cryptography",
     "Media_Control",
     "Storage_Streams",
     "Win32_Foundation",

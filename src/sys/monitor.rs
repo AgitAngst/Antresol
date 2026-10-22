@@ -1,7 +1,9 @@
 // Мониторы и курсор в пикселях экрана: где край, куда упёрлась мышь, не идёт ли игра во весь экран.
 
 use windows::Win32::Foundation::{LPARAM, POINT, RECT};
-use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFOEXW};
+use windows::Win32::Graphics::Gdi::{
+    CLR_INVALID, EnumDisplayMonitors, GetDC, GetMonitorInfoW, GetPixel, HDC, HMONITOR, MONITORINFOEXW, ReleaseDC,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetClassNameW, GetCursorPos, GetDesktopWindow, GetForegroundWindow, GetShellWindow, GetWindowRect,
     MONITORINFOF_PRIMARY,
@@ -47,6 +49,20 @@ pub fn cursor() -> (i32, i32) {
     let mut p = POINT::default();
     let _ = unsafe { GetCursorPos(&mut p) };
     (p.x, p.y)
+}
+
+/// Цвет пикселя экрана в точке (физические пиксели) как (r, g, b); не прочитать — `None`.
+pub fn pixel_at(x: i32, y: i32) -> Option<(u8, u8, u8)> {
+    unsafe {
+        let dc = GetDC(None);
+        if dc.is_invalid() {
+            return None;
+        }
+        let c = GetPixel(dc, x, y);
+        ReleaseDC(None, dc);
+        // COLORREF — 0x00BBGGRR.
+        (c.0 != CLR_INVALID).then_some((c.0 as u8, (c.0 >> 8) as u8, (c.0 >> 16) as u8))
+    }
 }
 
 unsafe extern "system" fn collect(h: HMONITOR, _: HDC, _: *mut RECT, data: LPARAM) -> BOOL {

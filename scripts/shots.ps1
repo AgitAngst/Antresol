@@ -19,13 +19,16 @@ $scenes = @(
   @{ n = "color-dark-ru";    lang = "ru"; theme = "dark";  view = "color" },
   @{ n = "color-light-en";   lang = "en"; theme = "light"; view = "color" },
   @{ n = "strip-media-dark"; lang = "ru"; theme = "dark";  view = "strip-media" },
-  @{ n = "strip-banner-light"; lang = "en"; theme = "light"; view = "strip-banner" }
+  @{ n = "strip-banner-light"; lang = "en"; theme = "light"; view = "strip-banner" },
+  @{ n = "cards2-dark-ru"; lang = "ru"; theme = "dark"; view = ""; extra = @("modules=quick,sound,snippets,tools,display") },
+  @{ n = "cards2-light-en"; lang = "en"; theme = "light"; view = ""; extra = @("modules=quick,sound,snippets,tools,display") }
 )
 foreach ($s in $scenes) {
   if ($Only -and $s.n -ne $Only) { continue }
   $cfg = @("lang=$($s.lang)", "theme=$($s.theme)", "width=1300", "height=340", "monitor=\\.\DISPLAY1",
     "favorite=\\.\DISPLAY1 2560x1440", "favorite=\\.\DISPLAY1 1920x1080", "favorite=\\.\DISPLAY1 3840x2160",
     "rate=\\.\DISPLAY1 1920x1080 240", "rate=\\.\DISPLAY1 2560x1440 144") + $profiles
+  if ($s.extra) { $cfg += $s.extra }
   [IO.File]::WriteAllLines("$app\Antresol\config.txt", [string[]]$cfg, (New-Object Text.UTF8Encoding($false)))
   $env:APPDATA = $app
   $env:ANTRESOL_DEMO = "1"
