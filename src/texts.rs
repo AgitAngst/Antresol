@@ -54,6 +54,13 @@ pub struct Tr {
     pub exclude_none: &'static str,
     pub exclude_remove: &'static str,
     pub key_auto: &'static str,
+    pub resources: &'static str,
+    pub cpu: &'static str,
+    pub gpu: &'static str,
+    pub memory: &'static str,
+    pub network: &'static str,
+    pub battery: &'static str,
+    pub plugged: &'static str,
     pub answer_first: &'static str,
     pub mode_unavailable: &'static str,
     pub keep_title: &'static str,
@@ -134,6 +141,13 @@ const RU: Tr = Tr {
     exclude_none: "Список пуст — над любой программой панель выезжает.",
     exclude_remove: "Убрать из списка",
     key_auto: "Как по умолчанию",
+    resources: "Ресурсы",
+    cpu: "Процессор",
+    gpu: "Видеокарта",
+    memory: "Память",
+    network: "Сеть",
+    battery: "Батарея",
+    plugged: "от сети",
     answer_first: "Сначала ответьте на «Оставить этот режим?»",
     mode_unavailable: "Режима из профиля у монитора нет — он пропущен",
     keep_title: "Оставить этот режим?",
@@ -214,6 +228,13 @@ const EN: Tr = Tr {
     exclude_none: "The list is empty — the panel slides out over any app.",
     exclude_remove: "Remove from the list",
     key_auto: "Use the default",
+    resources: "Resources",
+    cpu: "CPU",
+    gpu: "GPU",
+    memory: "Memory",
+    network: "Network",
+    battery: "Battery",
+    plugged: "plugged in",
     answer_first: "Answer “Keep this display mode?” first",
     mode_unavailable: "The monitor has no such mode — skipped",
     keep_title: "Keep this display mode?",
@@ -298,5 +319,13 @@ pub fn key_is_profile(lang: Lang, name: &str) -> String {
     match lang {
         Lang::Ru => format!("Это сочетание у профиля «{name}» — выберите другое"),
         Lang::En => format!("This shortcut belongs to the profile “{name}” — pick another one"),
+    }
+}
+
+/// «свободно 120 ГБ из 500 ГБ».
+pub fn disk_free(lang: Lang, free: &str, total: &str) -> String {
+    match lang {
+        Lang::Ru => format!("свободно {free} из {total}"),
+        Lang::En => format!("{free} free of {total}"),
     }
 }

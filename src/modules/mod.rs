@@ -5,6 +5,7 @@ pub mod brightness;
 pub mod buttons;
 pub mod display;
 pub mod media;
+pub mod resources;
 
 use anvil_ui::Tone;
 use eframe::egui::{self, Ui};
@@ -60,6 +61,7 @@ pub fn all() -> Vec<Box<dyn Module>> {
         Box::new(display::Display::default()),
         Box::new(brightness::Brightness::default()),
         Box::new(media::Media::default()),
+        Box::new(resources::Resources::default()),
         Box::new(buttons::Buttons::default()),
     ]
 }

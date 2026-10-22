@@ -7,8 +7,8 @@
 | `src/main.rs` | окно: без рамки, поверх всех, без кнопки на панели задач |
 | `src/app.rs` | окно-панель: место у края, выезд, шапка, карточки модулей, настройки, ручки размера |
 | `src/panel.rs` | логика «показана / спрятана» без окна (тесты) |
-| `src/modules/` | модули: `display.rs`, `brightness.rs`, `media.rs`, `buttons.rs`; общий `Module` в `mod.rs` |
-| `src/sys/` | Windows: `monitor.rs` (мониторы, курсор, полноэкранное), `display.rs` (режимы, масштаб), `ddc.rs` (DDC/CI; HMONITOR берётся из `Monitor::handle`), `media.rs` (медиа-сеансы WinRT, обложка через WIC), `mod.rs` (запуск, горячая клавиша, автозапуск, скругление окна) |
+| `src/modules/` | модули: `display.rs`, `brightness.rs`, `media.rs`, `resources.rs`, `buttons.rs`; общий `Module` в `mod.rs` |
+| `src/sys/` | Windows: `monitor.rs` (мониторы, курсор, полноэкранное), `display.rs` (режимы, масштаб), `ddc.rs` (DDC/CI; HMONITOR берётся из `Monitor::handle`), `media.rs` (медиа-сеансы WinRT, обложка через WIC), `res.rs` (ресурсы), `mod.rs` (запуск, горячая клавиша, автозапуск, скругление окна) |
 | `src/config.rs` | `config.txt` (в том числе профили `profile=`, избранное `favorite=`, частоты `rate=`) и `buttons.txt` |
 | `src/texts.rs` | строки RU/EN |
 | `src/shot.rs` | `ANTRESOL_SHOT`: снимок своего окна в PNG (для документации) |
@@ -48,6 +48,9 @@
 - Медиа — WinRT `GlobalSystemMediaTransportControlsSessionManager`: текущий сеанс, его свойства и
   кнопки; ответы асинхронные, поток модуля ждёт их не дольше 2 с (дольше — отмена) в своей квартире COM (MTA). Обложка —
   поток картинки сеанса → `CreateStreamOverRandomAccessStream` → WIC → RGBA, только при смене трека.
+- Ресурсы — `GetSystemTimes` (процессор по разнице двух замеров), `GlobalMemoryStatusEx`, счётчик PDH
+  `\GPU Engine(*engtype_3D)\Utilization Percentage` (сумма по процессам), `GetIfTable2` (только подключённые
+  аппаратные адаптеры, без фильтров), `GetSystemPowerStatus`, `GetDiskFreeSpaceExW` по несъёмным дискам.
 - Автозапуск — строка `Antresol` в `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
 
 ## Как добавить модуль

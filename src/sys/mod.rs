@@ -4,6 +4,7 @@ pub mod ddc;
 pub mod display;
 pub mod media;
 pub mod monitor;
+pub mod res;
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};

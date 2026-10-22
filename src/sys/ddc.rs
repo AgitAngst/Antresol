@@ -83,6 +83,19 @@ pub fn read(device: &str, handle: usize, with_caps: bool) -> Vec<Physical> {
                 let end = desc.iter().position(|&c| c == 0).unwrap_or(desc.len());
                 let name =
                     if super::demo() { "Monitor 27".to_string() } else { String::from_utf16_lossy(&desc[..end]) };
+                if super::demo() {
+                    // Для снимков — выдуманный монитор: значения и входы не настоящие.
+                    let f = |current| Some(Feature { current, max: 100 });
+                    return Physical {
+                        device: device.to_string(),
+                        index,
+                        name,
+                        brightness: f(70),
+                        contrast: f(50),
+                        input: Some(0x11),
+                        inputs: if with_caps { vec![0x11, 0x0F] } else { Vec::new() },
+                    };
+                }
                 Physical {
                     device: device.to_string(),
                     index,
