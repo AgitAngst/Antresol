@@ -16,6 +16,8 @@ use windows::Win32::System::Ole::CF_DIB;
 use windows::core::{Error, HRESULT, Result};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
+/// Наибольшая сторона картинки из буфера, пикселей.
+const MAX_SIDE: usize = 16_384;
 
 /// Картинка: ширина, высота и пиксели BGRA сверху вниз.
 pub struct Image {
@@ -50,10 +52,14 @@ pub fn dib_to_bgra(b: &[u8]) -> Option<Image> {
     // BI_BITFIELDS с заголовком 40 — за ним три маски.
     let start = header + if compression == 3 && header == 40 { 12 } else { 0 };
     let (w, h) = (width as usize, height.unsigned_abs() as usize);
+    // Чужие данные: размеры с запасом под любой снимок экрана, без переполнений.
+    if w > MAX_SIDE || h > MAX_SIDE {
+        return None;
+    }
     let bpp = bits as usize / 8;
-    let stride = (w * bpp).div_ceil(4) * 4;
-    let pixels = b.get(start..start + stride * h)?;
-    let mut out = vec![0u8; w * h * 4];
+    let stride = w.checked_mul(bpp)?.div_ceil(4) * 4;
+    let pixels = b.get(start..start.checked_add(stride.checked_mul(h)?)?)?;
+    let mut out = vec![0u8; w.checked_mul(h)?.checked_mul(4)?];
     for y in 0..h {
         // Положительная высота — строки снизу вверх.
         let src_y = if height > 0 { h - 1 - y } else { y };
@@ -81,16 +87,39 @@ pub fn clipboard_image() -> Option<Image> {
             }
             let bytes = std::slice::from_raw_parts(p, GlobalSize(g)).to_vec();
             let _ = GlobalUnlock(g);
-            dib_to_bgra(&bytes)
+            Some(bytes)
         })();
         let _ = CloseClipboard();
-        img
+        // Разбор — уже после закрытия буфера: что бы ни случилось, буфер не остаётся занятым.
+        img.and_then(|b| dib_to_bgra(&b))
     }
+}
+
+/// Нет языка распознавания в Windows (`recognize` отвечает этой ошибкой).
+pub const NO_LANGUAGE: &str = "no-ocr-language";
+
+/// Уменьшить картинку целым шагом, чтобы стороны были не больше `max` (ближайший пиксель).
+pub fn fit(img: &Image, max: u32) -> Image {
+    let step = img.width.max(img.height).div_ceil(max.max(1)).max(1);
+    if step == 1 {
+        return Image { width: img.width, height: img.height, bgra: img.bgra.clone() };
+    }
+    let (w, h) = (img.width / step, img.height / step);
+    let mut bgra = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            let i = (((y * step) * img.width + x * step) * 4) as usize;
+            bgra.extend_from_slice(&img.bgra[i..i + 4]);
+        }
+    }
+    Image { width: w, height: h, bgra }
 }
 
 /// Распознать текст картинки; строки — через перевод строки.
 pub fn recognize(img: &Image) -> Result<String> {
-    let engine = OcrEngine::TryCreateFromUserProfileLanguages()?;
+    let engine = OcrEngine::TryCreateFromUserProfileLanguages()
+        .map_err(|_| Error::new(HRESULT(0x8000_4005u32 as i32), NO_LANGUAGE))?;
+    let img = fit(img, OcrEngine::MaxImageDimension().unwrap_or(4096));
     let buf = CryptographicBuffer::CreateFromByteArray(&img.bgra)?;
     let bmp = SoftwareBitmap::CreateCopyWithAlphaFromBuffer(
         &buf,
@@ -192,5 +221,9 @@ mod tests {
         assert_eq!(&img.bgra, &[1, 2, 3, 255, 4, 5, 6, 255]);
         assert!(dib_to_bgra(&dib(2, 1, 8, &px)).is_none(), "палитра — нет");
         assert!(dib_to_bgra(&dib(4, 4, 32, &px)).is_none(), "пикселей не хватает");
+        assert!(dib_to_bgra(&dib(0x7fff_ffff, i32::MIN, 32, &px)).is_none(), "поддельные размеры");
+        let big = Image { width: 10, height: 4, bgra: vec![7; 160] };
+        let small = fit(&big, 5);
+        assert_eq!((small.width, small.height, small.bgra.len()), (5, 2, 40));
     }
 }

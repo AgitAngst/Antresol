@@ -69,16 +69,31 @@ fn set(snip: &Mutex<Snip>, v: Snip) {
 fn worker(rx: Receiver<()>, snip: Arc<Mutex<Snip>>) {
     sys::media::init_thread();
     while rx.recv().is_ok() {
+        // Сбой внутри (чужие данные в буфере) не убивает поток: карточка покажет ошибку.
+        let s = snip.clone();
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| one_snip(&s))).is_err() {
+            set(&snip, Snip::Failed("internal error".into()));
+        }
+    }
+}
+
+/// Ждём ли ещё снимка (не отменили).
+fn waiting(snip: &Mutex<Snip>) -> bool {
+    *snip.lock().unwrap_or_else(|e| e.into_inner()) == Snip::Waiting
+}
+
+fn one_snip(snip: &Mutex<Snip>) {
+    {
         // Дать панели уехать, чтобы она не попала в снимок.
         std::thread::sleep(Duration::from_millis(500));
         let before = clip::sequence();
         if let Err(e) = sys::launch("ms-screenclip:", "") {
-            set(&snip, Snip::Failed(e));
-            continue;
+            set(snip, Snip::Failed(e));
+            return;
         }
         let start = Instant::now();
         let image = loop {
-            if start.elapsed() > SNIP_WAIT {
+            if start.elapsed() > SNIP_WAIT || !waiting(snip) {
                 break None;
             }
             std::thread::sleep(Duration::from_millis(300));
@@ -89,16 +104,18 @@ fn worker(rx: Receiver<()>, snip: Arc<Mutex<Snip>>) {
             }
         };
         let Some(img) = image else {
-            set(&snip, Snip::Idle);
-            continue;
+            if waiting(snip) {
+                set(snip, Snip::Idle);
+            }
+            return;
         };
         match ocr::recognize(&img) {
             Ok(text) if !text.trim().is_empty() => {
                 let _ = clip::write_text(&text);
-                set(&snip, Snip::Done(text));
+                set(snip, Snip::Done(text));
             }
-            Ok(_) => set(&snip, Snip::Failed(String::new())),
-            Err(e) => set(&snip, Snip::Failed(e.message())),
+            Ok(_) => set(snip, Snip::Failed(String::new())),
+            Err(e) => set(snip, Snip::Failed(e.message())),
         }
     }
 }
@@ -190,6 +207,9 @@ impl Tools {
                 w::spinner(ui, 16.0);
                 w::note(ui, t.screen_text_wait);
             });
+            if w::button(ui, Kind::Ghost, None, t.cancel).clicked() {
+                set(&self.snip, Snip::Idle);
+            }
             return;
         }
         if w::button(ui, Kind::Secondary, Some(Icon::Search), t.screen_text_pick).clicked() && !sys::demo() {
@@ -206,6 +226,9 @@ impl Tools {
             }
             Snip::Failed(e) if e.is_empty() => {
                 w::note(ui, t.screen_text_none);
+            }
+            Snip::Failed(e) if e == ocr::NO_LANGUAGE => {
+                w::note(ui, t.screen_text_no_lang);
             }
             Snip::Failed(e) => {
                 w::note(ui, format!("{}: {e}", t.failed));

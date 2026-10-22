@@ -182,6 +182,7 @@ pub struct Tr {
     pub screen_text_wait: &'static str,
     pub screen_text_done: &'static str,
     pub screen_text_none: &'static str,
+    pub screen_text_no_lang: &'static str,
     pub accents: [&'static str; 5],
 }
 
@@ -365,6 +366,7 @@ const RU: Tr = Tr {
     screen_text_wait: "Выделите область на экране…",
     screen_text_done: "Текст в буфере обмена.",
     screen_text_none: "Текст на снимке не найден.",
+    screen_text_no_lang: "В Windows нет языка для распознавания текста — добавьте его в «Параметры → Время и язык».",
     accents: ["Лайм", "Фиолетовый", "Индиго", "Фуксия", "Лазурь"],
 };
 
@@ -548,6 +550,7 @@ const EN: Tr = Tr {
     screen_text_wait: "Select an area on the screen…",
     screen_text_done: "The text is in the clipboard.",
     screen_text_none: "No text found in the snip.",
+    screen_text_no_lang: "Windows has no text-recognition language — add one in Settings → Time & language.",
     accents: ["Lime", "Violet", "Indigo", "Fuchsia", "Sky"],
 };
 
