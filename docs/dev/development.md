@@ -13,7 +13,8 @@ python E:/dev_personal/tools/checks.py --repo . -j 4 fmt test clippy
 снимка (`shot.rs`), ключ трека (`modules/media.rs`), ресурсы (`sys/res.rs` — в том числе настоящий замер этого ПК), история буфера
 (`modules/clipboard.rs`), лоток (`modules/tray.rs`), порядок карточек (`config.rs`),
 адреса Bluetooth и настоящий опрос (`sys/bt.rs`),
-таймеры и «помидор» (`modules/timers.rs`).
+таймеры и «помидор» (`modules/timers.rs`), разбор ответов GitHub и время (`sys/gh.rs`,
+`modules/github.rs`). Сеть — отдельно: `cargo test -- --ignored` читает открытый репозиторий панели.
 
 ## Живая проверка
 

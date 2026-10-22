@@ -6,6 +6,7 @@ pub mod brightness;
 pub mod buttons;
 pub mod clipboard;
 pub mod display;
+pub mod github;
 pub mod media;
 pub mod resources;
 pub mod timers;
@@ -78,6 +79,7 @@ pub fn all() -> Vec<Box<dyn Module>> {
         Box::new(tray::Tray::default()),
         Box::new(bluetooth::Bluetooth::default()),
         Box::new(timers::Timers::default()),
+        Box::new(github::Github::default()),
         Box::new(buttons::Buttons::default()),
     ]
 }

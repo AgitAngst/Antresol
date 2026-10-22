@@ -94,6 +94,11 @@ pub struct Tr {
     pub timer_cancel: &'static str,
     pub timer_pause: &'static str,
     pub timer_resume: &'static str,
+    pub github: &'static str,
+    pub github_none: &'static str,
+    pub github_no_runs: &'static str,
+    pub github_add: &'static str,
+    pub github_remove: &'static str,
     pub answer_first: &'static str,
     pub mode_unavailable: &'static str,
     pub keep_title: &'static str,
@@ -214,6 +219,11 @@ const RU: Tr = Tr {
     timer_cancel: "Убрать таймер",
     timer_pause: "Пауза",
     timer_resume: "Дальше",
+    github: "GitHub",
+    github_none: "Добавьте репозиторий: «владелец/имя».",
+    github_no_runs: "Прогонов CI нет",
+    github_add: "Добавить",
+    github_remove: "Убрать репозиторий",
     answer_first: "Сначала ответьте на «Оставить этот режим?»",
     mode_unavailable: "Режима из профиля у монитора нет — он пропущен",
     keep_title: "Оставить этот режим?",
@@ -334,6 +344,11 @@ const EN: Tr = Tr {
     timer_cancel: "Remove the timer",
     timer_pause: "Pause",
     timer_resume: "Resume",
+    github: "GitHub",
+    github_none: "Add a repository: “owner/name”.",
+    github_no_runs: "No CI runs",
+    github_add: "Add",
+    github_remove: "Remove the repository",
     answer_first: "Answer “Keep this display mode?” first",
     mode_unavailable: "The monitor has no such mode — skipped",
     keep_title: "Keep this display mode?",
@@ -434,5 +449,74 @@ pub fn minutes(lang: Lang, n: u64) -> String {
     match lang {
         Lang::Ru => format!("{n} мин"),
         Lang::En => format!("{n} min"),
+    }
+}
+
+/// «PR 2».
+pub fn prs(_lang: Lang, n: usize) -> String {
+    format!("PR {n}")
+}
+
+/// «12 мин назад», «3 ч назад», «2 дн назад».
+pub fn ago(lang: Lang, secs: i64) -> String {
+    let s = secs.max(0);
+    let (n, ru, en) = if s < 60 {
+        return match lang {
+            Lang::Ru => "только что".into(),
+            Lang::En => "just now".into(),
+        };
+    } else if s < 3600 {
+        (s / 60, "мин", "min")
+    } else if s < 86400 {
+        (s / 3600, "ч", "h")
+    } else {
+        (s / 86400, "дн", "d")
+    };
+    match lang {
+        Lang::Ru => format!("{n} {ru} назад"),
+        Lang::En => format!("{n} {en} ago"),
+    }
+}
+
+/// Состояние прогона словами.
+pub fn run_state(lang: Lang, status: &str, conclusion: &str) -> String {
+    let (ru, en) = match (status, conclusion) {
+        ("completed", "success") => ("прошёл", "passed"),
+        ("completed", "failure") => ("упал", "failed"),
+        ("completed", "cancelled") => ("отменён", "cancelled"),
+        ("completed", "timed_out") => ("не успел", "timed out"),
+        ("completed", "skipped") => ("пропущен", "skipped"),
+        ("completed", _) => ("закончен", "finished"),
+        ("queued" | "waiting" | "pending" | "requested", _) => ("в очереди", "queued"),
+        _ => ("идёт", "running"),
+    };
+    match lang {
+        Lang::Ru => ru.into(),
+        Lang::En => en.into(),
+    }
+}
+
+/// Ошибка чтения репозитория: код ответа GitHub или сеть.
+pub fn github_error(lang: Lang, e: &str) -> String {
+    match (lang, e) {
+        (Lang::Ru, "404") => "Не найден (или закрытый — нужен токен)".into(),
+        (Lang::En, "404") => "Not found (or private — a token is needed)".into(),
+        (Lang::Ru, "403" | "429") => "GitHub ограничил запросы — позже".into(),
+        (Lang::En, "403" | "429") => "GitHub rate limit — later".into(),
+        (Lang::Ru, other) => format!("Не прочитать: {other}"),
+        (Lang::En, other) => format!("Cannot read: {other}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ago_words() {
+        assert_eq!(ago(Lang::Ru, 30), "только что");
+        assert_eq!(ago(Lang::Ru, 12 * 60), "12 мин назад");
+        assert_eq!(ago(Lang::En, 3 * 3600 + 5), "3 h ago");
+        assert_eq!(ago(Lang::Ru, 2 * 86400), "2 дн назад");
     }
 }

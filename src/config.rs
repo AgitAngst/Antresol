@@ -77,6 +77,10 @@ pub struct Settings {
     pub order: Vec<String>,
     /// Выключенные карточки (ключи модулей).
     pub hidden: Vec<String>,
+    /// Репозитории GitHub для карточки «GitHub»: `владелец/имя`.
+    pub github: Vec<String>,
+    /// Свой токен GitHub (вписывает владелец сам) — для закрытых репозиториев и большего лимита.
+    pub github_token: Option<String>,
     /// Любимые разрешения, до трёх на монитор, в порядке добавления.
     pub favorites: Vec<Res>,
     /// Какая частота была у разрешения в последний раз — её и ставим, когда на него переходят.
@@ -262,6 +266,8 @@ impl Default for Settings {
             tray: Vec::new(),
             order: Vec::new(),
             hidden: Vec::new(),
+            github: Vec::new(),
+            github_token: None,
             favorites: Vec::new(),
             rates: Vec::new(),
             profiles: Vec::new(),
@@ -344,6 +350,11 @@ pub fn parse(text: &str) -> Settings {
             "clipboard" => s.clipboard = value != "false",
             "modules" => s.order = list(value),
             "hidden" => s.hidden = list(value),
+            // Только похожее на «владелец/имя»: кривое из файла не идёт в адрес запроса.
+            "github" => {
+                s.github = list(value).into_iter().filter(|r| crate::modules::github::valid_repo(r)).collect();
+            }
+            "github_token" => s.github_token = Some(value.to_string()).filter(|t| !t.is_empty()),
             "tray" if !value.is_empty() && s.tray.len() < crate::modules::tray::KEEP => s.tray.push(value.to_string()),
             "favorite" => {
                 let words: Vec<&str> = value.split_whitespace().collect();
@@ -392,7 +403,15 @@ pub fn format(s: &Settings) -> String {
         s.fullscreen_guard
     );
     out.push_str(&format!("strip={}\nexclude={}\nclipboard={}\n", s.strip, s.exclude.join(","), s.clipboard));
-    out.push_str(&format!("modules={}\nhidden={}\n", s.order.join(","), s.hidden.join(",")));
+    out.push_str(&format!(
+        "modules={}\nhidden={}\ngithub={}\n",
+        s.order.join(","),
+        s.hidden.join(","),
+        s.github.join(",")
+    ));
+    if let Some(t) = &s.github_token {
+        out.push_str(&format!("github_token={t}\n"));
+    }
     for t in &s.tray {
         out.push_str(&format!("tray={t}\n"));
     }
@@ -672,6 +691,9 @@ mod tests {
         assert_eq!(arrange(&keys, &[], &[]), vec![(0, true), (1, true), (2, true)]);
         let twice = vec!["media".to_string(), "display".into(), "media".into()];
         assert_eq!(arrange(&keys, &twice, &[]), vec![(1, true), (0, true), (2, true)], "повтор не через соседа");
+        let g = parse("github=a/b, c/d\ngithub_token=\n");
+        assert_eq!(g.github, ["a/b", "c/d"]);
+        assert_eq!(g.github_token, None, "пустой токен — нет токена");
         let s = parse("modules=a, b,a,,c\nhidden=b\n");
         assert_eq!(s.order, ["a", "b", "c"]);
         assert_eq!(parse(&format(&s)), s);

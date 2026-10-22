@@ -72,6 +72,11 @@
 Изменение OpenSpec `timers`. Быстрые таймеры и «помидор»; дошёл — уведомление и выезд панели. Не вошло:
 напоминания по времени суток, календарь (без учётной записи Windows событий не отдаёт).
 
+## Этап 1.1 — состояние GitHub (сделан 22.10.2026)
+
+Изменение OpenSpec `github`. Карточка «GitHub»: последний прогон CI и открытые пулл-реквесты, только
+чтение. Не вошло: список PR по названиям, уведомления о смене состояния.
+
 ## Кандидаты этапов — по аналогам (22.10.2026, не согласованы, порядок решит владелец)
 
 Собраны по программам, которые обсуждают в r/software и r/Windows11 (сам Reddit прочитать не удалось —
@@ -94,7 +99,7 @@
 | ✓ 0.9 (стрелками, без «только значки») | Режим правки | Перетаскивать модули, включать и выключать, показывать только значки | [Command Palette Dock](https://windowslatest.com/2026/02/07/windows-11-is-testing-an-optional-dock-that-sits-on-the-top-of-the-screen-with-music-playback-control-cpu-gpu-ram-stats-and-more) |
 | ✓ 1.0 (без календаря) | Таймеры, напоминания, календарь | Короткий таймер, «помидор», ближайшие события | [Command Palette Dock](https://windowslatest.com/2026/02/07/windows-11-is-testing-an-optional-dock-that-sits-on-the-top-of-the-screen-with-music-playback-control-cpu-gpu-ram-stats-and-more), [DynamicWin](https://github.com/FlorianButz/DynamicWin) |
 | | Интеграция Kamerton | Звук в панели — из Kamerton (после согласования с владельцем) | [Kamerton](https://github.com/AgitAngst/Kamerton) |
-| | Состояние GitHub | CI и пулл-реквесты своих репозиториев (без запуска CI) | [Command Palette Dock](https://windowslatest.com/2026/02/07/windows-11-is-testing-an-optional-dock-that-sits-on-the-top-of-the-screen-with-music-playback-control-cpu-gpu-ram-stats-and-more) |
+| ✓ 1.1 | Состояние GitHub | CI и пулл-реквесты своих репозиториев (без запуска CI) | [Command Palette Dock](https://windowslatest.com/2026/02/07/windows-11-is-testing-an-optional-dock-that-sits-on-the-top-of-the-screen-with-music-playback-control-cpu-gpu-ram-stats-and-more) |
 
 ## Дальше — идеи из мозгового штурма (не согласованы, порядок решит владелец)
 
