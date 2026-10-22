@@ -91,6 +91,8 @@ pub struct Settings {
     pub accent: String,
     /// Пока что-то играет, спрятанная полоска шире: трек и кнопки плеера.
     pub media_strip: bool,
+    /// Где лежит `kamerton.exe` — для «Запустить Kamerton» в карточке «Звук»; пусто — не знаем.
+    pub kamerton: String,
 }
 
 // ─── Профили экрана ─────────────────────────────────────────────────────────
@@ -277,6 +279,7 @@ impl Default for Settings {
             profiles: Vec::new(),
             accent: crate::look::LIME.name.to_string(),
             media_strip: false,
+            kamerton: String::new(),
         }
     }
 }
@@ -356,6 +359,7 @@ pub fn parse(text: &str) -> Settings {
             "clipboard" => s.clipboard = value != "false",
             "accent" if crate::look::valid(value) => s.accent = value.to_lowercase(),
             "media_strip" => s.media_strip = value == "true",
+            "kamerton" => s.kamerton = value.to_string(),
             "modules" => s.order = list(value),
             "hidden" => s.hidden = list(value),
             // Только похожее на «владелец/имя»: кривое из файла не идёт в адрес запроса.
@@ -412,6 +416,9 @@ pub fn format(s: &Settings) -> String {
     );
     out.push_str(&format!("strip={}\nexclude={}\nclipboard={}\n", s.strip, s.exclude.join(","), s.clipboard));
     out.push_str(&format!("accent={}\nmedia_strip={}\n", s.accent, s.media_strip));
+    if !s.kamerton.is_empty() {
+        out.push_str(&format!("kamerton={}\n", s.kamerton));
+    }
     out.push_str(&format!(
         "modules={}\nhidden={}\ngithub={}\n",
         s.order.join(","),
@@ -684,6 +691,7 @@ mod tests {
             tray: vec![r"C:\Demo\a.txt".into(), r"D:\b c.pdf".into()],
             accent: "#123456".into(),
             media_strip: true,
+            kamerton: r"C:\Demo\kamerton.exe".into(),
             ..Default::default()
         };
         let back = parse(&format(&s));

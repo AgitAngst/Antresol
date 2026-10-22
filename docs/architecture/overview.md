@@ -8,8 +8,8 @@
 | `src/app.rs` | окно-панель: место у края, выезд, шапка с профилями, карточки модулей, настройки, «Свой цвет…», полоска (простая, с медиа, плашка таймера), ручки размера |
 | `src/look.rs` | цвет программы: пять готовых (лайм — по умолчанию) и свой — вывод под тему с контрастом 4,5:1, HSV, `accent=` |
 | `src/panel.rs` | логика «показана / спрятана» без окна (тесты) |
-| `src/modules/` | модули: `display.rs`, `brightness.rs`, `media.rs`, `resources.rs`, `clipboard.rs`, `tray.rs`, `bluetooth.rs`, `timers.rs`, `github.rs`, `buttons.rs`; общий `Module` в `mod.rs` |
-| `src/sys/` | Windows: `monitor.rs` (мониторы, курсор, полноэкранное), `display.rs` (режимы, масштаб), `ddc.rs` (DDC/CI; HMONITOR берётся из `Monitor::handle`), `media.rs` (медиа-сеансы WinRT, обложка через WIC), `res.rs` (ресурсы), `clip.rs` (буфер обмена), `bt.rs` (Bluetooth), `gh.rs` (GitHub по WinHTTP), `mod.rs` (запуск, горячая клавиша, автозапуск, скругление окна, цвет акцента Windows) |
+| `src/modules/` | модули: `display.rs`, `brightness.rs`, `media.rs`, `resources.rs`, `clipboard.rs`, `tray.rs`, `bluetooth.rs`, `timers.rs`, `github.rs`, `buttons.rs`, `sound.rs`; общий `Module` в `mod.rs` |
+| `src/sys/` | Windows: `monitor.rs` (мониторы, курсор, полноэкранное), `display.rs` (режимы, масштаб), `ddc.rs` (DDC/CI; HMONITOR берётся из `Monitor::handle`), `media.rs` (медиа-сеансы WinRT, обложка через WIC), `kamerton.rs` (канал к Kamerton), `res.rs` (ресурсы), `clip.rs` (буфер обмена), `bt.rs` (Bluetooth), `gh.rs` (GitHub по WinHTTP), `mod.rs` (запуск, горячая клавиша, автозапуск, скругление окна, цвет акцента Windows) |
 | `src/config.rs` | `config.txt` (в том числе профили `profile=`, избранное `favorite=`, частоты `rate=`, лоток `tray=`) и `buttons.txt` |
 | `src/texts.rs` | строки RU/EN |
 | `src/shot.rs` | `ANTRESOL_SHOT`: снимок своего окна в PNG (для документации) |
@@ -78,6 +78,10 @@
   не чаще раза в 5 минут. Токен — `Authorization: Bearer`, если задан.
 - Порядок и видимость карточек — `config::arrange` по ключам модулей (`Module::key`); `refresh` зовётся только у
   видимых, `background` и `attention` — у всех.
+- Звук — через Kamerton: именованный канал `\\.\pipe\kamerton-ipc`, одна строка запроса (`state`, `volume`,
+  `mute`, `app-volume`, `app-mute`, `open`; поля через табуляцию), ответ до закрытия канала (`sys::kamerton`).
+  Канала нет — «не запущен». Запросы — в потоке модуля «Звук»; скопившиеся громкости одной цели сводятся к
+  последней.
 - Автозапуск — строка `Antresol` в `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
 - Цвет Windows — `AccentColor` (0xAABBGGRR) в `HKCU\Software\Microsoft\Windows\DWM`.
 

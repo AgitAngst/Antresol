@@ -85,6 +85,11 @@
 задержку выезда; «Медиа на спрятанной полоске»; плашка таймера у края вместо выезда панели; настройки
 строками, порядок карточек перетаскиванием. Не вошло: ход трека на полоске (Windows не отдаёт позицию).
 
+## Этап 1.3 — звук через Kamerton (сделан 22.10.2026, запрос владельца)
+
+Изменение OpenSpec `kamerton-sound`. Карточка «Звук»: устройство вывода по умолчанию и программы — громкость
+и «без звука», «Микшер Kamerton». Звук делает Kamerton (0.2.1, канал `kamerton-ipc`), панель только просит.
+
 ## Кандидаты этапов — по аналогам (22.10.2026, не согласованы, порядок решит владелец)
 
 Собраны по программам, которые обсуждают в r/software и r/Windows11 (сам Reddit прочитать не удалось —
@@ -106,7 +111,7 @@
 | ✓ 0.9 (без подключения из панели) | Bluetooth-устройства | Подключить наушники и мышь, увидеть заряд | [DynamicWin](https://github.com/FlorianButz/DynamicWin) |
 | ✓ 0.9 (стрелками, без «только значки») | Режим правки | Перетаскивать модули, включать и выключать, показывать только значки | [Command Palette Dock](https://windowslatest.com/2026/02/07/windows-11-is-testing-an-optional-dock-that-sits-on-the-top-of-the-screen-with-music-playback-control-cpu-gpu-ram-stats-and-more) |
 | ✓ 1.0 (без календаря) | Таймеры, напоминания, календарь | Короткий таймер, «помидор», ближайшие события | [Command Palette Dock](https://windowslatest.com/2026/02/07/windows-11-is-testing-an-optional-dock-that-sits-on-the-top-of-the-screen-with-music-playback-control-cpu-gpu-ram-stats-and-more), [DynamicWin](https://github.com/FlorianButz/DynamicWin) |
-| | Интеграция Kamerton | Звук в панели — из Kamerton (после согласования с владельцем) | [Kamerton](https://github.com/AgitAngst/Kamerton) |
+| ✓ 1.3 | Интеграция Kamerton | Звук в панели — из Kamerton (после согласования с владельцем) | [Kamerton](https://github.com/AgitAngst/Kamerton) |
 | ✓ 1.1 | Состояние GitHub | CI и пулл-реквесты своих репозиториев (без запуска CI) | [Command Palette Dock](https://windowslatest.com/2026/02/07/windows-11-is-testing-an-optional-dock-that-sits-on-the-top-of-the-screen-with-music-playback-control-cpu-gpu-ram-stats-and-more) |
 
 ## Дальше — идеи из мозгового штурма (не согласованы, порядок решит владелец)

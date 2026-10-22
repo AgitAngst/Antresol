@@ -9,6 +9,7 @@ pub mod display;
 pub mod github;
 pub mod media;
 pub mod resources;
+pub mod sound;
 pub mod timers;
 pub mod tray;
 
@@ -111,12 +112,17 @@ pub fn icon_of(key: &str) -> Icon {
 }
 
 /// Заголовок карточки: значок, подпись заглавными и пояснение справа — всё цветом `weak`.
-pub fn card_header(ui: &mut Ui, icon: Icon, title: &str, meta: &str) {
+/// У «Звука» значок свой — динамик (в наборе такого нет).
+pub fn card_header(ui: &mut Ui, key: &str, title: &str, meta: &str) {
     let p = anvil_ui::Palette::of(ui);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         let (rect, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
-        anvil_ui::icons::paint(ui.painter(), rect, icon, p.weak);
+        if key == "sound" {
+            sound::paint_speaker(ui.painter(), rect, false, p.weak);
+        } else {
+            anvil_ui::icons::paint(ui.painter(), rect, icon_of(key), p.weak);
+        }
         anvil_ui::widgets::section_label(ui, title);
         if !meta.is_empty() {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -134,6 +140,7 @@ pub fn all() -> Vec<Box<dyn Module>> {
         Box::new(display::Display::default()),
         Box::new(brightness::Brightness::default()),
         Box::new(media::Media::default()),
+        Box::new(sound::Sound::default()),
         Box::new(resources::Resources::default()),
         Box::new(clipboard::Clipboard::default()),
         Box::new(tray::Tray::default()),

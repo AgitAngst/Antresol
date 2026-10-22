@@ -5,6 +5,7 @@ pub mod clip;
 pub mod ddc;
 pub mod display;
 pub mod gh;
+pub mod kamerton;
 pub mod media;
 pub mod monitor;
 pub mod res;
