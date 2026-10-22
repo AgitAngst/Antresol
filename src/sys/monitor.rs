@@ -35,6 +35,8 @@ pub struct Monitor {
     pub device: String,
     pub rect: PxRect,
     pub primary: bool,
+    /// HMONITOR как число — для DDC/CI из другого потока; живёт, пока монитор подключён.
+    pub handle: usize,
 }
 
 pub fn cursor() -> (i32, i32) {
@@ -53,6 +55,7 @@ unsafe extern "system" fn collect(h: HMONITOR, _: HDC, _: *mut RECT, data: LPARA
             device: String::from_utf16_lossy(&info.szDevice[..end]),
             rect: info.monitorInfo.rcMonitor.into(),
             primary: info.monitorInfo.dwFlags & MONITORINFOF_PRIMARY != 0,
+            handle: h.0 as usize,
         });
     }
     BOOL(1)

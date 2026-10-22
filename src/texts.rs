@@ -31,6 +31,14 @@ pub struct Tr {
     pub remove_key: &'static str,
     pub delete: &'static str,
     pub key_is_panel: &'static str,
+    pub brightness: &'static str,
+    pub brightness_short: &'static str,
+    pub contrast: &'static str,
+    pub ddc_reading: &'static str,
+    pub ddc_none: &'static str,
+    pub ddc_failed: &'static str,
+    pub input_title: &'static str,
+    pub input_switch: &'static str,
     pub answer_first: &'static str,
     pub mode_unavailable: &'static str,
     pub keep_title: &'static str,
@@ -88,6 +96,14 @@ const RU: Tr = Tr {
     remove_key: "Убрать клавишу",
     delete: "Удалить профиль",
     key_is_panel: "Это сочетание показа панели — выберите другое",
+    brightness: "Яркость",
+    brightness_short: "Яркость",
+    contrast: "Контраст",
+    ddc_reading: "Опрашиваю мониторы…",
+    ddc_none: "Мониторы не отвечают по DDC/CI. Встроенный экран ноутбука так не управляется; у внешнего DDC/CI включают в меню монитора.",
+    ddc_failed: "Монитор не принял значение",
+    input_title: "Переключить вход монитора?",
+    input_switch: "Переключить",
     answer_first: "Сначала ответьте на «Оставить этот режим?»",
     mode_unavailable: "Режима из профиля у монитора нет — он пропущен",
     keep_title: "Оставить этот режим?",
@@ -145,6 +161,14 @@ const EN: Tr = Tr {
     remove_key: "Remove shortcut",
     delete: "Delete profile",
     key_is_panel: "This is the panel shortcut — pick another one",
+    brightness: "Brightness",
+    brightness_short: "Brightness",
+    contrast: "Contrast",
+    ddc_reading: "Asking the monitors…",
+    ddc_none: "No monitor answers over DDC/CI. A laptop's built-in screen cannot be controlled this way; on an external one, turn DDC/CI on in its menu.",
+    ddc_failed: "The monitor did not accept the value",
+    input_title: "Switch the monitor input?",
+    input_switch: "Switch",
     answer_first: "Answer “Keep this display mode?” first",
     mode_unavailable: "The monitor has no such mode — skipped",
     keep_title: "Keep this display mode?",
@@ -201,5 +225,17 @@ pub fn monitors_missing(lang: Lang, n: usize) -> String {
     match lang {
         Lang::Ru => format!("Мониторов из профиля нет: {n} — пропущены"),
         Lang::En => format!("Monitors from the profile not found: {n} — skipped"),
+    }
+}
+
+/// Предупреждение перед сменой входа монитора.
+pub fn input_warning(lang: Lang, monitor: &str, input: &str) -> String {
+    match lang {
+        Lang::Ru => format!(
+            "{monitor} перейдёт на {input}. Если там нет сигнала, экран погаснет — вернуть вход можно только кнопками монитора."
+        ),
+        Lang::En => format!(
+            "{monitor} will switch to {input}. If there is no signal there, the screen goes dark — only the monitor's own buttons bring it back."
+        ),
     }
 }

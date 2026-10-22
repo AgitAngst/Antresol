@@ -9,12 +9,13 @@ python E:/dev_personal/tools/checks.py --repo . -j 4 fmt test clippy
 
 Тесты — логика показа/скрытия (`panel.rs`), разбор файлов (`config.rs`), выбор режима и масштаба
 (`modules/display.rs`, `sys/display.rs`), профили и сочетания клавиш (`config.rs`, `modules/display.rs`),
-коды клавиш (`sys/mod.rs`).
+коды клавиш (`sys/mod.rs`), входы DDC/CI (`sys/ddc.rs`).
 
 ## Живая проверка
 
 - `target\debug\antresol.exe` — в debug видна консоль с журналом (по-английски).
-- `ANTRESOL_TRACE=1` — печатать каждую смену места или размера окна (доля выезда, место, размер, тема).
+- `ANTRESOL_TRACE=1` — печатать каждую смену места или размера окна (доля выезда, место, размер, тема) и
+  что ответили мониторы по DDC/CI.
 - `ANTRESOL_DEMO=1` — выдуманное имя монитора: снимки для открытого репозитория
   (`docs/img`) — только так, на демо-настройках (папка `antresol-scratch\demo`).
 - `ANTRESOL_VIEW=settings` — открыть сразу настройки (для снимков без щелчков); `ANTRESOL_PIN=1` — панель

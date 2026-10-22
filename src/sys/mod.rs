@@ -1,5 +1,6 @@
 // Всё, что идёт в Windows напрямую. Остальная программа зовёт только эти функции.
 
+pub mod ddc;
 pub mod display;
 pub mod monitor;
 

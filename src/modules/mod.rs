@@ -1,6 +1,7 @@
 // Модули панели: каждый — карточка со своими быстрыми настройками. Новый модуль — файл здесь,
 // `impl Module` и строка в `all()`; остальное (раскладка, появление, обновление) панель делает сама.
 
+pub mod brightness;
 pub mod buttons;
 pub mod display;
 
@@ -35,7 +36,7 @@ pub trait Module {
     fn weight(&self) -> f32 {
         1.0
     }
-    /// Перечитать состояние системы: при появлении панели и раз в пару секунд, пока она открыта.
+    /// Перечитать состояние системы: при появлении панели и раз в 1,5 с, пока она открыта.
     fn refresh(&mut self, monitor: &str);
     fn ui(&mut self, ui: &mut Ui, cx: &mut Ctx);
     /// Панели нельзя прятаться: модуль ждёт ответа пользователя.
@@ -50,7 +51,11 @@ pub trait Module {
 }
 
 pub fn all() -> Vec<Box<dyn Module>> {
-    vec![Box::new(display::Display::default()), Box::new(buttons::Buttons::default())]
+    vec![
+        Box::new(display::Display::default()),
+        Box::new(brightness::Brightness::default()),
+        Box::new(buttons::Buttons::default()),
+    ]
 }
 
 /// Строка списка с текстом слева и пометкой справа; выбранная — с полоской акцента.

@@ -8,8 +8,9 @@ context: |
   Project: Antresol, a quick-access panel at the top edge of the monitor for Windows, written in
   Rust on egui and the Anvil kit (anvil-ui, tag kit-v*). It hides above the screen edge and slides
   out when the mouse touches the edge or on a hotkey; it is resizable; features are modules.
-  Parts: src/panel.rs (window, edge, show/hide, resize), src/modules/ (display, audio, buttons),
-  src/sys/ (Win32: monitors, display modes and scale, Core Audio, launch, hotkey, autostart),
+  Parts: src/app.rs (window, edge, show/hide, resize, settings), src/panel.rs (show/hide logic),
+  src/modules/ (display, brightness, buttons), src/sys/ (Win32: monitors, display modes and scale,
+  DDC/CI, launch, hotkeys, autostart). Sound is not part of Antresol: it will come from Kamerton.
   src/config.rs (settings and buttons files in %APPDATA%\Antresol).
   Where the project stands and how to work: HANDOFF.md; plan and stages: SPEC.md;
   docs of what exists now: docs/README.md; UI rules: docs/ui-guideline.md.
