@@ -21,6 +21,10 @@ impl PxRect {
     pub fn width(&self) -> i32 {
         self.right - self.left
     }
+
+    pub fn contains(&self, (x, y): (i32, i32)) -> bool {
+        x >= self.left && x < self.right && y >= self.top && y < self.bottom
+    }
 }
 
 impl From<RECT> for PxRect {
@@ -91,5 +95,59 @@ pub fn fullscreen_on(rect: PxRect) -> bool {
         }
         let r = PxRect::from(r);
         r.left <= rect.left && r.top <= rect.top && r.right >= rect.right && r.bottom >= rect.bottom
+    }
+}
+
+/// Имя файла программы на переднем плане, маленькими буквами: «chrome.exe». `None` — не узнать.
+pub fn foreground_exe() -> Option<String> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+    if super::demo() {
+        return Some("player.exe".to_string());
+    }
+    unsafe {
+        let fg = GetForegroundWindow();
+        if fg.is_invalid() {
+            return None;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(fg, Some(&mut pid));
+        if pid == 0 {
+            return None;
+        }
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buf = [0u16; 512];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, windows::core::PWSTR(buf.as_mut_ptr()), &mut len);
+        let _ = CloseHandle(h);
+        ok.ok()?;
+        let path = String::from_utf16_lossy(&buf[..len as usize]);
+        Some(exe_name(&path))
+    }
+}
+
+/// Имя файла из полного пути, маленькими буквами.
+pub fn exe_name(path: &str) -> String {
+    path.rsplit(['\\', '/']).next().unwrap_or(path).to_lowercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exe_names() {
+        assert_eq!(exe_name(r"C:\Program Files\Google\Chrome\chrome.exe"), "chrome.exe");
+        assert_eq!(exe_name("Game.EXE"), "game.exe");
+    }
+
+    #[test]
+    fn rect_contains() {
+        let r = PxRect { left: 0, top: 0, right: 100, bottom: 50 };
+        assert!(r.contains((0, 0)) && r.contains((99, 49)));
+        assert!(!r.contains((100, 10)) && !r.contains((10, -1)));
     }
 }

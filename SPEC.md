@@ -28,10 +28,12 @@
 - Применение — с «Оставить этот режим?» и откатом всех изменённых мониторов через 15 с.
 - Не вошло: расположение мониторов в профиле, клавиши на избранное, выбор клавиши показа панели.
 
-## Этап 0.5 — медиа (сделан 22.10.2026)
+## 0.3.1 — звук убран (22.10.2026, решение владельца)
 
-Изменение OpenSpec `media`. Карточка «Медиа»: обложка, название, исполнитель, программа; «Назад»,
-«Пауза», «Вперёд». Ряд карточек листается вбок на узкой панели.
+Владелец: «Исключи всё что связано со звуком. Потом сделаем интеграцию Kamerton.» Карточка «Звук»
+(громкость, «без звука», устройство вывода) и её системная часть удалены; громкость по программам и
+микрофон из планов сняты. Звук в панели появится через интеграцию с
+[Kamerton](https://github.com/AgitAngst/Kamerton) — отдельный этап после согласования с владельцем.
 
 ## Этап 0.4 — яркость мониторов (сделан 22.10.2026)
 
@@ -39,12 +41,15 @@
 по DDC/CI, смена входа с подтверждением. Не вошло: выравнивание яркости между мониторами, встроенный
 экран ноутбука (WMI).
 
-## 0.3.1 — звук убран (22.10.2026, решение владельца)
+## Этап 0.5 — медиа (сделан 22.10.2026)
 
-Владелец: «Исключи всё что связано со звуком. Потом сделаем интеграцию Kamerton.» Карточка «Звук»
-(громкость, «без звука», устройство вывода) и её системная часть удалены; громкость по программам и
-микрофон из планов сняты. Звук в панели появится через интеграцию с
-[Kamerton](https://github.com/AgitAngst/Kamerton) — отдельный этап после согласования с владельцем.
+Изменение OpenSpec `media`. Карточка «Медиа»: обложка, название, исполнитель, программа; «Назад»,
+«Пауза», «Вперёд». Ряд карточек листается вбок на узкой панели.
+
+## Этап 0.6 — сама панель (сделан 22.10.2026)
+
+Изменение OpenSpec `panel-itself`. Полоска у края, «Не выезжать над программами», монитор «Все», своя
+клавиша показа панели; для разработки — `ANTRESOL_SHOT`. Не вошло: свои настройки у каждого монитора.
 
 ## Кандидаты этапов — по аналогам (22.10.2026, не согласованы, порядок решит владелец)
 
@@ -58,9 +63,9 @@
 | ✓ 0.3 (профили; избранное — нет) | Горячие клавиши на избранное и профили | Сменить режим, не открывая панель; несколько мониторов одной клавишей | [Display Hot Keys](https://alternativeto.net/software/display-hot-keys/about/), [RezSwap](https://github.com/nullvalue0/RezSwap) |
 | ✓ 0.4 (без выравнивания) | Яркость внешних мониторов | DDC/CI: яркость, контраст, вход монитора; выравнивание яркости между мониторами | [Twinkle Tray](https://cdn.jsdelivr.net/gh/xanderfrangos/twinkle-tray@master/README.md) |
 | ✓ 0.5 | Медиа | Пауза, следующий трек, название и обложка из Spotify, браузера, плееров (системные медиа-сеансы) | [Isle Notch](https://toolradar.com/tools/isle-notch), [DynamicWin](https://github.com/FlorianButz/DynamicWin), [Command Palette Dock](https://windowslatest.com/2026/02/07/windows-11-is-testing-an-optional-dock-that-sits-on-the-top-of-the-screen-with-music-playback-control-cpu-gpu-ram-stats-and-more) |
-| | Полоска в покое | Тонкая метка у края, что панель есть; раскрывается при наведении или событии | [Isle Notch](https://toolradar.com/tools/isle-notch), [Notchify](https://www.windowscentral.com/software-apps/notchify-brings-macos-style-dynamic-island-flair-to-windows-11) |
-| | Не выезжать над выбранными программами | Список программ, над которыми панель не выезжает, — не только полный экран | [Isle Notch](https://toolradar.com/tools/isle-notch) |
-| | Несколько мониторов | Панель на всех мониторах или на выбранных, у каждой свои настройки | [Isle Notch](https://toolradar.com/tools/isle-notch) |
+| ✓ 0.6 | Полоска в покое | Тонкая метка у края, что панель есть; раскрывается при наведении или событии | [Isle Notch](https://toolradar.com/tools/isle-notch), [Notchify](https://www.windowscentral.com/software-apps/notchify-brings-macos-style-dynamic-island-flair-to-windows-11) |
+| ✓ 0.6 | Не выезжать над выбранными программами | Список программ, над которыми панель не выезжает, — не только полный экран | [Isle Notch](https://toolradar.com/tools/isle-notch) |
+| ✓ 0.6 (без своих настроек у монитора) | Несколько мониторов | Панель на всех мониторах или на выбранных, у каждой свои настройки | [Isle Notch](https://toolradar.com/tools/isle-notch) |
 | | Ресурсы | ЦП, видеокарта, память, сеть, батарея, температура | [Command Palette Dock](https://pureinfotech.com/powertoys-command-palette-dock-windows-11/) |
 | | История буфера обмена | Последние скопированные тексты, вставить щелчком | [Notchify](https://www.windowscentral.com/software-apps/want-your-pc-to-be-a-bit-more-like-a-mac-the-dynamic-island-for-windows-just-got-a-big-update), [Command Palette Dock](https://windowslatest.com/2026/02/07/windows-11-is-testing-an-optional-dock-that-sits-on-the-top-of-the-screen-with-music-playback-control-cpu-gpu-ram-stats-and-more) |
 | | Лоток файлов | Бросить файл в панель, забрать или открыть позже | [DynamicWin](https://github.com/FlorianButz/DynamicWin) |

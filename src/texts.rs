@@ -47,6 +47,13 @@ pub struct Tr {
     pub media_play: &'static str,
     pub media_pause: &'static str,
     pub media_failed: &'static str,
+    pub all_monitors: &'static str,
+    pub all_monitors_note: &'static str,
+    pub strip: &'static str,
+    pub exclude_title: &'static str,
+    pub exclude_none: &'static str,
+    pub exclude_remove: &'static str,
+    pub key_auto: &'static str,
     pub answer_first: &'static str,
     pub mode_unavailable: &'static str,
     pub keep_title: &'static str,
@@ -120,6 +127,13 @@ const RU: Tr = Tr {
     media_play: "Играть",
     media_pause: "Пауза",
     media_failed: "Плеер не ответил",
+    all_monitors: "Все",
+    all_monitors_note: "Панель выезжает у того монитора, к краю которого подошла мышь.",
+    strip: "Полоска у края, пока панель спрятана",
+    exclude_title: "Не выезжать над программами",
+    exclude_none: "Список пуст — над любой программой панель выезжает.",
+    exclude_remove: "Убрать из списка",
+    key_auto: "Как по умолчанию",
     answer_first: "Сначала ответьте на «Оставить этот режим?»",
     mode_unavailable: "Режима из профиля у монитора нет — он пропущен",
     keep_title: "Оставить этот режим?",
@@ -193,6 +207,13 @@ const EN: Tr = Tr {
     media_play: "Play",
     media_pause: "Pause",
     media_failed: "The player did not answer",
+    all_monitors: "All",
+    all_monitors_note: "The panel slides out at the monitor whose edge the mouse touched.",
+    strip: "Thin strip at the edge while the panel is hidden",
+    exclude_title: "Do not slide out over apps",
+    exclude_none: "The list is empty — the panel slides out over any app.",
+    exclude_remove: "Remove from the list",
+    key_auto: "Use the default",
     answer_first: "Answer “Keep this display mode?” first",
     mode_unavailable: "The monitor has no such mode — skipped",
     keep_title: "Keep this display mode?",
@@ -261,5 +282,21 @@ pub fn input_warning(lang: Lang, monitor: &str, input: &str) -> String {
         Lang::En => format!(
             "{monitor} will switch to {input}. If there is no signal there, the screen goes dark — only the monitor's own buttons bring it back."
         ),
+    }
+}
+
+/// «Добавить «chrome.exe»» — последнюю программу на переднем плане в список «не выезжать».
+pub fn exclude_add(lang: Lang, exe: &str) -> String {
+    match lang {
+        Lang::Ru => format!("Добавить «{exe}»"),
+        Lang::En => format!("Add “{exe}”"),
+    }
+}
+
+/// Сочетание уже у профиля.
+pub fn key_is_profile(lang: Lang, name: &str) -> String {
+    match lang {
+        Lang::Ru => format!("Это сочетание у профиля «{name}» — выберите другое"),
+        Lang::En => format!("This shortcut belongs to the profile “{name}” — pick another one"),
     }
 }

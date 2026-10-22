@@ -81,8 +81,21 @@ const WM_SYNC: u32 = WM_APP + 1;
 /// Номера клавиш профилей у Windows: 100 + номер профиля.
 const PROFILE_ID: i32 = 100;
 
-#[derive(Default)]
+/// Что с клавишей показа панели.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelKey {
+    /// Своей нет — взяли первое свободное из [`HOTKEYS`] (`None` — все заняты).
+    Auto(Option<usize>),
+    /// Своя из настроек: удалось ли занять.
+    Custom(bool),
+}
+
 struct Keys {
+    /// Клавиша показа панели снята на время (ждём новое сочетание в настройках).
+    suspended: bool,
+    /// Своя клавиша показа панели; `None` — первая свободная из [`HOTKEYS`].
+    panel: Option<(HOT_KEY_MODIFIERS, u32)>,
+    panel_status: PanelKey,
     /// Что зарегистрировать: (модификаторы, код клавиши) на каждый профиль; `None` — без клавиши.
     wanted: Vec<Option<(HOT_KEY_MODIFIERS, u32)>>,
     /// Что вышло: `Some(false)` — сочетание заняла другая программа.
@@ -91,7 +104,14 @@ struct Keys {
     pressed: Vec<usize>,
 }
 
-static KEYS: Mutex<Keys> = Mutex::new(Keys { wanted: Vec::new(), status: Vec::new(), pressed: Vec::new() });
+static KEYS: Mutex<Keys> = Mutex::new(Keys {
+    suspended: false,
+    panel: None,
+    panel_status: PanelKey::Auto(None),
+    wanted: Vec::new(),
+    status: Vec::new(),
+    pressed: Vec::new(),
+});
 
 /// Сочетания для показа панели по порядку: первое свободное и берём.
 pub const HOTKEYS: [(&[&str], u32); 4] = [
@@ -130,6 +150,22 @@ pub fn vk_of(key: &str) -> Option<u32> {
     (1..=24).contains(&n).then(|| VK_F1.0 as u32 + n - 1)
 }
 
+fn sync_panel() {
+    let mut keys = KEYS.lock().unwrap_or_else(|e| e.into_inner());
+    unsafe {
+        let _ = UnregisterHotKey(None, 1);
+        if keys.suspended {
+            return;
+        }
+        keys.panel_status = match keys.panel {
+            Some((m, vk)) => PanelKey::Custom(RegisterHotKey(None, 1, m, vk).is_ok()),
+            None => {
+                PanelKey::Auto(HOTKEYS.iter().position(|(k, vk)| RegisterHotKey(None, 1, modifiers(k), *vk).is_ok()))
+            }
+        };
+    }
+}
+
 fn sync_profiles(registered: &mut usize) {
     let mut keys = KEYS.lock().unwrap_or_else(|e| e.into_inner());
     unsafe {
@@ -146,21 +182,37 @@ fn sync_profiles(registered: &mut usize) {
     *registered = keys.wanted.len();
 }
 
-/// Поток горячих клавиш. `wake` будит окно. Возвращает номер занятого сочетания показа панели
-/// в [`HOTKEYS`]; `None` — все заняты другими программами (клавиши профилей работают и тогда).
-pub fn start_hotkey(wake: impl Fn() + Send + 'static) -> Option<usize> {
+/// Разобрать сочетание для RegisterHotKey: модификаторы по именам и клавиша.
+fn combo(keys: &Option<(Vec<&str>, &str)>) -> Option<(HOT_KEY_MODIFIERS, u32)> {
+    keys.as_ref().and_then(|(mods, key)| Some((modifiers(mods), vk_of(key)?)))
+}
+
+fn wake_thread() {
+    let thread = THREAD.load(Ordering::Acquire);
+    if thread != 0 {
+        unsafe {
+            let _ = PostThreadMessageW(thread, WM_SYNC, WPARAM(0), LPARAM(0));
+        }
+    }
+}
+
+/// Поток горячих клавиш. `panel` — своя клавиша показа панели (`None` — первая свободная из
+/// [`HOTKEYS`]). `wake` будит окно. Возвращает, что вышло с клавишей показа панели.
+pub fn start_hotkey(panel: Option<(Vec<&str>, &str)>, wake: impl Fn() + Send + 'static) -> PanelKey {
+    KEYS.lock().unwrap_or_else(|e| e.into_inner()).panel = combo(&panel);
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || unsafe {
         let mut msg = MSG::default();
         // Очередь потока появляется с первым обращением к ней — до этого PostThreadMessage не дойдёт.
         let _ = PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE);
         THREAD.store(GetCurrentThreadId(), Ordering::Release);
-        let got = HOTKEYS.iter().position(|(keys, vk)| RegisterHotKey(None, 1, modifiers(keys), *vk).is_ok());
-        let _ = tx.send(got);
+        sync_panel();
+        let _ = tx.send(panel_hotkey());
         let mut registered = 0;
         sync_profiles(&mut registered);
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
             if msg.message == WM_SYNC {
+                sync_panel();
                 sync_profiles(&mut registered);
                 wake();
             } else if msg.message == WM_HOTKEY {
@@ -174,7 +226,31 @@ pub fn start_hotkey(wake: impl Fn() + Send + 'static) -> Option<usize> {
             }
         }
     });
-    rx.recv().unwrap_or(None)
+    rx.recv().unwrap_or(PanelKey::Auto(None))
+}
+
+/// Снять клавишу показа панели на время или вернуть. Шлёт потоку, только если поменялось.
+pub fn suspend_panel_hotkey(on: bool) {
+    let changed = {
+        let mut keys = KEYS.lock().unwrap_or_else(|e| e.into_inner());
+        let changed = keys.suspended != on;
+        keys.suspended = on;
+        changed
+    };
+    if changed {
+        wake_thread();
+    }
+}
+
+/// Что сейчас с клавишей показа панели.
+pub fn panel_hotkey() -> PanelKey {
+    KEYS.lock().unwrap_or_else(|e| e.into_inner()).panel_status
+}
+
+/// Сменить клавишу показа панели на ходу; `None` — снова первая свободная из [`HOTKEYS`].
+pub fn set_panel_hotkey(panel: Option<(Vec<&str>, &str)>) {
+    KEYS.lock().unwrap_or_else(|e| e.into_inner()).panel = combo(&panel);
+    wake_thread();
 }
 
 pub fn take_hotkey() -> bool {
@@ -184,14 +260,9 @@ pub fn take_hotkey() -> bool {
 /// Поставить клавиши профилей: по элементу на профиль, `None` — без клавиши. Сочетание из
 /// клавиш, которых нет в [`vk_of`], считается без клавиши.
 pub fn set_profile_hotkeys(list: &[Option<(Vec<&str>, &str)>]) {
-    let wanted = list.iter().map(|k| k.as_ref().and_then(|(mods, key)| Some((modifiers(mods), vk_of(key)?)))).collect();
+    let wanted = list.iter().map(combo).collect();
     KEYS.lock().unwrap_or_else(|e| e.into_inner()).wanted = wanted;
-    let thread = THREAD.load(Ordering::Acquire);
-    if thread != 0 {
-        unsafe {
-            let _ = PostThreadMessageW(thread, WM_SYNC, WPARAM(0), LPARAM(0));
-        }
-    }
+    wake_thread();
 }
 
 /// Что вышло с клавишей профиля: `Some(false)` — занята другой программой; `None` — нет клавиши

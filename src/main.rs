@@ -5,6 +5,7 @@ mod app;
 mod config;
 mod modules;
 mod panel;
+mod shot;
 mod sys;
 mod texts;
 

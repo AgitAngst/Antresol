@@ -10,6 +10,8 @@ pub const MIN_HEIGHT: f32 = 150.0;
 pub const MAX_HEIGHT: f32 = 520.0;
 /// Сколько любимых разрешений у одного монитора.
 pub const MAX_FAVORITES: usize = 3;
+/// `monitor=*` — панель у того монитора, к краю которого подошла мышь.
+pub const ALL_MONITORS: &str = "*";
 
 /// Разрешение конкретного монитора: `\\.\DISPLAYn`, ширина, высота.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -52,7 +54,8 @@ pub struct Settings {
     /// Размер панели в точках интерфейса.
     pub width: f32,
     pub height: f32,
-    /// Монитор, у верхнего края которого живёт панель: `\\.\DISPLAYn`; пусто — основной.
+    /// Монитор, у верхнего края которого живёт панель: `\\.\DISPLAYn`; пусто — основной;
+    /// [`ALL_MONITORS`] — тот, к краю которого подошла мышь.
     pub monitor: String,
     /// Сколько держать мышь у края, прежде чем панель выедет.
     pub show_delay_ms: u32,
@@ -60,6 +63,12 @@ pub struct Settings {
     pub hide_delay_ms: u32,
     /// Не выезжать, когда на мониторе игра или видео во весь экран.
     pub fullscreen_guard: bool,
+    /// Тонкая полоска у края, пока панель спрятана: видно, что она есть.
+    pub strip: bool,
+    /// Программы (имя файла маленькими буквами), над которыми панель не выезжает от края.
+    pub exclude: Vec<String>,
+    /// Своя клавиша показа панели; `None` — первая свободная из готовых.
+    pub panel_hotkey: Option<Hotkey>,
     /// Любимые разрешения, до трёх на монитор, в порядке добавления.
     pub favorites: Vec<Res>,
     /// Какая частота была у разрешения в последний раз — её и ставим, когда на него переходят.
@@ -182,6 +191,11 @@ impl std::fmt::Display for Profile {
 }
 
 impl Settings {
+    /// Программа в списке «не выезжать над ней».
+    pub fn excluded(&self, exe: &str) -> bool {
+        self.exclude.iter().any(|e| e.eq_ignore_ascii_case(exe))
+    }
+
     pub fn favorites_of(&self, device: &str) -> Vec<(u32, u32)> {
         self.favorites.iter().filter(|f| f.device.eq_ignore_ascii_case(device)).map(|f| (f.width, f.height)).collect()
     }
@@ -233,6 +247,9 @@ impl Default for Settings {
             show_delay_ms: 150,
             hide_delay_ms: 450,
             fullscreen_guard: true,
+            strip: true,
+            exclude: Vec::new(),
+            panel_hotkey: None,
             favorites: Vec::new(),
             rates: Vec::new(),
             profiles: Vec::new(),
@@ -278,6 +295,12 @@ pub fn parse(text: &str) -> Settings {
             "show_delay_ms" => s.show_delay_ms = value.parse().unwrap_or(s.show_delay_ms),
             "hide_delay_ms" => s.hide_delay_ms = value.parse().unwrap_or(s.hide_delay_ms),
             "fullscreen_guard" => s.fullscreen_guard = value != "false",
+            "strip" => s.strip = value != "false",
+            "exclude" => {
+                s.exclude = value.split(',').map(|e| e.trim().to_lowercase()).filter(|e| !e.is_empty()).collect();
+                s.exclude.dedup();
+            }
+            "panel_hotkey" => s.panel_hotkey = Hotkey::parse(value),
             "favorite" => {
                 let words: Vec<&str> = value.split_whitespace().collect();
                 if let Some(r) = Res::parse(&words)
@@ -324,6 +347,10 @@ pub fn format(s: &Settings) -> String {
         s.hide_delay_ms,
         s.fullscreen_guard
     );
+    out.push_str(&format!("strip={}\nexclude={}\n", s.strip, s.exclude.join(",")));
+    if let Some(h) = &s.panel_hotkey {
+        out.push_str(&format!("panel_hotkey={h}\n"));
+    }
     for f in &s.favorites {
         out.push_str(&format!("favorite={f}\n"));
     }
@@ -568,6 +595,22 @@ mod tests {
         // Лишние строки, дописанные в файл руками, — не больше трёх и без повторов.
         let text = "favorite=A 1x1\nfavorite=A 2x2\nfavorite=A 3x3\nfavorite=A 4x4\nfavorite=A 1x1\n";
         assert_eq!(parse(text).favorites_of("A").len(), 3);
+    }
+
+    #[test]
+    fn panel_options_round_trip() {
+        let s = Settings {
+            strip: false,
+            exclude: vec!["game.exe".into(), "obs64.exe".into()],
+            panel_hotkey: Hotkey::parse("Ctrl+Alt+Q"),
+            monitor: ALL_MONITORS.into(),
+            ..Default::default()
+        };
+        let back = parse(&format(&s));
+        assert_eq!(back, s);
+        assert!(back.excluded("GAME.EXE") && !back.excluded("chrome.exe"));
+        assert!(parse("exclude= A.exe , ,b.exe\n").excluded("a.exe"));
+        assert!(Settings::default().strip, "полоска по умолчанию есть");
     }
 
     #[test]
