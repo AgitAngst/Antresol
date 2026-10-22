@@ -12,7 +12,7 @@ pub mod res;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use windows::Win32::Foundation::{LPARAM, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::Graphics::Gdi::{CreateRoundRectRgn, SetWindowRgn};
 use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_SZ, RegCloseKey, RegDeleteValueW, RegOpenKeyExW,
@@ -25,8 +25,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowExW, GetMessageW, GetWindowThreadProcessId, MSG, PM_NOREMOVE, PeekMessageW, PostThreadMessageW,
-    SW_SHOWNORMAL, WM_APP, WM_HOTKEY,
+    FindWindowExW, GWL_EXSTYLE, GetMessageW, GetWindowLongPtrW, GetWindowThreadProcessId, MSG, PM_NOREMOVE,
+    PeekMessageW, PostThreadMessageW, SW_SHOWNORMAL, SetWindowLongPtrW, WM_APP, WM_HOTKEY, WS_EX_NOACTIVATE,
 };
 use windows::core::PCWSTR;
 
@@ -53,6 +53,17 @@ pub fn launch(target: &str, args: &str) -> Result<(), String> {
 /// Скруглить нижние углы окна панели регионом: всё за ним не рисуется и не ловит мышь.
 /// Окно ищем по заголовку среди окон своего процесса. Ложь — окна ещё нет.
 pub fn round_bottom_corners(width: i32, height: i32, radius: i32) -> bool {
+    let Some(hwnd) = own_window() else { return false };
+    unsafe {
+        // Верхние углы прямоугольника — выше окна, поэтому скруглены только нижние.
+        let rgn = CreateRoundRectRgn(0, -radius, width + 1, height + 1, radius * 2, radius * 2);
+        // Регионом теперь владеет система — удалять его не надо.
+        SetWindowRgn(hwnd, Some(rgn), true) != 0
+    }
+}
+
+/// Окно панели этого процесса (по заголовку «Antresol»).
+fn own_window() -> Option<HWND> {
     let title = wide("Antresol");
     let mut after = None;
     unsafe {
@@ -60,15 +71,27 @@ pub fn round_bottom_corners(width: i32, height: i32, radius: i32) -> bool {
             let mut pid = 0u32;
             GetWindowThreadProcessId(hwnd, Some(&mut pid));
             if pid == std::process::id() {
-                // Верхние углы прямоугольника — выше окна, поэтому скруглены только нижние.
-                let rgn = CreateRoundRectRgn(0, -radius, width + 1, height + 1, radius * 2, radius * 2);
-                // Регионом теперь владеет система — удалять его не надо.
-                return SetWindowRgn(hwnd, Some(rgn), true) != 0;
+                return Some(hwnd);
             }
             after = Some(hwnd);
         }
     }
-    false
+    None
+}
+
+/// Не забирать фокус при щелчке (`WS_EX_NOACTIVATE`): так у спрятанной панели — щелчок по полоске с
+/// медиа или плашке не уводит клавиатуру из программы пользователя. Ответ — удалось ли.
+pub fn set_no_activate(on: bool) -> bool {
+    let Some(hwnd) = own_window() else { return false };
+    unsafe {
+        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let flag = WS_EX_NOACTIVATE.0 as isize;
+        let want = if on { style | flag } else { style & !flag };
+        if want != style {
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, want);
+        }
+    }
+    true
 }
 
 // ─── Горячие клавиши ────────────────────────────────────────────────────────

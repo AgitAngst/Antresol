@@ -134,6 +134,8 @@ pub struct App {
     scroll_to: Option<f32>,
     /// «Свой цвет…».
     color: ColorEdit,
+    /// Что последним поставили окну: не забирать фокус при щелчке (пока панель спрятана).
+    no_activate: Option<bool>,
     /// `ANTRESOL_SHOT`: снять своё окно в файл и закрыться.
     shot: Option<crate::shot::Shot>,
 }
@@ -203,6 +205,7 @@ impl App {
             naming: None,
             scroll_to: None,
             color: ColorEdit::new(look::LIME.dark.fill),
+            no_activate: None,
             shot: crate::shot::Shot::from_env(),
         };
         if let Some(v) = strip_view {
@@ -281,6 +284,19 @@ impl App {
         let radius = ((corner as f32 * ppp) as i32).min(px.1);
         if self.region != Some(px) && sys::round_bottom_corners(px.0, px.1, radius) {
             self.region = Some(px);
+        }
+    }
+
+    /// Дать окну фокус (панель выехала): сначала снять «не забирать фокус», иначе Windows не активирует окно.
+    fn focus(&mut self, ctx: &egui::Context) {
+        self.set_no_activate(false);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+    }
+
+    /// Спрятанная панель — окно не забирает фокус при щелчке; выехала — забирает. Шлёт, только если поменялось.
+    fn set_no_activate(&mut self, on: bool) {
+        if self.no_activate != Some(on) && sys::set_no_activate(on) {
+            self.no_activate = Some(on);
         }
     }
 
@@ -374,7 +390,7 @@ impl App {
             if !self.edge.shown {
                 self.edge.reveal(Instant::now());
                 self.refreshed = None;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                self.focus(ctx);
             }
         }
         self.take_dropped(ctx);
@@ -453,7 +469,7 @@ impl App {
         if changed && self.edge.shown {
             // Только что выехала: свежие данные и фокус, чтобы клавиатура и Esc работали.
             self.refreshed = None;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            self.focus(ctx);
         }
         if changed && !self.edge.shown {
             if self.view == View::Color {
@@ -491,6 +507,7 @@ impl App {
 
         let t = Motion::of(ctx).toggle(ctx, egui::Id::new("panel-shown"), self.edge.shown, motion::ENTER);
         self.drawn = t;
+        self.set_no_activate(!self.edge.shown);
         self.place(ctx, ppp, t);
 
         // Спрятана — смотрим на мышь 25 раз в секунду; открыта — чаще, ради отсчёта ухода.
@@ -555,7 +572,7 @@ impl App {
         self.view = View::Cards;
         if !was {
             self.refreshed = None;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            self.focus(ctx);
         }
         !was
     }
@@ -1550,7 +1567,7 @@ impl App {
         if r.on_hover_text(t.open_panel).on_hover_cursor(CursorIcon::PointingHand).clicked() {
             self.edge.reveal(Instant::now());
             self.refreshed = None;
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
+            self.focus(ui.ctx());
         }
         if let Some(a) = action {
             self.command_all(Command::Media(a));
@@ -1588,7 +1605,7 @@ impl App {
             self.banner = None;
             self.edge.reveal(Instant::now());
             self.refreshed = None;
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
+            self.focus(ui.ctx());
         }
     }
 

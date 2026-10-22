@@ -1,6 +1,6 @@
 # Antresol — передача дел
 
-Обновлено 22.10.2026. Версия 1.2.0 (этап 1.2 — новый вид по макету, OpenSpec `new-look`, не архивирован; 1.1 — GitHub, `github`; 1.0 — таймеры, `timers`; 0.9 — правка и Bluetooth, `edit-bluetooth`; 0.8 — буфер и лоток, `clipboard-tray`; 0.7 — ресурсы, `resources`; 0.6 — сама панель, `panel-itself`; 0.5 — медиа, `media`; 0.4 — яркость, `monitor-brightness`; 0.3 — профили экрана с горячими клавишами, OpenSpec `display-profiles` архивирован 22.10.2026, спецификация — `openspec/specs/display-profiles`).
+Обновлено 22.10.2026. Версия 1.2.1 (1.2.1 — спрятанная панель не забирает фокус при щелчке по полоске; этап 1.2 — новый вид по макету, OpenSpec `new-look`, не архивирован; 1.1 — GitHub, `github`; 1.0 — таймеры, `timers`; 0.9 — правка и Bluetooth, `edit-bluetooth`; 0.8 — буфер и лоток, `clipboard-tray`; 0.7 — ресурсы, `resources`; 0.6 — сама панель, `panel-itself`; 0.5 — медиа, `media`; 0.4 — яркость, `monitor-brightness`; 0.3 — профили экрана с горячими клавишами, OpenSpec `display-profiles` архивирован 22.10.2026, спецификация — `openspec/specs/display-profiles`).
 
 ## Где мы
 
