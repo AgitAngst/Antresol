@@ -55,12 +55,15 @@ fn request(line: &str) -> Result<String, Error> {
     let mut pipe = pipe.ok_or(Error::NotRunning)?;
     pipe.write_all(format!("{line}\n").as_bytes()).map_err(|e| Error::Failed(e.to_string()))?;
     let mut out = String::new();
-    // Сервер закрывает канал после ответа; «канал закрыт» (109) — нормальный конец.
-    match pipe.read_to_string(&mut out) {
+    // Сервер отключает канал после ответа: «канал закрыт» (109) или «нет второй стороны» (233) — конец
+    // ответа; прочитанное до него остаётся в буфере.
+    let mut bytes = Vec::new();
+    match pipe.read_to_end(&mut bytes) {
         Ok(_) => {}
-        Err(e) if e.raw_os_error() == Some(109) => {}
+        Err(e) if matches!(e.raw_os_error(), Some(109 | 233)) && !bytes.is_empty() => {}
         Err(e) => return Err(Error::Failed(e.to_string())),
     }
+    out.push_str(&String::from_utf8_lossy(&bytes));
     Ok(out)
 }
 
@@ -183,6 +186,14 @@ mod tests {
         let none = parse_state("kamerton\t1\t0.2.1\nnodevice\nend\n").unwrap();
         assert!(none.device.is_none() && none.apps.is_empty());
         assert_eq!(parse_state("err\tboom\n"), Err(Error::Failed("boom".into())));
+    }
+
+    /// Живой Kamerton с каналом: только читает состояние. Не в общем прогоне — `cargo test -- --ignored`.
+    #[test]
+    #[ignore]
+    fn reads_running_kamerton() {
+        let s = state().expect("Kamerton с каналом должен быть запущен");
+        assert!(!s.version.is_empty());
     }
 
     #[test]
