@@ -272,7 +272,13 @@ impl App {
             self.placed = Some((pos, size));
         }
         let px = ((size.x * ppp).round() as i32, (size.y * ppp).round() as i32);
-        let radius = ((CORNER as f32 * ppp) as i32).min(px.1);
+        let corner = match self.strip_kind {
+            _ if t > 0.0 => CORNER,
+            StripKind::Media => 10,
+            StripKind::Banner => 12,
+            _ => 3,
+        };
+        let radius = ((corner as f32 * ppp) as i32).min(px.1);
         if self.region != Some(px) && sys::round_bottom_corners(px.0, px.1, radius) {
             self.region = Some(px);
         }
@@ -460,7 +466,7 @@ impl App {
             self.banner = None;
         }
         self.strip_fill = self.edge.edge_progress(now, show_delay);
-        self.playing = if self.settings.media_strip && self.strip_on {
+        self.playing = if self.settings.media_strip && self.strip_on && !self.edge.shown {
             self.modules.iter_mut().find_map(|m| m.playing(ctx))
         } else {
             None
@@ -543,6 +549,9 @@ impl App {
         }
         let was = self.edge.shown;
         self.edge.reveal(now);
+        if self.view == View::Color {
+            self.restore_accent(ctx);
+        }
         self.view = View::Cards;
         if !was {
             self.refreshed = None;
@@ -814,8 +823,10 @@ impl App {
                 View::Cards => {
                     anvil_ui::chrome::app_mark(ui, Icon::Layers, 24.0);
                     ui.label(egui::RichText::new("Antresol").font(anvil_ui::semibold(14.5)).color(p.text));
-                    vline(ui, p.border);
-                    self.profiles_bar(ui);
+                    if !self.settings.hidden.iter().any(|h| h == "display") {
+                        vline(ui, p.border);
+                        self.profiles_bar(ui);
+                    }
                 }
                 View::Settings => {
                     if w::button(ui, Kind::Ghost, Some(Icon::ArrowLeft), t.settings).on_hover_text(t.back).clicked() {
@@ -895,7 +906,7 @@ impl App {
             if w::button(ui, Kind::Secondary, Some(Icon::Save), t.save).clicked() || enter {
                 done = Some(true);
             }
-            if w::button(ui, Kind::Ghost, None, t.cancel).clicked() {
+            if w::button(ui, Kind::Ghost, None, t.cancel).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                 done = Some(false);
             }
             match done {
@@ -1380,9 +1391,16 @@ impl App {
                         ui.allocate_ui(Vec2::new(note_w, 40.0), |ui| w::note(ui, t.color_note));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if w::button(ui, Kind::Primary, Some(Icon::Check), t.apply).clicked() {
-                                self.settings.accent = look::hex(base);
+                                let dark = Palette::of(ui).dark;
+                                let accent = look::PRESETS
+                                    .iter()
+                                    .find(|a| a.swatch(dark).fill == base)
+                                    .copied()
+                                    .unwrap_or_else(|| look::custom(base));
+                                self.settings.accent =
+                                    if accent.name == "custom" { look::hex(base) } else { accent.name.to_string() };
                                 self.save();
-                                anvil_ui::set_accent(&ctx, look::custom(base));
+                                anvil_ui::set_accent(&ctx, accent);
                                 self.view = View::Settings;
                             }
                             if w::button(ui, Kind::Secondary, None, t.cancel).clicked() {

@@ -186,21 +186,18 @@ impl Module for Media {
         s.now.as_ref().map(|n| n.app.trim_end_matches(".exe").to_string()).unwrap_or_default()
     }
 
-    /// Полоска с медиа: пока она включена, трек перечитываем раз в секунду и при спрятанной панели.
-    fn background(&mut self, settings: &crate::config::Settings) {
-        if settings.media_strip && self.polled.is_none_or(|at| at.elapsed() > std::time::Duration::from_secs(1)) {
-            self.polled = Some(std::time::Instant::now());
-            let _ = self.jobs.send(Job::Read);
-        }
-    }
-
     fn command(&mut self, cmd: &super::Command, _cx: &mut Ctx) {
         if let super::Command::Media(a) = cmd {
             let _ = self.jobs.send(Job::Act(*a));
         }
     }
 
+    /// Панель зовёт, только пока она спрятана и полоска с медиа у края: тогда и перечитываем — раз в секунду.
     fn playing(&mut self, ctx: &egui::Context) -> Option<super::Playing> {
+        if self.polled.is_none_or(|at| at.elapsed() > std::time::Duration::from_secs(1)) {
+            self.polled = Some(std::time::Instant::now());
+            let _ = self.jobs.send(Job::Read);
+        }
         let now = self.shared.lock().unwrap_or_else(|e| e.into_inner()).now.clone()?;
         let cover = self.cover_for(ctx, &now);
         Some(super::Playing { title: now.title, artist: now.artist, playing: now.playing, cover })

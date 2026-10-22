@@ -339,7 +339,7 @@ impl Display {
     }
 
     /// Строка избранного во всю ширину: звезда и «2560 × 1440 · 144»; стоящее — подложка акцента.
-    fn favorite_row(ui: &mut Ui, salt: (u32, u32), on: bool, label: &str) -> egui::Response {
+    fn favorite_row(ui: &mut Ui, on: bool, label: &str) -> egui::Response {
         let p = Palette::of(ui);
         let (rect, r) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 28.0), Sense::click());
         let hovered = r.hovered();
@@ -370,7 +370,6 @@ impl Display {
             color,
         );
         w::focus_ring(ui, rect, &r, 6);
-        let _ = salt;
         r.on_hover_cursor(egui::CursorIcon::PointingHand)
     }
 
@@ -555,7 +554,7 @@ impl Module for Display {
                             None => format!("{fw} × {fh}"),
                         };
                         let on = (fw, fh) == (cur.width, cur.height);
-                        if Self::favorite_row(ui, (fw, fh), on, &label).clicked() && !on {
+                        if Self::favorite_row(ui, on, &label).clicked() && !on {
                             want = m;
                         }
                     }
