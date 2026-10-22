@@ -41,7 +41,7 @@ pub enum Error {
 /// Запрос к Kamerton: одна строка без `\n`, ответ целиком.
 fn request(line: &str) -> Result<String, Error> {
     let mut pipe = None;
-    // Канал занят другим клиентом — коротко подождать.
+    // Канал занят другим клиентом — коротко подождать; так и не дождались — «занят», а не «не запущен».
     for _ in 0..5 {
         match std::fs::OpenOptions::new().read(true).write(true).open(PIPE) {
             Ok(p) => {
@@ -52,13 +52,14 @@ fn request(line: &str) -> Result<String, Error> {
             Err(_) => return Err(Error::NotRunning),
         }
     }
-    let mut pipe = pipe.ok_or(Error::NotRunning)?;
+    let mut pipe = pipe.ok_or_else(|| Error::Failed("busy".into()))?;
     pipe.write_all(format!("{line}\n").as_bytes()).map_err(|e| Error::Failed(e.to_string()))?;
     let mut out = String::new();
     // Сервер отключает канал после ответа: «канал закрыт» (109) или «нет второй стороны» (233) — конец
     // ответа; прочитанное до него остаётся в буфере.
+    // Ответ больше 1 МБ — не наш: дальше не читаем.
     let mut bytes = Vec::new();
-    match pipe.read_to_end(&mut bytes) {
+    match (&mut pipe).take(1 << 20).read_to_end(&mut bytes) {
         Ok(_) => {}
         Err(e) if matches!(e.raw_os_error(), Some(109 | 233)) && !bytes.is_empty() => {}
         Err(e) => return Err(Error::Failed(e.to_string())),
@@ -84,6 +85,9 @@ fn pct(s: &str) -> u32 {
 pub fn parse_state(text: &str) -> Result<State, Error> {
     let mut lines = text.lines();
     let head: Vec<&str> = lines.next().unwrap_or("").split('\t').collect();
+    if head.first() == Some(&"kamerton") && head.get(1) != Some(&"1") {
+        return Err(Error::Failed(format!("protocol {}", head.get(1).unwrap_or(&"?"))));
+    }
     if head.first() != Some(&"kamerton") {
         let msg = text.strip_prefix("err\t").unwrap_or(text).trim();
         return Err(Error::Failed(msg.to_string()));
@@ -184,6 +188,7 @@ mod tests {
         assert!(s.apps[0].muted);
         assert_eq!(s.apps[1].volume, 100, "больше 100 — 100");
         let none = parse_state("kamerton\t1\t0.2.1\nnodevice\nend\n").unwrap();
+        assert_eq!(parse_state("kamerton\t2\tx\nend\n"), Err(Error::Failed("protocol 2".into())));
         assert!(none.device.is_none() && none.apps.is_empty());
         assert_eq!(parse_state("err\tboom\n"), Err(Error::Failed("boom".into())));
     }

@@ -101,26 +101,39 @@ pub fn shifted(places: &[(String, i32, i32)], primary: &str) -> Option<Vec<(Stri
     Some(places.iter().map(|(d, x, y)| (d.clone(), x - px, y - py)).collect())
 }
 
+/// Записать в реестр место монитора (без применения — `CDS_NORESET`), основной — с `CDS_SET_PRIMARY`.
+fn write_position(device: &str, x: i32, y: i32, primary: bool) -> Result<(), String> {
+    let name = wide(device);
+    let mut dm = DEVMODEW { dmSize: size_of::<DEVMODEW>() as u16, ..Default::default() };
+    if !unsafe { EnumDisplaySettingsW(PCWSTR(name.as_ptr()), ENUM_CURRENT_SETTINGS, &mut dm) }.as_bool() {
+        return Err(format!("cannot read {device}"));
+    }
+    dm.dmFields = DM_POSITION;
+    dm.Anonymous1.Anonymous2.dmPosition.x = x;
+    dm.Anonymous1.Anonymous2.dmPosition.y = y;
+    let mut flags: CDS_TYPE = CDS_UPDATEREGISTRY | CDS_NORESET;
+    if primary {
+        flags |= CDS_SET_PRIMARY;
+    }
+    let r = unsafe { ChangeDisplaySettingsExW(PCWSTR(name.as_ptr()), Some(&dm), None, flags, None) };
+    if r == DISP_CHANGE_SUCCESSFUL {
+        Ok(())
+    } else {
+        Err(format!("ChangeDisplaySettingsEx failed on {device}: {}", r.0))
+    }
+}
+
 /// Сделать монитор основным: места всех мониторов (левый верхний угол в пикселях экрана) — `places`.
-/// Пишется в реестр без применения (`CDS_NORESET`), потом применяется разом.
+/// Пишется в реестр без применения (`CDS_NORESET`), потом применяется разом. Сбой посреди записи —
+/// уже записанное возвращается к прежнему (иначе его применил бы любой следующий вызов), без применения.
 pub fn set_primary(device: &str, places: &[(String, i32, i32)]) -> Result<(), String> {
     let moved = shifted(places, device).ok_or("monitor not found")?;
-    for (d, x, y) in &moved {
-        let name = wide(d);
-        let mut dm = DEVMODEW { dmSize: size_of::<DEVMODEW>() as u16, ..Default::default() };
-        if !unsafe { EnumDisplaySettingsW(PCWSTR(name.as_ptr()), ENUM_CURRENT_SETTINGS, &mut dm) }.as_bool() {
-            return Err(format!("cannot read {d}"));
-        }
-        dm.dmFields = DM_POSITION;
-        dm.Anonymous1.Anonymous2.dmPosition.x = *x;
-        dm.Anonymous1.Anonymous2.dmPosition.y = *y;
-        let mut flags: CDS_TYPE = CDS_UPDATEREGISTRY | CDS_NORESET;
-        if d == device {
-            flags |= CDS_SET_PRIMARY;
-        }
-        let r = unsafe { ChangeDisplaySettingsExW(PCWSTR(name.as_ptr()), Some(&dm), None, flags, None) };
-        if r != DISP_CHANGE_SUCCESSFUL {
-            return Err(format!("ChangeDisplaySettingsEx failed on {d}: {}", r.0));
+    for (i, (d, x, y)) in moved.iter().enumerate() {
+        if let Err(e) = write_position(d, *x, *y, d == device) {
+            for (od, ox, oy) in &places[..i] {
+                let _ = write_position(od, *ox, *oy, *ox == 0 && *oy == 0);
+            }
+            return Err(e);
         }
     }
     // Применить записанное разом.

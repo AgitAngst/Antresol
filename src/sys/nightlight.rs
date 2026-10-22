@@ -51,6 +51,10 @@ fn leb5(mut v: u64) -> [u8; 5] {
 pub fn with_state(d: &[u8], on: bool, now: u64) -> Option<Vec<u8>> {
     let was = parse(d)?;
     let mut out = d.to_vec();
+    // Длина — один байт LEB128: от 0x80 и выше она стала бы двухбайтной — такое не трогаем.
+    if out[LEN] >= 0x7e {
+        return None;
+    }
     if on && !was {
         out.splice(FLAG..FLAG, [0x02, 0x01]);
         out[LEN] = out[LEN].checked_add(2)?;
