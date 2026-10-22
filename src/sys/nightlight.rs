@@ -100,6 +100,9 @@ pub fn state() -> Option<bool> {
 }
 
 pub fn set(on: bool) -> Result<(), String> {
+    if super::demo() {
+        return Ok(());
+    }
     let data = read().ok_or("night light state not found")?;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let new = with_state(&data, on, now).ok_or("unknown night light format")?;

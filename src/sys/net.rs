@@ -107,21 +107,37 @@ pub fn vpns() -> Vec<Vpn> {
     if super::demo() {
         return vec![Vpn { name: "Demo Office".into(), connected: false }];
     }
-    let mut entries = vec![RASENTRYNAMEW { dwSize: size_of::<RASENTRYNAMEW>() as u32, ..Default::default() }; 16];
-    let mut cb = (entries.len() * size_of::<RASENTRYNAMEW>()) as u32;
+    // Буфер мал (603) — Windows называет нужный размер: второй заход с ним.
+    let mut entries: Vec<RASENTRYNAMEW> = Vec::new();
     let mut count = 0u32;
-    let r = unsafe { RasEnumEntriesW(PCWSTR::null(), PCWSTR::null(), Some(entries.as_mut_ptr()), &mut cb, &mut count) };
-    if r != 0 {
-        return Vec::new();
+    let mut cap = 16usize;
+    for _ in 0..2 {
+        entries = vec![RASENTRYNAMEW { dwSize: size_of::<RASENTRYNAMEW>() as u32, ..Default::default() }; cap];
+        let mut cb = (cap * size_of::<RASENTRYNAMEW>()) as u32;
+        let r =
+            unsafe { RasEnumEntriesW(PCWSTR::null(), PCWSTR::null(), Some(entries.as_mut_ptr()), &mut cb, &mut count) };
+        match r {
+            0 => break,
+            603 => cap = (cb as usize).div_ceil(size_of::<RASENTRYNAMEW>()).max(cap + 1),
+            _ => return Vec::new(),
+        }
     }
-    let mut conns = vec![RASCONNW { dwSize: size_of::<RASCONNW>() as u32, ..Default::default() }; 8];
-    let mut cb = (conns.len() * size_of::<RASCONNW>()) as u32;
-    let mut live = 0u32;
-    let connected: Vec<String> = if unsafe { RasEnumConnectionsW(Some(conns.as_mut_ptr()), &mut cb, &mut live) } == 0 {
-        conns[..live as usize].iter().map(|c| utf16(&c.szEntryName)).collect()
-    } else {
-        Vec::new()
-    };
+    let mut connected: Vec<String> = Vec::new();
+    let mut cap = 8usize;
+    for _ in 0..2 {
+        let mut conns = vec![RASCONNW { dwSize: size_of::<RASCONNW>() as u32, ..Default::default() }; cap];
+        let mut cb = (cap * size_of::<RASCONNW>()) as u32;
+        let mut live = 0u32;
+        match unsafe { RasEnumConnectionsW(Some(conns.as_mut_ptr()), &mut cb, &mut live) } {
+            0 => {
+                connected = conns[..(live as usize).min(cap)].iter().map(|c| utf16(&c.szEntryName)).collect();
+                break;
+            }
+            603 => cap = (cb as usize).div_ceil(size_of::<RASCONNW>()).max(cap + 1),
+            _ => break,
+        }
+    }
+    let count = (count as usize).min(entries.len()) as u32;
     entries[..count as usize]
         .iter()
         .map(|e| {
@@ -136,17 +152,35 @@ pub fn set_vpn(name: &str, on: bool) -> std::result::Result<(), String> {
     if super::demo() {
         return Ok(());
     }
-    let mut cmd = std::process::Command::new("rasdial");
+    let windir = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+    let mut cmd = std::process::Command::new(format!(r"{windir}\System32\rasdial.exe"));
     cmd.arg(name);
     if !on {
         cmd.arg("/disconnect");
     }
-    let out = cmd.creation_flags(CREATE_NO_WINDOW).output().map_err(|e| e.to_string())?;
-    if out.status.success() {
+    let mut child = cmd
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    // Сервер VPN не отвечает — не ждать вечно: поток модуля нужен и Wi‑Fi.
+    let start = Instant::now();
+    let status = loop {
+        if let Some(s) = child.try_wait().map_err(|e| e.to_string())? {
+            break s;
+        }
+        if start.elapsed() > Duration::from_secs(45) {
+            let _ = child.kill();
+            return Err("rasdial: timeout".into());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    if status.success() {
         Ok(())
     } else {
         // У rasdial ответ на языке системы: показываем код возврата.
-        Err(format!("rasdial: {}", out.status.code().unwrap_or(-1)))
+        Err(format!("rasdial: {}", status.code().unwrap_or(-1)))
     }
 }
 

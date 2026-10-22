@@ -49,7 +49,9 @@ fn request(line: &str) -> Result<String, Error> {
                 break;
             }
             Err(e) if e.raw_os_error() == Some(231) => std::thread::sleep(Duration::from_millis(40)),
-            Err(_) => return Err(Error::NotRunning),
+            // Нет канала (2) — Kamerton не запущен; другое — ошибка с кодом.
+            Err(e) if e.raw_os_error() == Some(2) => return Err(Error::NotRunning),
+            Err(e) => return Err(Error::Failed(e.to_string())),
         }
     }
     let mut pipe = pipe.ok_or_else(|| Error::Failed("busy".into()))?;

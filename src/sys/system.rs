@@ -24,8 +24,12 @@ use windows::core::{GUID, PCWSTR};
 
 use super::wide;
 
-/// Не давать уснуть компьютеру и гаснуть экрану (`true`) или снова как обычно.
+/// Не давать уснуть компьютеру и гаснуть экрану (`true`) или снова как обычно. Ответ — получилось ли
+/// (ноль от Windows — ошибка; прежнее состояние с `ES_CONTINUOUS` нулём не бывает).
 pub fn keep_awake(on: bool) -> bool {
+    if super::demo() {
+        return true;
+    }
     let flags = if on { ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED } else { ES_CONTINUOUS };
     unsafe { SetThreadExecutionState(flags) }.0 != 0
 }
@@ -74,21 +78,27 @@ pub fn dark_theme() -> Option<bool> {
 
 /// Тёмная или светлая тема Windows — и для программ, и для панели задач.
 pub fn set_dark_theme(dark: bool) -> Result<(), String> {
+    if super::demo() {
+        return Ok(());
+    }
     let light = if dark { 0 } else { 1 };
     write_dword(THEME, "AppsUseLightTheme", light)?;
     write_dword(THEME, "SystemUsesLightTheme", light)?;
-    let topic = wide("ImmersiveColorSet");
-    unsafe {
-        let _ = SendMessageTimeoutW(
-            HWND_BROADCAST,
-            WM_SETTINGCHANGE,
-            WPARAM(0),
-            LPARAM(topic.as_ptr() as isize),
-            SMTO_ABORTIFHUNG,
-            200,
-            None,
-        );
-    }
+    // Рассылка всем окнам может ждать по 200 мс на каждое зависшее — не в потоке панели.
+    std::thread::spawn(|| {
+        let topic = wide("ImmersiveColorSet");
+        unsafe {
+            let _ = SendMessageTimeoutW(
+                HWND_BROADCAST,
+                WM_SETTINGCHANGE,
+                WPARAM(0),
+                LPARAM(topic.as_ptr() as isize),
+                SMTO_ABORTIFHUNG,
+                200,
+                None,
+            );
+        }
+    });
     Ok(())
 }
 
@@ -101,6 +111,9 @@ pub fn notifications_off() -> Option<bool> {
 }
 
 pub fn set_notifications_off(off: bool) -> Result<(), String> {
+    if super::demo() {
+        return Ok(());
+    }
     write_dword(PUSH, "ToastEnabled", if off { 0 } else { 1 })
 }
 
