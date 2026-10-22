@@ -117,6 +117,12 @@ pub fn read() -> windows::core::Result<State> {
             state.muted = v.GetMute()?.as_bool();
         }
     }
+    if super::demo() {
+        const NAMES: [&str; 4] = ["Speakers", "Headphones", "Monitor audio", "USB headset"];
+        for (i, d) in state.devices.iter_mut().enumerate() {
+            d.name = NAMES[i % NAMES.len()].to_string();
+        }
+    }
     Ok(state)
 }
 

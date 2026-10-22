@@ -25,6 +25,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::PCWSTR;
 
+/// Демо-режим для снимков в открытый репозиторий (`ANTRESOL_DEMO=1`): вместо настоящих имён
+/// монитора и звуковых устройств — выдуманные. Остальное работает как обычно.
+pub fn demo() -> bool {
+    std::env::var_os("ANTRESOL_DEMO").is_some()
+}
+
 /// Строка для Win32: UTF-16 с нулём в конце.
 pub fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()

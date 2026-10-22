@@ -171,6 +171,9 @@ fn source_of(device: &str) -> Option<Source> {
 
 /// Имя монитора, как его называет сам монитор («DELL U2720Q»); пусто — если не сказал.
 pub fn monitor_name(device: &str) -> String {
+    if super::demo() {
+        return "Monitor 27".to_string();
+    }
     source_of(device).map(|s| s.monitor_name).unwrap_or_default()
 }
 

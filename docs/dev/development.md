@@ -15,6 +15,8 @@ python E:/dev_personal/tools/checks.py --repo . -j 4 fmt test clippy
 
 - `target\debug\antresol.exe` — в debug видна консоль с журналом (по-английски).
 - `ANTRESOL_TRACE=1` — печатать каждую смену места или размера окна (доля выезда, место, размер, тема).
+- `ANTRESOL_DEMO=1` — выдуманные имена монитора и звуковых устройств: снимки для открытого репозитория
+  (`docs/img`) — только так, на демо-настройках (папка `antresol-scratch\demo`).
 - `ANTRESOL_VIEW=settings` — открыть сразу настройки (для снимков без щелчков).
 - Своя папка настроек для проверки — `APPDATA=E:\dev_personal\antresol-scratch\appdata` (задавать через
   PowerShell `$env:APPDATA`, из Git Bash путь не доходит); пока запущена панель владельца, собирать копию в
