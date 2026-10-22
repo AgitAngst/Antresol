@@ -30,6 +30,8 @@ pub struct Media {
     shared: Arc<Mutex<Shared>>,
     /// Обложка в egui и для какого трека.
     cover: Option<(String, egui::TextureHandle)>,
+    /// Когда последний раз просили перечитать, пока панель спрятана (полоска с медиа).
+    polled: Option<std::time::Instant>,
 }
 
 impl Default for Media {
@@ -38,7 +40,7 @@ impl Default for Media {
         let shared = Arc::new(Mutex::new(Shared::default()));
         let s = shared.clone();
         std::thread::spawn(move || worker(rx, s));
-        Media { jobs: tx, shared, cover: None }
+        Media { jobs: tx, shared, cover: None, polled: None }
     }
 }
 
@@ -122,6 +124,50 @@ fn skip_button(ui: &mut Ui, forward: bool, hint: &str) -> egui::Response {
     r.on_hover_text(hint).on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+/// Круглая «играть/пауза» на акценте — главная кнопка плеера (карточка и полоска).
+pub fn play_button(ui: &mut Ui, icon: Icon, hint: &str, size: f32) -> egui::Response {
+    let p = Palette::of(ui);
+    let (rect, r) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+    let fill = if r.hovered() { p.accent_text } else { p.accent };
+    ui.painter().circle_filled(rect.center(), size / 2.0, fill);
+    let glyph = (size * 0.42).round();
+    anvil_ui::icons::paint(ui.painter(), Rect::from_center_size(rect.center(), Vec2::splat(glyph)), icon, p.on_accent);
+    w::focus_ring(ui, rect, &r, (size / 2.0) as u8);
+    r.on_hover_text(hint).on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// «Назад» или «вперёд» своего размера — для полоски.
+pub fn skip(ui: &mut Ui, forward: bool, hint: &str, size: f32) -> egui::Response {
+    let p = Palette::of(ui);
+    let (rect, r) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+    if r.hovered() {
+        ui.painter().rect_filled(rect, 6, p.hover);
+    }
+    let c = rect.center();
+    let (dir, s) = (if forward { 1.0 } else { -1.0 }, size * 0.17);
+    let tri =
+        vec![Pos2::new(c.x - dir * s, c.y - s), Pos2::new(c.x + dir * s * 0.8, c.y), Pos2::new(c.x - dir * s, c.y + s)];
+    ui.painter().add(egui::Shape::convex_polygon(tri, p.text, Stroke::NONE));
+    let bar = c.x + dir * (s * 0.8 + 1.5);
+    ui.painter().line_segment([Pos2::new(bar, c.y - s), Pos2::new(bar, c.y + s)], Stroke::new(1.8, p.text));
+    w::focus_ring(ui, rect, &r, 6);
+    r.on_hover_text(hint).on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+impl Media {
+    /// Обложка трека в текстуру — только когда сменился трек.
+    fn cover_for(&mut self, ctx: &egui::Context, now: &NowPlaying) -> Option<egui::TextureHandle> {
+        let key = track_key(now);
+        if self.cover.as_ref().is_none_or(|(k, _)| *k != key) {
+            self.cover = now.cover.as_ref().map(|(cw, ch, rgba)| {
+                let img = egui::ColorImage::from_rgba_unmultiplied([*cw as usize, *ch as usize], &rgba[..]);
+                (key.clone(), ctx.load_texture("media-cover", img, egui::TextureOptions::LINEAR))
+            });
+        }
+        self.cover.as_ref().map(|(_, t)| t.clone())
+    }
+}
+
 impl Module for Media {
     fn key(&self) -> &'static str {
         "media"
@@ -133,6 +179,31 @@ impl Module for Media {
 
     fn refresh(&mut self, _monitor: &str) {
         let _ = self.jobs.send(Job::Read);
+    }
+
+    fn meta(&self) -> String {
+        let s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+        s.now.as_ref().map(|n| n.app.trim_end_matches(".exe").to_string()).unwrap_or_default()
+    }
+
+    /// Полоска с медиа: пока она включена, трек перечитываем раз в секунду и при спрятанной панели.
+    fn background(&mut self, settings: &crate::config::Settings) {
+        if settings.media_strip && self.polled.is_none_or(|at| at.elapsed() > std::time::Duration::from_secs(1)) {
+            self.polled = Some(std::time::Instant::now());
+            let _ = self.jobs.send(Job::Read);
+        }
+    }
+
+    fn command(&mut self, cmd: &super::Command, _cx: &mut Ctx) {
+        if let super::Command::Media(a) = cmd {
+            let _ = self.jobs.send(Job::Act(*a));
+        }
+    }
+
+    fn playing(&mut self, ctx: &egui::Context) -> Option<super::Playing> {
+        let now = self.shared.lock().unwrap_or_else(|e| e.into_inner()).now.clone()?;
+        let cover = self.cover_for(ctx, &now);
+        Some(super::Playing { title: now.title, artist: now.artist, playing: now.playing, cover })
     }
 
     fn ui(&mut self, ui: &mut Ui, cx: &mut Ctx) {
@@ -158,14 +229,7 @@ impl Module for Media {
             return;
         };
 
-        // Обложка в текстуру — только когда сменился трек.
-        let key = track_key(&now);
-        if self.cover.as_ref().is_none_or(|(k, _)| *k != key) {
-            self.cover = now.cover.as_ref().map(|(cw, ch, rgba)| {
-                let img = egui::ColorImage::from_rgba_unmultiplied([*cw as usize, *ch as usize], &rgba[..]);
-                (key.clone(), ui.ctx().load_texture("media-cover", img, egui::TextureOptions::LINEAR))
-            });
-        }
+        self.cover_for(ui.ctx(), &now);
 
         ui.horizontal(|ui| {
             let size = Vec2::splat(64.0);
@@ -202,13 +266,16 @@ impl Module for Media {
                 }
             });
         });
-        ui.add_space(6.0);
+        ui.add_space(10.0);
+        let row = 30.0 + 14.0 + 42.0 + 14.0 + 30.0;
         ui.horizontal(|ui| {
+            ui.add_space(((ui.available_width() - row) / 2.0).max(0.0));
+            ui.spacing_mut().item_spacing.x = 14.0;
             if skip_button(ui, false, t.media_previous).clicked() {
                 let _ = self.jobs.send(Job::Act(Action::Previous));
             }
             let (icon, hint) = if now.playing { (Icon::Pause, t.media_pause) } else { (Icon::Play, t.media_play) };
-            if w::icon_button(ui, icon, hint).clicked() {
+            if play_button(ui, icon, hint, 42.0).clicked() {
                 let _ = self.jobs.send(Job::Act(Action::PlayPause));
             }
             if skip_button(ui, true, t.media_next).clicked() {

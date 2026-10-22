@@ -3,6 +3,7 @@
 
 mod app;
 mod config;
+mod look;
 mod modules;
 mod panel;
 mod shot;

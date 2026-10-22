@@ -12,7 +12,7 @@ pub mod resources;
 pub mod timers;
 pub mod tray;
 
-use anvil_ui::Tone;
+use anvil_ui::{Icon, Tone};
 use eframe::egui::{self, Ui};
 
 use crate::texts::Tr;
@@ -33,8 +33,21 @@ pub struct Ctx<'a> {
 /// Команда модулю извне карточки: например, клавиша профиля нажата при спрятанной панели.
 pub enum Command {
     ApplyProfile(usize),
+    /// Сохранить то, что стоит сейчас, профилем с этим именем (чипы в шапке, «+»).
+    SaveProfile(String),
     /// Файлы бросили на панель (полные пути).
     Dropped(Vec<String>),
+    /// Кнопка плеера на спрятанной полоске.
+    Media(crate::sys::media::Action),
+}
+
+/// Что играет — для спрятанной полоски.
+#[derive(Clone)]
+pub struct Playing {
+    pub title: String,
+    pub artist: String,
+    pub playing: bool,
+    pub cover: Option<egui::TextureHandle>,
 }
 
 pub trait Module {
@@ -67,6 +80,53 @@ pub trait Module {
     fn attention(&mut self, _t: &Tr) -> Option<String> {
         None
     }
+    /// Пояснение справа в заголовке карточки: монитор, программа плеера.
+    fn meta(&self) -> String {
+        String::new()
+    }
+    /// Какой профиль экрана стоит сейчас (шапка выделяет его чип).
+    fn active_profile(&self, _profiles: &[crate::config::Profile]) -> Option<usize> {
+        None
+    }
+    /// Что играет — для спрятанной полоски («Медиа на спрятанной полоске»).
+    fn playing(&mut self, _ctx: &egui::Context) -> Option<Playing> {
+        None
+    }
+}
+
+/// Значок карточки в заголовке — по ключу модуля.
+pub fn icon_of(key: &str) -> Icon {
+    match key {
+        "display" => Icon::Monitor,
+        "brightness" => Icon::Sun,
+        "media" => Icon::Play,
+        "resources" => Icon::Server,
+        "clipboard" => Icon::Copy,
+        "tray" => Icon::Folder,
+        "bluetooth" => Icon::Broadcast,
+        "timers" => Icon::Clock,
+        "github" => Icon::Branch,
+        _ => Icon::Rocket,
+    }
+}
+
+/// Заголовок карточки: значок, подпись заглавными и пояснение справа — всё цветом `weak`.
+pub fn card_header(ui: &mut Ui, icon: Icon, title: &str, meta: &str) {
+    let p = anvil_ui::Palette::of(ui);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
+        anvil_ui::icons::paint(ui.painter(), rect, icon, p.weak);
+        anvil_ui::widgets::section_label(ui, title);
+        if !meta.is_empty() {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let mut job =
+                    egui::text::LayoutJob::simple_singleline(meta.to_owned(), egui::FontId::proportional(12.0), p.weak);
+                job.wrap = egui::text::TextWrapping::truncate_at_width(ui.available_width().max(20.0));
+                ui.label(job);
+            });
+        }
+    });
 }
 
 pub fn all() -> Vec<Box<dyn Module>> {
@@ -108,41 +168,78 @@ pub fn row(ui: &mut Ui, id: egui::Id, selected: bool, label: &str, trailing: &st
 }
 
 /// Выбор одного из нескольких — «чипами», которые переносятся на новую строку, когда не влезают
-/// (у `segmented` набора полоса одна и обрезается). Выбранный — как ползунок `segmented`:
-/// `card` с рамкой `border_strong`, текст `text`; остальные — `raised`, текст `weak`.
+/// (у `segmented` набора полоса одна и обрезается). Выбранный — мягкая подложка акцента с рамкой
+/// `accent` и полужирным `accent_text`; остальные — `raised`, текст `weak`.
 pub fn chips<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: &[(T, &str)]) -> bool {
-    let p = anvil_ui::Palette::of(ui);
-    let motion = anvil_ui::motion::Motion::of(ui.ctx());
     let mut changed = false;
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
         for (i, (option, label)) in options.iter().enumerate() {
-            let font = egui::FontId::proportional(13.0);
-            let text_w = ui.painter().layout_no_wrap(label.to_string(), font.clone(), p.text).size().x;
-            let (rect, r) = ui.allocate_exact_size(egui::vec2(text_w + 20.0, 28.0), egui::Sense::click());
             let on = *value == *option;
-            let hovered = r.hovered();
-            let fill = if on {
-                p.card
-            } else if hovered {
-                p.hover
-            } else {
-                p.raised
-            };
-            let id = ui.id().with(("chip", i, *label));
-            let fill = motion.color(ui.ctx(), id.with("fill"), fill, anvil_ui::motion::HOVER);
-            let stroke = if on { p.border_strong } else { p.border };
-            ui.painter().rect(rect, 6, fill, egui::Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
-            let color = if on || hovered { p.text } else { p.weak };
-            ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, *label, font, color);
-            anvil_ui::widgets::focus_ring(ui, rect, &r, 6);
-            let r = r.on_hover_cursor(egui::CursorIcon::PointingHand);
-            r.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, on, *label));
-            if r.clicked() && !on {
+            if chip(ui, ("chip", i, *label), on, label, None).clicked() && !on {
                 *value = *option;
                 changed = true;
             }
         }
     });
     changed
+}
+
+/// Те же чипы сеткой: `columns` равных колонок на всю ширину.
+pub fn chip_grid<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: &[(T, &str)], columns: usize) -> bool {
+    let mut changed = false;
+    let gap = 4.0;
+    let width = ((ui.available_width() - gap * (columns as f32 - 1.0)) / columns as f32).floor();
+    for (r, row) in options.chunks(columns.max(1)).enumerate() {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
+            for (c, (option, label)) in row.iter().enumerate() {
+                let on = *value == *option;
+                if chip(ui, ("grid", r, c, *label), on, label, Some(width)).clicked() && !on {
+                    *value = *option;
+                    changed = true;
+                }
+            }
+        });
+    }
+    changed
+}
+
+/// Один чип: высота 28; `width` — своя ширина (иначе по тексту).
+pub fn chip(
+    ui: &mut Ui,
+    salt: impl std::hash::Hash + std::fmt::Debug,
+    on: bool,
+    label: &str,
+    width: Option<f32>,
+) -> egui::Response {
+    let p = anvil_ui::Palette::of(ui);
+    let motion = anvil_ui::motion::Motion::of(ui.ctx());
+    let font = if on { anvil_ui::semibold(13.0) } else { egui::FontId::proportional(13.0) };
+    let text_w = ui.painter().layout_no_wrap(label.to_string(), font.clone(), p.text).size().x;
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(width.unwrap_or(text_w + 20.0), 28.0), egui::Sense::click());
+    let hovered = r.hovered();
+    let fill = if on {
+        p.badge_fill(p.accent)
+    } else if hovered {
+        p.hover
+    } else {
+        p.raised
+    };
+    let id = ui.id().with(salt);
+    let fill = motion.color(ui.ctx(), id.with("fill"), fill, anvil_ui::motion::HOVER);
+    let stroke = if on { p.accent } else { p.border };
+    ui.painter().rect(rect, 6, fill, egui::Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
+    let color = if on {
+        p.accent_text
+    } else if hovered {
+        p.text
+    } else {
+        p.weak
+    };
+    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, label, font, color);
+    anvil_ui::widgets::focus_ring(ui, rect, &r, 6);
+    let r = r.on_hover_cursor(egui::CursorIcon::PointingHand);
+    r.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, on, label));
+    r
 }

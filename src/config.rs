@@ -87,6 +87,10 @@ pub struct Settings {
     pub rates: Vec<(Res, u32)>,
     /// Профили экрана: имя, клавиша и режим каждого монитора.
     pub profiles: Vec<Profile>,
+    /// Цвет программы: имя готового (`lime`, `violet`…) или свой `#rrggbb` — см. `look`.
+    pub accent: String,
+    /// Пока что-то играет, спрятанная полоска шире: трек и кнопки плеера.
+    pub media_strip: bool,
 }
 
 // ─── Профили экрана ─────────────────────────────────────────────────────────
@@ -254,7 +258,7 @@ impl Default for Settings {
         Settings {
             common: CommonSettings::default(),
             width: 1300.0,
-            height: 300.0,
+            height: 340.0,
             monitor: String::new(),
             show_delay_ms: 150,
             hide_delay_ms: 450,
@@ -271,6 +275,8 @@ impl Default for Settings {
             favorites: Vec::new(),
             rates: Vec::new(),
             profiles: Vec::new(),
+            accent: crate::look::LIME.name.to_string(),
+            media_strip: false,
         }
     }
 }
@@ -348,6 +354,8 @@ pub fn parse(text: &str) -> Settings {
             }
             "panel_hotkey" => s.panel_hotkey = Hotkey::parse(value),
             "clipboard" => s.clipboard = value != "false",
+            "accent" if crate::look::valid(value) => s.accent = value.to_lowercase(),
+            "media_strip" => s.media_strip = value == "true",
             "modules" => s.order = list(value),
             "hidden" => s.hidden = list(value),
             // Только похожее на «владелец/имя»: кривое из файла не идёт в адрес запроса.
@@ -403,6 +411,7 @@ pub fn format(s: &Settings) -> String {
         s.fullscreen_guard
     );
     out.push_str(&format!("strip={}\nexclude={}\nclipboard={}\n", s.strip, s.exclude.join(","), s.clipboard));
+    out.push_str(&format!("accent={}\nmedia_strip={}\n", s.accent, s.media_strip));
     out.push_str(&format!(
         "modules={}\nhidden={}\ngithub={}\n",
         s.order.join(","),
@@ -673,6 +682,8 @@ mod tests {
             monitor: ALL_MONITORS.into(),
             clipboard: false,
             tray: vec![r"C:\Demo\a.txt".into(), r"D:\b c.pdf".into()],
+            accent: "#123456".into(),
+            media_strip: true,
             ..Default::default()
         };
         let back = parse(&format(&s));
@@ -680,6 +691,9 @@ mod tests {
         assert!(back.excluded("GAME.EXE") && !back.excluded("chrome.exe"));
         assert!(parse("exclude= A.exe , ,b.exe\n").excluded("a.exe"));
         assert!(Settings::default().strip, "полоска по умолчанию есть");
+        assert_eq!(Settings::default().accent, "lime");
+        assert_eq!(parse("accent=red\n").accent, "lime", "незнакомый цвет — по умолчанию");
+        assert_eq!(parse("accent=SKY\n").accent, "sky");
     }
 
     #[test]

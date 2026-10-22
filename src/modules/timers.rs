@@ -187,7 +187,9 @@ impl Module for Timers {
                             timer.toggle(now);
                         }
                         let color = if timer.paused() { p.faint } else { p.text };
-                        ui.label(egui::RichText::new(clock(left)).font(anvil_ui::semibold(16.0)).color(color));
+                        ui.label(
+                            egui::RichText::new(clock(left)).font(egui::FontId::monospace(20.0)).strong().color(color),
+                        );
                     });
                 });
                 let done = 1.0 - left.as_secs_f32() / timer.total.as_secs_f32().max(1.0);

@@ -11,7 +11,7 @@ use anvil_ui::widgets::{self as w, Kind};
 use anvil_ui::{Palette, Tone};
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 
-use super::{Command, Ctx, Module, chips, row};
+use super::{Command, Ctx, Module, chip_grid, row};
 use crate::config::{Profile, ProfileMonitor};
 use crate::sys::display::{self, Mode, Scale};
 use crate::sys::monitor;
@@ -54,8 +54,8 @@ pub struct Display {
     /// Режимы и масштаб всех мониторов на момент последнего чтения.
     states: Vec<State>,
     pending: Option<Pending>,
-    /// Вводят имя нового профиля.
-    naming: Option<String>,
+    /// Показан полный список разрешений, а не избранное.
+    all_res: bool,
 }
 
 /// Стоит ли профиль сейчас: у всех его мониторов тот же режим и (если задан) масштаб.
@@ -320,69 +320,79 @@ impl Display {
         });
     }
 
-    /// Профили чипами и «+» — сохранить текущее под именем.
-    fn profiles_ui(&mut self, ui: &mut Ui, cx: &mut Ctx) {
-        let t = cx.t;
-        w::section_label(ui, t.profiles);
-        if let Some(mut name) = self.naming.take() {
-            let mut done = None;
-            ui.horizontal_wrapped(|ui| {
-                let edit = ui.add(egui::TextEdit::singleline(&mut name).hint_text(t.profile_name).desired_width(140.0));
-                if name.is_empty() && !edit.has_focus() && !edit.lost_focus() {
-                    edit.request_focus();
-                }
-                let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if w::button(ui, Kind::Secondary, Some(anvil_ui::Icon::Save), t.save).clicked() || enter {
-                    done = Some(true);
-                }
-                if w::button(ui, Kind::Ghost, None, t.cancel).clicked() {
-                    done = Some(false);
-                }
+    /// Сохранить то, что стоит сейчас, профилем (шапка, «+»). Пустое имя — «Профиль N»;
+    /// то же имя — обновить режимы, клавишу оставить.
+    fn save_profile(&mut self, name: &str, cx: &mut Ctx) {
+        let mut clean = Profile::clean_name(name);
+        if clean.is_empty() {
+            let free = (1..).find(|n| {
+                let name = texts::profile_default(cx.lang, *n);
+                !cx.settings.profiles.iter().any(|p| p.name == name)
             });
-            match done {
-                Some(true) => {
-                    let mut clean = Profile::clean_name(&name);
-                    if clean.is_empty() {
-                        let free = (1..).find(|n| {
-                            let name = texts::profile_default(cx.lang, *n);
-                            !cx.settings.profiles.iter().any(|p| p.name == name)
-                        });
-                        clean = texts::profile_default(cx.lang, free.unwrap_or(1));
-                    }
-                    let fresh = self.snapshot(clean.clone());
-                    // То же имя — обновить режимы, клавишу оставить.
-                    match cx.settings.profiles.iter_mut().find(|p| p.name == clean) {
-                        Some(p) => p.monitors = fresh.monitors,
-                        None => cx.settings.profiles.push(fresh),
-                    }
-                }
-                Some(false) => {}
-                None => self.naming = Some(name),
-            }
-            return;
+            clean = texts::profile_default(cx.lang, free.unwrap_or(1));
         }
-        let mut apply = None;
-        ui.horizontal_wrapped(|ui| {
-            if cx.settings.profiles.is_empty() {
-                w::note(ui, t.profiles_hint);
-            } else {
-                let names: Vec<String> = cx.settings.profiles.iter().map(|p| p.name.clone()).collect();
-                let active = cx.settings.profiles.iter().position(|p| profile_active(p, &self.states));
-                let opts: Vec<(Option<usize>, &str)> =
-                    names.iter().enumerate().map(|(i, n)| (Some(i), n.as_str())).collect();
-                let mut want = active;
-                if chips(ui, &mut want, &opts) {
-                    apply = want;
-                }
-            }
-            if w::icon_button(ui, anvil_ui::Icon::Plus, t.profile_save).clicked() {
-                self.naming = Some(String::new());
-            }
-        });
-        if let Some(i) = apply {
-            let profile = cx.settings.profiles[i].clone();
-            self.apply_profile(&profile, cx);
+        let fresh = self.snapshot(clean.clone());
+        match cx.settings.profiles.iter_mut().find(|p| p.name == clean) {
+            Some(p) => p.monitors = fresh.monitors,
+            None => cx.settings.profiles.push(fresh),
         }
+    }
+
+    /// Строка избранного во всю ширину: звезда и «2560 × 1440 · 144»; стоящее — подложка акцента.
+    fn favorite_row(ui: &mut Ui, salt: (u32, u32), on: bool, label: &str) -> egui::Response {
+        let p = Palette::of(ui);
+        let (rect, r) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 28.0), Sense::click());
+        let hovered = r.hovered();
+        let fill = if on {
+            p.badge_fill(p.accent)
+        } else if hovered {
+            p.hover
+        } else {
+            p.raised
+        };
+        let stroke = if on { p.accent } else { p.border };
+        ui.painter().rect(rect, 6, fill, Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
+        let star = Rect::from_center_size(Pos2::new(rect.left() + 17.0, rect.center().y), Vec2::splat(13.0));
+        paint_star(ui.painter(), star, true, if on { p.accent_text } else { p.accent });
+        let font = if on { anvil_ui::semibold(13.0) } else { egui::FontId::proportional(13.0) };
+        let color = if on {
+            p.accent_text
+        } else if hovered {
+            p.text
+        } else {
+            p.weak
+        };
+        ui.painter().text(
+            Pos2::new(rect.left() + 32.0, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            label,
+            font,
+            color,
+        );
+        w::focus_ring(ui, rect, &r, 6);
+        let _ = salt;
+        r.on_hover_cursor(egui::CursorIcon::PointingHand)
+    }
+
+    /// Ссылка-кнопка акцентным текстом со стрелкой: «Все разрешения ›», «‹ Избранное».
+    fn link(ui: &mut Ui, text: &str, back: bool) -> bool {
+        let p = Palette::of(ui);
+        let font = egui::FontId::proportional(13.0);
+        let label = if back { format!("‹ {text}") } else { format!("{text} ›") };
+        let size = ui.painter().layout_no_wrap(label.clone(), font.clone(), p.accent_text).size();
+        let (rect, r) = ui.allocate_exact_size(Vec2::new(size.x + 12.0, 26.0), Sense::click());
+        if r.hovered() {
+            ui.painter().rect_filled(rect, 6, p.hover);
+        }
+        ui.painter().text(
+            rect.left_center() + Vec2::new(6.0, 0.0),
+            egui::Align2::LEFT_CENTER,
+            label,
+            font,
+            p.accent_text,
+        );
+        w::focus_ring(ui, rect, &r, 6);
+        r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
     }
 }
 
@@ -424,6 +434,14 @@ impl Module for Display {
         self.pending.is_some()
     }
 
+    fn meta(&self) -> String {
+        self.device(&self.panel).trim_start_matches(r"\\.\").to_string()
+    }
+
+    fn active_profile(&self, profiles: &[Profile]) -> Option<usize> {
+        profiles.iter().position(|p| profile_active(p, &self.states))
+    }
+
     fn ticking(&self) -> bool {
         self.pending.is_some()
     }
@@ -435,7 +453,8 @@ impl Module for Display {
                     self.apply_profile(&profile, cx);
                 }
             }
-            Command::Dropped(_) => {}
+            Command::SaveProfile(name) => self.save_profile(name, cx),
+            Command::Dropped(_) | Command::Media(_) => {}
         }
     }
 
@@ -443,28 +462,6 @@ impl Module for Display {
         let t = cx.t;
         let device = self.device(cx.monitor).to_string();
         let p = Palette::of(ui);
-
-        // Шапка: имя монитора и выбор монитора, если их несколько.
-        ui.horizontal(|ui| {
-            let short = device.trim_start_matches(r"\\.\");
-            let label = if self.name.is_empty() { short.to_string() } else { format!("{} · {short}", self.name) };
-            w::mono(ui, &label, Some(p.weak));
-            if self.monitors.len() > 1 {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let mut picked = self.monitors.iter().position(|m| m.device == device).unwrap_or(0);
-                    let names: Vec<String> = (1..=self.monitors.len()).map(|i| i.to_string()).collect();
-                    let opts: Vec<(usize, Option<anvil_ui::Icon>, &str)> =
-                        names.iter().enumerate().rev().map(|(i, n)| (i, None, n.as_str())).collect();
-                    let before = picked;
-                    w::segmented(ui, &mut picked, &opts);
-                    if picked != before && self.pending.is_none() {
-                        self.picked = self.monitors[picked].device.clone();
-                        self.refresh(cx.monitor);
-                    }
-                });
-            }
-        });
-        ui.add_space(6.0);
 
         if self.pending.is_some() {
             self.keep_ui(ui, t, cx.lang);
@@ -477,113 +474,171 @@ impl Module for Display {
         // Стоит и не ждёт ответа — значит, это частота этого разрешения.
         cx.settings.remember_hz(&device, cur.width, cur.height, cur.hz);
 
-        let list_w = (ui.available_width() * 0.48).max(170.0);
+        let right_w = 168.0;
+        let left_w = (ui.available_width() - right_w - 16.0).max(170.0);
         ui.horizontal_top(|ui| {
-            // Слева — разрешения списком.
+            ui.spacing_mut().item_spacing.x = 16.0;
             ui.allocate_ui_with_layout(
-                egui::vec2(list_w, ui.available_height()),
+                egui::vec2(left_w, ui.available_height()),
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
-                    // Избранное: чипы «2560 × 1440 · 144 Гц», щелчок — сразу этот режим.
+                    ui.spacing_mut().item_spacing.y = 6.0;
+                    // Что стоит сейчас — крупно; мониторов несколько — выбор справа.
+                    egui::Frame::new()
+                        .fill(p.raised)
+                        .corner_radius(8)
+                        .inner_margin(egui::Margin::symmetric(12, 6))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.spacing_mut().item_spacing.y = 0.0;
+                                    ui.label(
+                                        egui::RichText::new(format!("{} × {}", cur.width, cur.height))
+                                            .font(anvil_ui::semibold(19.0))
+                                            .color(p.text),
+                                    );
+                                    let scale = self.scale.as_ref().map(|s| s.current);
+                                    ui.label(
+                                        egui::RichText::new(texts::mode_line(cx.lang, cur.hz, scale))
+                                            .size(12.5)
+                                            .color(p.weak),
+                                    );
+                                });
+                                if self.monitors.len() > 1 {
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        let mut picked =
+                                            self.monitors.iter().position(|m| m.device == device).unwrap_or(0);
+                                        let names: Vec<String> =
+                                            (1..=self.monitors.len()).map(|i| i.to_string()).collect();
+                                        let opts: Vec<(usize, Option<anvil_ui::Icon>, &str)> = names
+                                            .iter()
+                                            .enumerate()
+                                            .rev()
+                                            .map(|(i, n)| (i, None, n.as_str()))
+                                            .collect();
+                                        let before = picked;
+                                        w::segmented(ui, &mut picked, &opts).on_hover_text(t.monitor);
+                                        if picked != before {
+                                            self.picked = self.monitors[picked].device.clone();
+                                            self.refresh(cx.monitor);
+                                        }
+                                    });
+                                }
+                            });
+                        });
+                    if self.all_res {
+                        if Self::link(ui, t.favorites, true) {
+                            self.all_res = false;
+                        }
+                        self.resolutions_ui(ui, cx, &device, cur);
+                        return;
+                    }
+                    ui.horizontal(|ui| {
+                        w::section_label(ui, t.favorites);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if Self::link(ui, t.all_res, false) {
+                                self.all_res = true;
+                            }
+                        });
+                    });
                     let favorites = cx.settings.favorites_of(&device);
-                    w::section_label(ui, t.favorites);
                     if favorites.is_empty() {
                         w::note(ui, t.favorites_hint);
-                    } else {
-                        let targets: Vec<(u32, u32, Option<Mode>)> = favorites
-                            .iter()
-                            .map(|&(fw, fh)| {
-                                let hz = cx.settings.remembered_hz(&device, fw, fh).unwrap_or(cur.hz);
-                                (fw, fh, mode_for(&self.modes, fw, fh, hz))
-                            })
-                            .collect();
-                        let labels: Vec<String> = targets
-                            .iter()
-                            .map(|(fw, fh, m)| match m {
-                                Some(m) => format!("{fw} × {fh} · {} {}", m.hz, t.hz),
-                                None => format!("{fw} × {fh}"),
-                            })
-                            .collect();
-                        let opts: Vec<((u32, u32), &str)> =
-                            targets.iter().zip(&labels).map(|((fw, fh, _), l)| ((*fw, *fh), l.as_str())).collect();
-                        let mut want = (cur.width, cur.height);
-                        if chips(ui, &mut want, &opts)
-                            && let Some((_, _, Some(m))) = targets.iter().find(|(fw, fh, _)| (*fw, *fh) == want)
-                        {
-                            self.apply(&device, *m, cx);
+                    }
+                    let mut want = None;
+                    for (fw, fh) in favorites {
+                        let hz = cx.settings.remembered_hz(&device, fw, fh).unwrap_or(cur.hz);
+                        let m = mode_for(&self.modes, fw, fh, hz);
+                        let label = match m {
+                            Some(m) => format!("{fw} × {fh} · {}", m.hz),
+                            None => format!("{fw} × {fh}"),
+                        };
+                        let on = (fw, fh) == (cur.width, cur.height);
+                        if Self::favorite_row(ui, (fw, fh), on, &label).clicked() && !on {
+                            want = m;
                         }
                     }
-                    ui.add_space(8.0);
-                    w::section_label(ui, t.resolution);
-                    egui::ScrollArea::vertical().id_salt("res").auto_shrink([false, false]).show(ui, |ui| {
-                        for (i, (rw, rh)) in resolutions(&self.modes).into_iter().enumerate() {
-                            let id = ui.id().with(("res", rw, rh));
-                            let on = rw == cur.width && rh == cur.height;
-                            let fav = cx.settings.is_favorite(&device, rw, rh);
-                            let resp = anvil_ui::motion::widgets::enter(ui, ("res", rw, rh), i, |ui| {
-                                row(ui, id, on, &format!("{rw} × {rh}"), aspect(rw, rh), 28.0)
-                            });
-                            let hint = if fav { t.star_remove } else { t.star_add };
-                            if star(ui, resp.rect, id.with("star"), fav, hint) {
-                                if cx.settings.toggle_favorite(&device, rw, rh).is_err() {
-                                    cx.toasts.push((t.favorites_full.to_string(), Tone::Warning));
-                                }
-                            } else if resp.clicked() {
-                                // Частота — та, что была у этого разрешения в прошлый раз.
-                                let hz = cx.settings.remembered_hz(&device, rw, rh).unwrap_or(cur.hz);
-                                if let Some(m) = mode_for(&self.modes, rw, rh, hz) {
-                                    self.apply(&device, m, cx);
-                                }
-                            }
-                        }
-                    });
+                    if let Some(m) = want {
+                        self.apply(&device, m, cx);
+                    }
                 },
             );
-            ui.add_space(12.0);
 
-            // Справа — частота и масштаб; ширина задана, чтобы пояснения переносились.
-            let right = egui::vec2(ui.available_width(), ui.available_height());
-            ui.allocate_ui_with_layout(right, egui::Layout::top_down(egui::Align::Min), |ui| {
-                self.profiles_ui(ui, cx);
-                ui.add_space(10.0);
-                w::section_label(ui, t.refresh);
-                let hz = rates(&self.modes, cur.width, cur.height);
-                let labels: Vec<String> = hz.iter().map(|h| format!("{h} {}", t.hz)).collect();
-                let opts: Vec<(u32, &str)> = hz.iter().zip(&labels).map(|(h, l)| (*h, l.as_str())).collect();
-                let mut want = cur.hz;
-                chips(ui, &mut want, &opts);
-                if want != cur.hz
-                    && let Some(m) = mode_for(&self.modes, cur.width, cur.height, want)
-                {
-                    self.apply(&device, m, cx);
-                }
+            // Справа — частота и масштаб сеткой по два.
+            ui.allocate_ui_with_layout(
+                egui::vec2(right_w, ui.available_height()),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.spacing_mut().item_spacing.y = 4.0;
+                    w::section_label(ui, t.refresh_hz);
+                    let hz = rates(&self.modes, cur.width, cur.height);
+                    let labels: Vec<String> = hz.iter().map(|h| h.to_string()).collect();
+                    let opts: Vec<(u32, &str)> = hz.iter().zip(&labels).map(|(h, l)| (*h, l.as_str())).collect();
+                    let mut want = cur.hz;
+                    chip_grid(ui, &mut want, &opts, 3);
+                    if want != cur.hz
+                        && let Some(m) = mode_for(&self.modes, cur.width, cur.height, want)
+                    {
+                        self.apply(&device, m, cx);
+                    }
 
-                ui.add_space(10.0);
-                w::section_label(ui, t.scale);
-                if let Some(scale) = self.scale.clone() {
-                    let labels: Vec<String> = scale.options.iter().map(|s| format!("{s}%")).collect();
-                    let opts: Vec<(u32, &str)> =
-                        scale.options.iter().zip(&labels).map(|(s, l)| (*s, l.as_str())).collect();
-                    let mut want = scale.current;
-                    chips(ui, &mut want, &opts);
-                    if want != scale.current {
-                        match display::set_scale(&device, want) {
-                            Ok(()) => {
-                                self.scale = display::scale(&device);
-                                self.read_states();
-                                cx.toasts.push((t.scale_note.to_string(), Tone::Neutral));
-                            }
-                            Err(e) => {
-                                eprintln!("scale change failed: {e}");
-                                cx.toasts.push((format!("{}: {e}", t.failed), Tone::Danger));
+                    ui.add_space(6.0);
+                    w::section_label(ui, t.scale_pct);
+                    if let Some(scale) = self.scale.clone() {
+                        let labels: Vec<String> = scale.options.iter().map(|s| s.to_string()).collect();
+                        let opts: Vec<(u32, &str)> =
+                            scale.options.iter().zip(&labels).map(|(s, l)| (*s, l.as_str())).collect();
+                        let mut want = scale.current;
+                        chip_grid(ui, &mut want, &opts, 3);
+                        if want != scale.current {
+                            match display::set_scale(&device, want) {
+                                Ok(()) => {
+                                    self.scale = display::scale(&device);
+                                    self.read_states();
+                                    cx.toasts.push((t.scale_note.to_string(), Tone::Neutral));
+                                }
+                                Err(e) => {
+                                    eprintln!("scale change failed: {e}");
+                                    cx.toasts.push((format!("{}: {e}", t.failed), Tone::Danger));
+                                }
                             }
                         }
+                        w::note(ui, format!("{}: {}%", t.recommended, scale.recommended));
+                    } else {
+                        w::note(ui, t.failed);
                     }
-                    w::note(ui, format!("{}: {}%", t.recommended, scale.recommended));
-                } else {
-                    w::note(ui, t.failed);
+                },
+            );
+        });
+    }
+}
+
+impl Display {
+    /// Полный список разрешений со звёздочками — за ссылкой «Все разрешения».
+    fn resolutions_ui(&mut self, ui: &mut Ui, cx: &mut Ctx, device: &str, cur: Mode) {
+        let t = cx.t;
+        egui::ScrollArea::vertical().id_salt("res").auto_shrink([false, false]).show(ui, |ui| {
+            for (i, (rw, rh)) in resolutions(&self.modes).into_iter().enumerate() {
+                let id = ui.id().with(("res", rw, rh));
+                let on = rw == cur.width && rh == cur.height;
+                let fav = cx.settings.is_favorite(device, rw, rh);
+                let resp = anvil_ui::motion::widgets::enter(ui, ("res", rw, rh), i, |ui| {
+                    row(ui, id, on, &format!("{rw} × {rh}"), aspect(rw, rh), 28.0)
+                });
+                let hint = if fav { t.star_remove } else { t.star_add };
+                if star(ui, resp.rect, id.with("star"), fav, hint) {
+                    if cx.settings.toggle_favorite(device, rw, rh).is_err() {
+                        cx.toasts.push((t.favorites_full.to_string(), Tone::Warning));
+                    }
+                } else if resp.clicked() {
+                    // Частота — та, что была у этого разрешения в прошлый раз.
+                    let hz = cx.settings.remembered_hz(device, rw, rh).unwrap_or(cur.hz);
+                    if let Some(m) = mode_for(&self.modes, rw, rh, hz) {
+                        self.apply(device, m, cx);
+                    }
                 }
-            });
+            }
         });
     }
 }

@@ -121,6 +121,13 @@ impl Edge {
     pub fn counting(&self) -> bool {
         self.edge_since.is_some() || self.away_since.is_some()
     }
+
+    /// Мышь у края и идёт отсчёт выезда: какая доля задержки прошла (0…1). Полоска наполняется ею.
+    pub fn edge_progress(&self, now: Instant, show_delay: Duration) -> Option<f32> {
+        let since = self.edge_since?;
+        let d = show_delay.as_secs_f32();
+        Some(if d <= 0.0 { 1.0 } else { (now.duration_since(since).as_secs_f32() / d).min(1.0) })
+    }
 }
 
 /// Мышь у края: на верхней строке пикселей монитора и между левым и правым краем панели.
@@ -243,6 +250,17 @@ mod tests {
         e.step(Input { hotkey: true, ..Default::default() }, t0, SHOW, HIDE);
         e.step(Input { hotkey: true, ..Default::default() }, at(t0, 10), SHOW, HIDE);
         assert!(!e.shown && !e.pinned);
+    }
+
+    #[test]
+    fn edge_progress_fills() {
+        let t0 = Instant::now();
+        let mut e = Edge::default();
+        assert_eq!(e.edge_progress(t0, SHOW), None);
+        e.step(Input { at_edge: true, ..Default::default() }, t0, SHOW, HIDE);
+        let half = e.edge_progress(at(t0, 75), SHOW).unwrap();
+        assert!((half - 0.5).abs() < 0.01);
+        assert_eq!(e.edge_progress(at(t0, 900), SHOW), Some(1.0));
     }
 
     #[test]

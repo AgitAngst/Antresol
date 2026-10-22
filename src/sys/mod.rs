@@ -320,6 +320,31 @@ pub fn set_autostart(on: bool) -> Result<(), String> {
     r.ok().map_err(|e| e.to_string())
 }
 
+/// Цвет акцента Windows (HKCU\…\DWM, `AccentColor` — 0xAABBGGRR) как (r, g, b).
+pub fn windows_accent() -> Option<(u8, u8, u8)> {
+    let mut key = HKEY::default();
+    let path = wide(r"Software\Microsoft\Windows\DWM");
+    unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(path.as_ptr()), None, KEY_READ, &mut key) }.ok().ok()?;
+    let name = wide("AccentColor");
+    let mut value = 0u32;
+    let mut size = 4u32;
+    let r = unsafe {
+        RegQueryValueExW(
+            key,
+            PCWSTR(name.as_ptr()),
+            None,
+            None,
+            Some(&mut value as *mut u32 as *mut u8),
+            Some(&mut size),
+        )
+    };
+    unsafe {
+        let _ = RegCloseKey(key);
+    }
+    r.ok().ok()?;
+    Some((value as u8, (value >> 8) as u8, (value >> 16) as u8))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
