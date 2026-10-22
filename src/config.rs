@@ -64,6 +64,121 @@ pub struct Settings {
     pub favorites: Vec<Res>,
     /// Какая частота была у разрешения в последний раз — её и ставим, когда на него переходят.
     pub rates: Vec<(Res, u32)>,
+    /// Профили экрана: имя, клавиша и режим каждого монитора.
+    pub profiles: Vec<Profile>,
+}
+
+// ─── Профили экрана ─────────────────────────────────────────────────────────
+
+/// Сочетание клавиш: модификаторы и одна клавиша по имени — «A», «1», «F5», «Space».
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct Hotkey {
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+    pub win: bool,
+    pub key: String,
+}
+
+impl Hotkey {
+    /// «Ctrl+Alt+1». Без Ctrl, Alt и Win сочетание не годится: одиночная клавиша мешала бы печатать.
+    pub fn parse(s: &str) -> Option<Hotkey> {
+        let mut h = Hotkey::default();
+        for part in s.split('+').map(str::trim) {
+            match part.to_ascii_lowercase().as_str() {
+                "ctrl" => h.ctrl = true,
+                "alt" => h.alt = true,
+                "shift" => h.shift = true,
+                "win" => h.win = true,
+                "" => return None,
+                _ if h.key.is_empty() => h.key = part.to_string(),
+                _ => return None,
+            }
+        }
+        (h.valid()).then_some(h)
+    }
+
+    pub fn valid(&self) -> bool {
+        (self.ctrl || self.alt || self.win) && !self.key.is_empty()
+    }
+
+    /// Клавиши по отдельности для `kbd`: `["Ctrl", "Alt", "1"]`.
+    pub fn keys(&self) -> Vec<&str> {
+        let mods = [(self.ctrl, "Ctrl"), (self.alt, "Alt"), (self.shift, "Shift"), (self.win, "Win")];
+        let mut out: Vec<&str> = mods.iter().filter(|(on, _)| *on).map(|(_, k)| *k).collect();
+        out.push(&self.key);
+        out
+    }
+}
+
+impl std::fmt::Display for Hotkey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.keys().join("+"))
+    }
+}
+
+/// Режим одного монитора в профиле. Масштаб `None` — не трогать.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ProfileMonitor {
+    pub device: String,
+    pub width: u32,
+    pub height: u32,
+    pub hz: u32,
+    pub scale: Option<u32>,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Profile {
+    pub name: String,
+    pub hotkey: Option<Hotkey>,
+    pub monitors: Vec<ProfileMonitor>,
+}
+
+impl Profile {
+    /// Имя без знаков, которыми размечена строка файла.
+    pub fn clean_name(name: &str) -> String {
+        name.replace(['|', ';', '\n', '\r'], " ").trim().to_string()
+    }
+
+    /// `Игры | Ctrl+Alt+1 | \\.\DISPLAY1 1920x1080@144 100% ; \\.\DISPLAY2 2560x1440@60`.
+    fn parse(value: &str) -> Option<Profile> {
+        let mut parts = value.split('|').map(str::trim);
+        let name = Profile::clean_name(parts.next()?);
+        let hotkey = Hotkey::parse(parts.next()?);
+        let mut monitors = Vec::new();
+        for m in parts.next()?.split(';').map(str::trim).filter(|m| !m.is_empty()) {
+            let words: Vec<&str> = m.split_whitespace().collect();
+            let (size, hz) = words.get(1)?.split_once('@')?;
+            let (w, h) = size.split_once('x')?;
+            let scale = match words.get(2) {
+                Some(s) => Some(s.trim_end_matches('%').parse().ok()?),
+                None => None,
+            };
+            monitors.push(ProfileMonitor {
+                device: words.first()?.to_string(),
+                width: w.parse().ok()?,
+                height: h.parse().ok()?,
+                hz: hz.parse().ok()?,
+                scale,
+            });
+        }
+        (!name.is_empty() && !monitors.is_empty()).then_some(Profile { name, hotkey, monitors })
+    }
+}
+
+impl std::fmt::Display for Profile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let key = self.hotkey.as_ref().map(|h| h.to_string()).unwrap_or_default();
+        let monitors: Vec<String> = self
+            .monitors
+            .iter()
+            .map(|m| {
+                let scale = m.scale.map(|s| format!(" {s}%")).unwrap_or_default();
+                format!("{} {}x{}@{}{scale}", m.device, m.width, m.height, m.hz)
+            })
+            .collect();
+        write!(f, "{} | {key} | {}", self.name, monitors.join(" ; "))
+    }
 }
 
 impl Settings {
@@ -120,6 +235,7 @@ impl Default for Settings {
             fullscreen_guard: true,
             favorites: Vec::new(),
             rates: Vec::new(),
+            profiles: Vec::new(),
         }
     }
 }
@@ -177,6 +293,13 @@ pub fn parse(text: &str) -> Settings {
                     s.remember_hz(&r.device, r.width, r.height, hz);
                 }
             }
+            "profile" => {
+                if let Some(p) = Profile::parse(value)
+                    && !s.profiles.iter().any(|q| q.name == p.name)
+                {
+                    s.profiles.push(p);
+                }
+            }
             _ => {}
         }
     }
@@ -206,6 +329,9 @@ pub fn format(s: &Settings) -> String {
     }
     for (r, hz) in &s.rates {
         out.push_str(&format!("rate={r} {hz}\n"));
+    }
+    for p in &s.profiles {
+        out.push_str(&format!("profile={p}\n"));
     }
     out
 }
@@ -372,6 +498,42 @@ mod tests {
         s.common.theme = ThemeChoice::Dark;
         s.common.language = Lang::En;
         assert_eq!(parse(&format(&s)), s);
+    }
+
+    #[test]
+    fn hotkeys() {
+        let h = Hotkey::parse("Ctrl+Alt+1").unwrap();
+        assert!(h.ctrl && h.alt && !h.shift && h.key == "1");
+        assert_eq!(h.to_string(), "Ctrl+Alt+1");
+        assert_eq!(Hotkey::parse("ctrl + shift + F5").unwrap().to_string(), "Ctrl+Shift+F5");
+        assert!(Hotkey::parse("A").is_none(), "без Ctrl/Alt/Win мешала бы печатать");
+        assert!(Hotkey::parse("Shift+A").is_none());
+        assert!(Hotkey::parse("Ctrl+A+B").is_none());
+        assert!(Hotkey::parse("").is_none());
+    }
+
+    #[test]
+    fn profiles_round_trip() {
+        let p = Profile {
+            name: "Игры".into(),
+            hotkey: Hotkey::parse("Ctrl+Alt+1"),
+            monitors: vec![
+                ProfileMonitor { device: r"\\.\DISPLAY1".into(), width: 1920, height: 1080, hz: 144, scale: Some(100) },
+                ProfileMonitor { device: r"\\.\DISPLAY2".into(), width: 2560, height: 1440, hz: 60, scale: None },
+            ],
+        };
+        let line = p.to_string();
+        assert_eq!(line, r"Игры | Ctrl+Alt+1 | \\.\DISPLAY1 1920x1080@144 100% ; \\.\DISPLAY2 2560x1440@60");
+        let s = Settings {
+            profiles: vec![p.clone(), Profile { name: "Работа".into(), hotkey: None, ..p }],
+            ..Default::default()
+        };
+        assert_eq!(parse(&format(&s)), s);
+        // Битые строки и повтор имени — пропуск: остаётся одна годная.
+        let bad = "profile=X | | \nprofile= | | A 1x1@60\nprofile=Y | | A 1x1\nprofile=Z | | A 1x1@60\nprofile=Z | | B 2x2@60\n";
+        let names: Vec<String> = parse(bad).profiles.into_iter().map(|p| p.name).collect();
+        assert_eq!(names, vec!["Z".to_string()]);
+        assert_eq!(Profile::clean_name(" a|b;c "), "a b c");
     }
 
     #[test]

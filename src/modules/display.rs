@@ -2,6 +2,8 @@
 // как в Windows: если картинка пропала, через 15 с всё вернётся само.
 // Избранное — до трёх разрешений на монитор чипами сверху. Частота запоминается для каждого
 // разрешения (то, что сейчас стоит и не ждёт «Оставить»), и при переходе на него ставится она.
+// Профили — режим и масштаб всех мониторов разом: сохраняются из текущего, ставятся щелчком или
+// клавишей (из app.rs через `Command`), откат — тот же «Оставить?» для всех изменённых мониторов.
 
 use std::time::{Duration, Instant};
 
@@ -9,24 +11,63 @@ use anvil_ui::widgets::{self as w, Kind};
 use anvil_ui::{Palette, Tone};
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 
-use super::{Ctx, Module, chips, row};
+use super::{Command, Ctx, Module, chips, row};
+use crate::config::{Profile, ProfileMonitor};
 use crate::sys::display::{self, Mode, Scale};
 use crate::sys::monitor;
 use crate::texts::{self, Tr};
 
 const REVERT_AFTER: Duration = Duration::from_secs(15);
 
+/// Что вернуть при откате: прежний режим и (или) масштаб монитора.
+struct Change {
+    device: String,
+    mode: Option<Mode>,
+    scale: Option<u32>,
+}
+
+/// Режим поменяли и ждём «Оставить»: что вернуть и когда поменяли.
+struct Pending {
+    changes: Vec<Change>,
+    at: Instant,
+}
+
+/// Что сейчас на мониторе — для «какой профиль стоит» без опроса Windows каждый кадр.
+#[derive(Clone)]
+struct State {
+    device: String,
+    mode: Mode,
+    scale: Option<u32>,
+}
+
 #[derive(Default)]
 pub struct Display {
     /// Какой монитор показываем; пусто — тот, у которого панель.
     picked: String,
+    /// Монитор панели с прошлого `refresh` — чтобы перечитать после отката.
+    panel: String,
     monitors: Vec<monitor::Monitor>,
     name: String,
     current: Option<Mode>,
     modes: Vec<Mode>,
     scale: Option<Scale>,
-    /// Режим поменяли и ждём «Оставить»: прежний режим и когда поменяли.
-    pending: Option<(Mode, Instant)>,
+    /// Режимы и масштаб всех мониторов на момент последнего чтения.
+    states: Vec<State>,
+    pending: Option<Pending>,
+    /// Вводят имя нового профиля.
+    naming: Option<String>,
+}
+
+/// Стоит ли профиль сейчас: у всех его мониторов тот же режим и (если задан) масштаб.
+/// Монитора нет — профиль не стоит.
+fn profile_active(p: &Profile, states: &[State]) -> bool {
+    p.monitors.iter().all(|pm| {
+        states.iter().any(|s| {
+            s.device.eq_ignore_ascii_case(&pm.device)
+                && (s.mode.width, s.mode.height, s.mode.hz) == (pm.width, pm.height, pm.hz)
+                && pm.scale.is_none_or(|sc| s.scale == Some(sc))
+        })
+    })
 }
 
 /// Соотношение сторон для подписи: «16:9», «21:9»; странные — пусто.
@@ -122,6 +163,17 @@ impl Display {
         if self.picked.is_empty() { panel } else { &self.picked }
     }
 
+    fn read_states(&mut self) {
+        self.states = monitor::monitors()
+            .into_iter()
+            .filter_map(|m| {
+                let mode = display::current(&m.device)?;
+                let scale = display::scale(&m.device).map(|s| s.current);
+                Some(State { device: m.device, mode, scale })
+            })
+            .collect();
+    }
+
     fn apply(&mut self, device: &str, mode: Mode, cx: &mut Ctx) {
         let Some(old) = self.current else { return };
         if mode == old {
@@ -129,7 +181,8 @@ impl Display {
         }
         match display::apply(device, mode) {
             Ok(()) => {
-                self.pending = Some((old, Instant::now()));
+                let change = Change { device: device.to_string(), mode: Some(old), scale: None };
+                self.pending = Some(Pending { changes: vec![change], at: Instant::now() });
                 self.current = Some(mode);
             }
             Err(e) => {
@@ -139,20 +192,119 @@ impl Display {
         }
     }
 
-    fn revert(&mut self, device: &str) {
-        if let Some((old, _)) = self.pending.take() {
-            if let Err(e) = display::apply(device, old) {
-                eprintln!("display mode revert failed: {e}");
-            }
-            self.current = display::current(device);
-        }
+    /// Профиль из того, что стоит сейчас на всех мониторах.
+    fn snapshot(&mut self, name: String) -> Profile {
+        self.read_states();
+        let monitors = self
+            .states
+            .iter()
+            .map(|s| ProfileMonitor {
+                device: s.device.clone(),
+                width: s.mode.width,
+                height: s.mode.height,
+                hz: s.mode.hz,
+                scale: s.scale,
+            })
+            .collect();
+        Profile { name, hotkey: None, monitors }
     }
 
-    fn keep_ui(&mut self, ui: &mut Ui, device: &str, t: &Tr, lang: anvil_ui::Lang) {
-        let Some((_, at)) = self.pending else { return };
+    /// Поставить профиль на все его мониторы; изменённое — в откат.
+    fn apply_profile(&mut self, profile: &Profile, cx: &mut Ctx) {
+        let t = cx.t;
+        if self.pending.is_some() {
+            cx.toasts.push((t.answer_first.to_string(), Tone::Warning));
+            return;
+        }
+        let present = monitor::monitors();
+        let mut changes = Vec::new();
+        let mut missing = 0;
+        let mut unavailable = 0;
+        for pm in &profile.monitors {
+            let Some(m) = present.iter().find(|m| m.device.eq_ignore_ascii_case(&pm.device)) else {
+                missing += 1;
+                continue;
+            };
+            let dev = m.device.clone();
+            let mut change = Change { device: dev.clone(), mode: None, scale: None };
+            let want = mode_for(&display::modes(&dev), pm.width, pm.height, pm.hz);
+            if want.is_none() {
+                unavailable += 1;
+            }
+            if let Some(old) = display::current(&dev)
+                && let Some(want) = want
+                && want != old
+            {
+                match display::apply(&dev, want) {
+                    Ok(()) => change.mode = Some(old),
+                    Err(e) => {
+                        eprintln!("profile mode change failed on {dev}: {e}");
+                        cx.toasts.push((format!("{}: {e}", t.failed), Tone::Danger));
+                    }
+                }
+            }
+            if let (Some(want), Some(old)) = (pm.scale, display::scale(&dev).map(|s| s.current))
+                && want != old
+            {
+                match display::set_scale(&dev, want) {
+                    Ok(()) => change.scale = Some(old),
+                    Err(e) => {
+                        eprintln!("profile scale change failed on {dev}: {e}");
+                        cx.toasts.push((format!("{}: {e}", t.failed), Tone::Danger));
+                    }
+                }
+            }
+            if change.mode.is_some() || change.scale.is_some() {
+                changes.push(change);
+            }
+        }
+        if missing > 0 {
+            cx.toasts.push((texts::monitors_missing(cx.lang, missing), Tone::Warning));
+        }
+        if unavailable > 0 {
+            cx.toasts.push((t.mode_unavailable.to_string(), Tone::Warning));
+        }
+        if changes.is_empty() {
+            if missing == 0 && unavailable == 0 {
+                cx.toasts.push((t.profile_already.to_string(), Tone::Neutral));
+            }
+            return;
+        }
+        self.pending = Some(Pending { changes, at: Instant::now() });
+        self.after_change();
+    }
+
+    /// Перечитать то, что показываем, после смены или отката.
+    fn after_change(&mut self) {
+        let device = self.device(&self.panel).to_string();
+        self.current = display::current(&device);
+        self.modes = display::modes(&device);
+        self.scale = display::scale(&device);
+        self.read_states();
+    }
+
+    fn revert(&mut self) {
+        let Some(pending) = self.pending.take() else { return };
+        for c in pending.changes {
+            if let Some(m) = c.mode
+                && let Err(e) = display::apply(&c.device, m)
+            {
+                eprintln!("display mode revert failed on {}: {e}", c.device);
+            }
+            if let Some(s) = c.scale
+                && let Err(e) = display::set_scale(&c.device, s)
+            {
+                eprintln!("scale revert failed on {}: {e}", c.device);
+            }
+        }
+        self.after_change();
+    }
+
+    fn keep_ui(&mut self, ui: &mut Ui, t: &Tr, lang: anvil_ui::Lang) {
+        let Some(at) = self.pending.as_ref().map(|p| p.at) else { return };
         let left = REVERT_AFTER.saturating_sub(at.elapsed());
         if left.is_zero() {
-            self.revert(device);
+            self.revert();
             return;
         }
         ui.ctx().request_repaint_after(Duration::from_millis(250));
@@ -160,11 +312,77 @@ impl Display {
         w::banner(ui, Tone::Warning, t.keep_title, &texts::revert_in(lang, secs), |ui| {
             if w::button(ui, Kind::Primary, None, t.keep).clicked() {
                 self.pending = None;
+                self.after_change();
             }
             if w::button(ui, Kind::Secondary, None, t.revert).clicked() {
-                self.revert(device);
+                self.revert();
             }
         });
+    }
+
+    /// Профили чипами и «+» — сохранить текущее под именем.
+    fn profiles_ui(&mut self, ui: &mut Ui, cx: &mut Ctx) {
+        let t = cx.t;
+        w::section_label(ui, t.profiles);
+        if let Some(mut name) = self.naming.take() {
+            let mut done = None;
+            ui.horizontal_wrapped(|ui| {
+                let edit = ui.add(egui::TextEdit::singleline(&mut name).hint_text(t.profile_name).desired_width(140.0));
+                if name.is_empty() && !edit.has_focus() && !edit.lost_focus() {
+                    edit.request_focus();
+                }
+                let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if w::button(ui, Kind::Secondary, Some(anvil_ui::Icon::Save), t.save).clicked() || enter {
+                    done = Some(true);
+                }
+                if w::button(ui, Kind::Ghost, None, t.cancel).clicked() {
+                    done = Some(false);
+                }
+            });
+            match done {
+                Some(true) => {
+                    let mut clean = Profile::clean_name(&name);
+                    if clean.is_empty() {
+                        let free = (1..).find(|n| {
+                            let name = texts::profile_default(cx.lang, *n);
+                            !cx.settings.profiles.iter().any(|p| p.name == name)
+                        });
+                        clean = texts::profile_default(cx.lang, free.unwrap_or(1));
+                    }
+                    let fresh = self.snapshot(clean.clone());
+                    // То же имя — обновить режимы, клавишу оставить.
+                    match cx.settings.profiles.iter_mut().find(|p| p.name == clean) {
+                        Some(p) => p.monitors = fresh.monitors,
+                        None => cx.settings.profiles.push(fresh),
+                    }
+                }
+                Some(false) => {}
+                None => self.naming = Some(name),
+            }
+            return;
+        }
+        let mut apply = None;
+        ui.horizontal_wrapped(|ui| {
+            if cx.settings.profiles.is_empty() {
+                w::note(ui, t.profiles_hint);
+            } else {
+                let names: Vec<String> = cx.settings.profiles.iter().map(|p| p.name.clone()).collect();
+                let active = cx.settings.profiles.iter().position(|p| profile_active(p, &self.states));
+                let opts: Vec<(Option<usize>, &str)> =
+                    names.iter().enumerate().map(|(i, n)| (Some(i), n.as_str())).collect();
+                let mut want = active;
+                if chips(ui, &mut want, &opts) {
+                    apply = want;
+                }
+            }
+            if w::icon_button(ui, anvil_ui::Icon::Plus, t.profile_save).clicked() {
+                self.naming = Some(String::new());
+            }
+        });
+        if let Some(i) = apply {
+            let profile = cx.settings.profiles[i].clone();
+            self.apply_profile(&profile, cx);
+        }
     }
 }
 
@@ -185,7 +403,9 @@ impl Module for Display {
         if self.pending.is_some() {
             return;
         }
+        self.panel = panel.to_string();
         self.monitors = monitor::monitors();
+        self.read_states();
         if !self.monitors.iter().any(|m| m.device == self.picked) {
             self.picked.clear();
         }
@@ -202,6 +422,16 @@ impl Module for Display {
 
     fn ticking(&self) -> bool {
         self.pending.is_some()
+    }
+
+    fn command(&mut self, cmd: &Command, cx: &mut Ctx) {
+        match cmd {
+            Command::ApplyProfile(i) => {
+                if let Some(profile) = cx.settings.profiles.get(*i).cloned() {
+                    self.apply_profile(&profile, cx);
+                }
+            }
+        }
     }
 
     fn ui(&mut self, ui: &mut Ui, cx: &mut Ctx) {
@@ -232,7 +462,7 @@ impl Module for Display {
         ui.add_space(6.0);
 
         if self.pending.is_some() {
-            self.keep_ui(ui, &device, t, cx.lang);
+            self.keep_ui(ui, t, cx.lang);
             return;
         }
         let Some(cur) = self.current else {
@@ -242,37 +472,6 @@ impl Module for Display {
         // Стоит и не ждёт ответа — значит, это частота этого разрешения.
         cx.settings.remember_hz(&device, cur.width, cur.height, cur.hz);
 
-        // Избранное: чипы «2560 × 1440 · 144 Гц», щелчок — сразу этот режим.
-        let favorites = cx.settings.favorites_of(&device);
-        w::section_label(ui, t.favorites);
-        if favorites.is_empty() {
-            w::note(ui, t.favorites_hint);
-        } else {
-            let targets: Vec<(u32, u32, Option<Mode>)> = favorites
-                .iter()
-                .map(|&(fw, fh)| {
-                    let hz = cx.settings.remembered_hz(&device, fw, fh).unwrap_or(cur.hz);
-                    (fw, fh, mode_for(&self.modes, fw, fh, hz))
-                })
-                .collect();
-            let labels: Vec<String> = targets
-                .iter()
-                .map(|(fw, fh, m)| match m {
-                    Some(m) => format!("{fw} × {fh} · {} {}", m.hz, t.hz),
-                    None => format!("{fw} × {fh}"),
-                })
-                .collect();
-            let opts: Vec<((u32, u32), &str)> =
-                targets.iter().zip(&labels).map(|((fw, fh, _), l)| ((*fw, *fh), l.as_str())).collect();
-            let mut want = (cur.width, cur.height);
-            if chips(ui, &mut want, &opts)
-                && let Some((_, _, Some(m))) = targets.iter().find(|(fw, fh, _)| (*fw, *fh) == want)
-            {
-                self.apply(&device, *m, cx);
-            }
-        }
-        ui.add_space(8.0);
-
         let list_w = (ui.available_width() * 0.48).max(170.0);
         ui.horizontal_top(|ui| {
             // Слева — разрешения списком.
@@ -280,6 +479,36 @@ impl Module for Display {
                 egui::vec2(list_w, ui.available_height()),
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
+                    // Избранное: чипы «2560 × 1440 · 144 Гц», щелчок — сразу этот режим.
+                    let favorites = cx.settings.favorites_of(&device);
+                    w::section_label(ui, t.favorites);
+                    if favorites.is_empty() {
+                        w::note(ui, t.favorites_hint);
+                    } else {
+                        let targets: Vec<(u32, u32, Option<Mode>)> = favorites
+                            .iter()
+                            .map(|&(fw, fh)| {
+                                let hz = cx.settings.remembered_hz(&device, fw, fh).unwrap_or(cur.hz);
+                                (fw, fh, mode_for(&self.modes, fw, fh, hz))
+                            })
+                            .collect();
+                        let labels: Vec<String> = targets
+                            .iter()
+                            .map(|(fw, fh, m)| match m {
+                                Some(m) => format!("{fw} × {fh} · {} {}", m.hz, t.hz),
+                                None => format!("{fw} × {fh}"),
+                            })
+                            .collect();
+                        let opts: Vec<((u32, u32), &str)> =
+                            targets.iter().zip(&labels).map(|((fw, fh, _), l)| ((*fw, *fh), l.as_str())).collect();
+                        let mut want = (cur.width, cur.height);
+                        if chips(ui, &mut want, &opts)
+                            && let Some((_, _, Some(m))) = targets.iter().find(|(fw, fh, _)| (*fw, *fh) == want)
+                        {
+                            self.apply(&device, *m, cx);
+                        }
+                    }
+                    ui.add_space(8.0);
                     w::section_label(ui, t.resolution);
                     egui::ScrollArea::vertical().id_salt("res").auto_shrink([false, false]).show(ui, |ui| {
                         for (i, (rw, rh)) in resolutions(&self.modes).into_iter().enumerate() {
@@ -310,6 +539,8 @@ impl Module for Display {
             // Справа — частота и масштаб; ширина задана, чтобы пояснения переносились.
             let right = egui::vec2(ui.available_width(), ui.available_height());
             ui.allocate_ui_with_layout(right, egui::Layout::top_down(egui::Align::Min), |ui| {
+                self.profiles_ui(ui, cx);
+                ui.add_space(10.0);
                 w::section_label(ui, t.refresh);
                 let hz = rates(&self.modes, cur.width, cur.height);
                 let labels: Vec<String> = hz.iter().map(|h| format!("{h} {}", t.hz)).collect();
@@ -334,6 +565,7 @@ impl Module for Display {
                         match display::set_scale(&device, want) {
                             Ok(()) => {
                                 self.scale = display::scale(&device);
+                                self.read_states();
                                 cx.toasts.push((t.scale_note.to_string(), Tone::Neutral));
                             }
                             Err(e) => {
@@ -378,5 +610,32 @@ mod tests {
         assert_eq!(aspect(1280, 1024), "5:4");
         assert_eq!(aspect(1366, 768), "16:9");
         assert_eq!(aspect(1000, 1000), "");
+    }
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::*;
+
+    fn st(device: &str, w: u32, h: u32, hz: u32, scale: Option<u32>) -> State {
+        State { device: device.into(), mode: Mode { width: w, height: h, hz, bits: 32 }, scale }
+    }
+
+    fn pm(device: &str, w: u32, h: u32, hz: u32, scale: Option<u32>) -> ProfileMonitor {
+        ProfileMonitor { device: device.into(), width: w, height: h, hz, scale }
+    }
+
+    fn p(monitors: Vec<ProfileMonitor>) -> Profile {
+        Profile { name: "p".into(), hotkey: None, monitors }
+    }
+
+    #[test]
+    fn active_profile() {
+        let states = [st("A", 2560, 1440, 144, Some(100)), st("B", 1920, 1080, 60, Some(125))];
+        assert!(profile_active(&p(vec![pm("A", 2560, 1440, 144, Some(100))]), &states));
+        assert!(profile_active(&p(vec![pm("a", 2560, 1440, 144, None), pm("B", 1920, 1080, 60, Some(125))]), &states));
+        assert!(!profile_active(&p(vec![pm("A", 2560, 1440, 60, None)]), &states), "другая частота");
+        assert!(!profile_active(&p(vec![pm("A", 2560, 1440, 144, Some(125))]), &states), "другой масштаб");
+        assert!(!profile_active(&p(vec![pm("C", 800, 600, 60, None)]), &states), "монитора нет");
     }
 }

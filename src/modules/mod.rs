@@ -23,6 +23,11 @@ pub struct Ctx<'a> {
     pub settings: &'a mut crate::config::Settings,
 }
 
+/// Команда модулю извне карточки: например, клавиша профиля нажата при спрятанной панели.
+pub enum Command {
+    ApplyProfile(usize),
+}
+
 pub trait Module {
     /// Ключ для `Id` (появление карточки).
     fn key(&self) -> &'static str;
@@ -42,6 +47,7 @@ pub trait Module {
     fn ticking(&self) -> bool {
         false
     }
+    fn command(&mut self, _cmd: &Command, _cx: &mut Ctx) {}
 }
 
 pub fn all() -> Vec<Box<dyn Module>> {

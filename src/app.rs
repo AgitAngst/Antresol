@@ -7,12 +7,12 @@
 use std::time::{Duration, Instant};
 
 use anvil_ui::motion::{self, Motion};
-use anvil_ui::widgets::{self as w, Toasts};
+use anvil_ui::widgets::{self as w, Kind, Toasts};
 use anvil_ui::{Accent, Icon, Lang, Palette, ThemeChoice, Tone, tr};
 use eframe::egui::{self, CornerRadius, CursorIcon, Pos2, Rect, Sense, Stroke, Ui, UiBuilder, Vec2};
 
-use crate::config::{self, MAX_HEIGHT, MIN_HEIGHT, MIN_WIDTH, Settings};
-use crate::modules::{self, Ctx, Module};
+use crate::config::{self, Hotkey, MAX_HEIGHT, MIN_HEIGHT, MIN_WIDTH, Settings};
+use crate::modules::{self, Command, Ctx, Module};
 use crate::panel::{self, Edge, Input};
 use crate::sys::{self, monitor};
 use crate::texts;
@@ -61,6 +61,10 @@ pub struct App {
     hotkey: Option<usize>,
     autostart: bool,
     started: bool,
+    /// Ждём сочетание для профиля с этим номером (настройки, «Изменить…»).
+    capture: Option<usize>,
+    /// Какие клавиши профилей последними отдали потоку клавиш — шлём заново, только если поменялись.
+    sent_keys: Option<Vec<Option<String>>>,
 }
 
 impl App {
@@ -80,7 +84,12 @@ impl App {
             edge: Edge::default(),
             modules: modules::all(),
             toasts: Toasts::default(),
-            view: View::Cards,
+            // Для снимков: открыть сразу настройки, не щёлкая мышью.
+            view: if std::env::var("ANTRESOL_VIEW").is_ok_and(|v| v == "settings") {
+                View::Settings
+            } else {
+                View::Cards
+            },
             monitors: Vec::new(),
             monitors_at: None,
             placed: None,
@@ -92,6 +101,8 @@ impl App {
             hotkey,
             autostart: sys::autostart(),
             started: false,
+            capture: None,
+            sent_keys: None,
         }
     }
 
@@ -176,7 +187,7 @@ impl App {
         let cursor = monitor::cursor();
         let at_edge = panel::at_edge(cursor, m.rect.top, left, right);
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(false));
-        let busy = self.grip.is_some() || self.modules.iter().any(|m| m.busy());
+        let busy = self.grip.is_some() || self.capture.is_some() || self.modules.iter().any(|m| m.busy());
         let hotkey = sys::take_hotkey();
         if !self.started {
             self.started = true;
@@ -202,6 +213,7 @@ impl App {
         let show_delay = Duration::from_millis(self.settings.show_delay_ms as u64);
         let hide_delay = Duration::from_millis(self.settings.hide_delay_ms as u64);
         let changed = self.edge.step(input, now, show_delay, hide_delay);
+        let changed = self.profile_keys(ctx, &m.device, now) || changed;
         if changed && self.edge.shown {
             // Только что выехала: свежие данные и фокус, чтобы клавиатура и Esc работали.
             self.refreshed = None;
@@ -226,6 +238,156 @@ impl App {
         let ticking = self.modules.iter().any(|m| m.ticking());
         let period = if self.edge.shown || self.edge.counting() || ticking { 33 } else { 40 };
         ctx.request_repaint_after(Duration::from_millis(period));
+    }
+
+    /// Клавиши профилей: отдать потоку клавиш новый набор, если он поменялся, и выполнить нажатые.
+    /// Нажали при спрятанной панели — она выезжает с вопросом «Оставить?». Ответ — выехала ли.
+    fn profile_keys(&mut self, ctx: &egui::Context, device: &str, now: Instant) -> bool {
+        // Пока ждём сочетание, клавиши профилей сняты: иначе Windows перехватит уже назначенное
+        // сочетание раньше окна и вместо захвата сработает профиль.
+        let capturing = self.capture.is_some();
+        let keys: Vec<Option<String>> = self
+            .settings
+            .profiles
+            .iter()
+            .map(|p| p.hotkey.as_ref().filter(|_| !capturing).map(|h| h.to_string()))
+            .collect();
+        if self.sent_keys.as_ref() != Some(&keys) {
+            let list: Vec<Option<(Vec<&str>, &str)>> = self
+                .settings
+                .profiles
+                .iter()
+                .map(|p| {
+                    let h = p.hotkey.as_ref().filter(|_| !capturing)?;
+                    let keys = h.keys();
+                    Some((keys[..keys.len() - 1].to_vec(), h.key.as_str()))
+                })
+                .collect();
+            sys::set_profile_hotkeys(&list);
+            self.sent_keys = Some(keys);
+        }
+        let count = self.settings.profiles.len();
+        let pressed: Vec<usize> = sys::take_profile_presses().into_iter().filter(|&i| i < count).collect();
+        if pressed.is_empty() {
+            return false;
+        }
+        let t = texts::tr(self.lang());
+        let lang = self.lang();
+        let mut toasts = Vec::new();
+        let before = self.settings.clone();
+        for i in pressed {
+            for module in &mut self.modules {
+                let mut cx = Ctx { t, lang, monitor: device, toasts: &mut toasts, settings: &mut self.settings };
+                module.command(&Command::ApplyProfile(i), &mut cx);
+            }
+        }
+        for (text, tone) in toasts {
+            self.toasts.push(text, tone);
+        }
+        if self.settings != before {
+            self.save();
+        }
+        let was = self.edge.shown;
+        self.edge.reveal(now);
+        self.view = View::Cards;
+        if !was {
+            self.refreshed = None;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+        !was
+    }
+
+    /// Ждём сочетание для профиля: первая клавиша с Ctrl или Alt; Esc — отмена.
+    fn capture_keys(&mut self, ui: &Ui) {
+        let Some(i) = self.capture else { return };
+        let events = ui.input(|inp| inp.events.clone());
+        for e in events {
+            let egui::Event::Key { key, pressed: true, modifiers, .. } = e else { continue };
+            if key == egui::Key::Escape {
+                self.capture = None;
+                return;
+            }
+            let name = key.name();
+            let hotkey = Hotkey {
+                ctrl: modifiers.ctrl,
+                alt: modifiers.alt,
+                shift: modifiers.shift,
+                win: false,
+                key: name.to_string(),
+            };
+            if hotkey.valid() && sys::vk_of(name).is_some() {
+                let panel = self.hotkey.map(|k| sys::HOTKEYS[k].0.join("+"));
+                if panel.as_deref() == Some(hotkey.to_string().as_str()) {
+                    let t = texts::tr(self.lang());
+                    self.toasts.push(t.key_is_panel, Tone::Warning);
+                    return;
+                }
+                // Одно сочетание — у одного профиля: у прежнего хозяина снимаем.
+                for (j, p) in self.settings.profiles.iter_mut().enumerate() {
+                    if j != i && p.hotkey.as_ref() == Some(&hotkey) {
+                        p.hotkey = None;
+                    }
+                }
+                if let Some(p) = self.settings.profiles.get_mut(i) {
+                    p.hotkey = Some(hotkey);
+                }
+                self.capture = None;
+                return;
+            }
+        }
+    }
+
+    /// Карточка «Профили экрана»: имя, клавиша (захват, «занято»), убрать клавишу, удалить.
+    fn profiles_card(&mut self, ui: &mut Ui) {
+        let t = texts::tr(self.lang());
+        w::section_label(ui, t.profiles_settings);
+        if self.settings.profiles.is_empty() {
+            w::note(ui, t.profiles_none);
+            return;
+        }
+        self.capture_keys(ui);
+        let mut delete = None;
+        for i in 0..self.settings.profiles.len() {
+            let name = self.settings.profiles[i].name.clone();
+            let hotkey = self.settings.profiles[i].hotkey.clone();
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(&name).font(anvil_ui::semibold(13.5)));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if w::icon_button(ui, Icon::Trash, t.delete).clicked() {
+                        delete = Some(i);
+                    }
+                    if hotkey.is_some() && w::icon_button(ui, Icon::Close, t.remove_key).clicked() {
+                        self.settings.profiles[i].hotkey = None;
+                    }
+                });
+            });
+            if self.capture == Some(i) {
+                ui.horizontal_wrapped(|ui| {
+                    w::badge(ui, t.press_keys, Tone::Accent);
+                    if w::button(ui, Kind::Ghost, None, t.cancel).clicked() {
+                        self.capture = None;
+                    }
+                });
+            } else {
+                let keys: Vec<&str> = match &hotkey {
+                    Some(h) => h.keys(),
+                    None => vec![t.no_key],
+                };
+                let status = match (&hotkey, sys::profile_hotkey_status(i)) {
+                    (Some(_), Some(true)) => Some((true, t.key_free)),
+                    (Some(_), Some(false)) => Some((false, t.key_busy)),
+                    _ => None,
+                };
+                if w::hotkey_field(ui, &keys, t.change, status).clicked() {
+                    self.capture = Some(i);
+                }
+            }
+            ui.add_space(6.0);
+        }
+        if let Some(i) = delete {
+            self.settings.profiles.remove(i);
+            self.capture = None;
+        }
     }
 
     fn header(&mut self, ui: &mut Ui) {
@@ -307,10 +469,23 @@ impl App {
         let ctx = ui.ctx().clone();
         let before = self.settings.clone();
         let area = ui.available_rect_before_wrap();
-        let half = (area.width() - 10.0) / 2.0;
-        let left = Rect::from_min_size(area.min, Vec2::new(half, area.height()));
-        let right =
-            Rect::from_min_size(Pos2::new(area.left() + half + 10.0, area.top()), Vec2::new(half, area.height()));
+        // Три карточки: «Панель», «Профили экрана», «Оформление».
+        let third = (area.width() - 20.0) / 3.0;
+        let col = |i: f32| {
+            Rect::from_min_size(
+                Pos2::new(area.left() + i * (third + 10.0), area.top()),
+                Vec2::new(third, area.height()),
+            )
+        };
+        let (left, middle, right) = (col(0.0), col(1.0), col(2.0));
+
+        let mut mid = ui.new_child(UiBuilder::new().max_rect(middle));
+        w::card_frame(&mid).show(&mut mid, |ui| {
+            ui.set_min_size(ui.available_size());
+            egui::ScrollArea::vertical().id_salt("set-m").auto_shrink([false, false]).show(ui, |ui| {
+                self.profiles_card(ui);
+            });
+        });
 
         let mut l = ui.new_child(UiBuilder::new().max_rect(left));
         w::card_frame(&l).show(&mut l, |ui| {
@@ -506,7 +681,7 @@ impl App {
         if t >= 1.0 {
             self.grips(ui, panel, ppp);
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && self.grip.is_none() {
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && self.grip.is_none() && self.capture.is_none() {
             self.edge.hide();
         }
         self.toasts.show(&ctx);
