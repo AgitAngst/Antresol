@@ -193,7 +193,7 @@ impl Module for Sound {
         let _ = self.jobs.send(Job::Read);
     }
 
-    fn meta(&self) -> String {
+    fn meta(&self, _t: &Tr) -> String {
         let s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
         match &s.state {
             Some(Ok(st)) => format!("Kamerton {}", st.version),

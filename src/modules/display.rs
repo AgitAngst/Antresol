@@ -24,6 +24,8 @@ struct Change {
     device: String,
     mode: Option<Mode>,
     scale: Option<u32>,
+    /// Был основным этот монитор (сменили основной) — вернуть его.
+    primary: Option<String>,
 }
 
 /// Режим поменяли и ждём «Оставить»: что вернуть и когда поменяли.
@@ -68,6 +70,11 @@ fn profile_active(p: &Profile, states: &[State]) -> bool {
                 && pm.scale.is_none_or(|sc| s.scale == Some(sc))
         })
     })
+}
+
+/// Места мониторов: устройство и левый верхний угол в пикселях экрана.
+fn places() -> Vec<(String, i32, i32)> {
+    monitor::monitors().into_iter().map(|m| (m.device, m.rect.left, m.rect.top)).collect()
 }
 
 /// Соотношение сторон для подписи: «16:9», «21:9»; странные — пусто.
@@ -181,7 +188,7 @@ impl Display {
         }
         match display::apply(device, mode) {
             Ok(()) => {
-                let change = Change { device: device.to_string(), mode: Some(old), scale: None };
+                let change = Change { device: device.to_string(), mode: Some(old), scale: None, primary: None };
                 self.pending = Some(Pending { changes: vec![change], at: Instant::now() });
                 self.current = Some(mode);
             }
@@ -226,7 +233,7 @@ impl Display {
                 continue;
             };
             let dev = m.device.clone();
-            let mut change = Change { device: dev.clone(), mode: None, scale: None };
+            let mut change = Change { device: dev.clone(), mode: None, scale: None, primary: None };
             let want = mode_for(&display::modes(&dev), pm.width, pm.height, pm.hz);
             if want.is_none() {
                 unavailable += 1;
@@ -296,8 +303,33 @@ impl Display {
             {
                 eprintln!("scale revert failed on {}: {e}", c.device);
             }
+            if let Some(old) = c.primary
+                && let Err(e) = display::set_primary(&old, &places())
+            {
+                eprintln!("primary revert failed on {old}: {e}");
+            }
         }
         self.after_change();
+    }
+
+    /// Сделать монитор основным — с тем же «Оставить?» и откатом через 15 с.
+    fn make_primary(&mut self, device: &str, cx: &mut Ctx) {
+        let Some(old) = monitor::monitors().into_iter().find(|m| m.primary).map(|m| m.device) else { return };
+        if old == device {
+            return;
+        }
+        match display::set_primary(device, &places()) {
+            Ok(()) => {
+                let change = Change { device: device.to_string(), mode: None, scale: None, primary: Some(old) };
+                self.pending = Some(Pending { changes: vec![change], at: Instant::now() });
+                self.monitors = monitor::monitors();
+                self.after_change();
+            }
+            Err(e) => {
+                eprintln!("primary change failed: {e}");
+                cx.toasts.push((format!("{}: {e}", cx.t.failed), Tone::Danger));
+            }
+        }
     }
 
     fn keep_ui(&mut self, ui: &mut Ui, t: &Tr, lang: anvil_ui::Lang) {
@@ -433,8 +465,11 @@ impl Module for Display {
         self.pending.is_some()
     }
 
-    fn meta(&self) -> String {
-        self.device(&self.panel).trim_start_matches(r"\\.\").to_string()
+    fn meta(&self, t: &Tr) -> String {
+        let device = self.device(&self.panel);
+        let short = device.trim_start_matches(r"\\.\").to_string();
+        let primary = self.monitors.iter().find(|m| m.device == device).is_some_and(|m| m.primary);
+        if self.monitors.len() > 1 && primary { format!("{short} · {}", t.primary) } else { short }
     }
 
     fn active_profile(&self, profiles: &[Profile]) -> Option<usize> {
@@ -474,6 +509,7 @@ impl Module for Display {
         cx.settings.remember_hz(&device, cur.width, cur.height, cur.hz);
 
         let right_w = 168.0;
+        let mut make_primary = false;
         let left_w = (ui.available_width() - right_w - 16.0).max(170.0);
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 16.0;
@@ -503,6 +539,12 @@ impl Module for Display {
                                             .size(12.5)
                                             .color(p.weak),
                                     );
+                                    // Мониторов несколько и этот не основной — «Сделать основным».
+                                    let primary =
+                                        self.monitors.iter().find(|m| m.device == device).is_some_and(|m| m.primary);
+                                    if self.monitors.len() > 1 && !primary && Self::link(ui, t.make_primary, false) {
+                                        make_primary = true;
+                                    }
                                 });
                                 if self.monitors.len() > 1 {
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -610,6 +652,9 @@ impl Module for Display {
                 },
             );
         });
+        if make_primary {
+            self.make_primary(&device, cx);
+        }
     }
 }
 

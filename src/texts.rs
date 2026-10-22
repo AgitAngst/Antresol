@@ -155,6 +155,13 @@ pub struct Tr {
     pub mute: &'static str,
     pub unmute: &'static str,
     pub no_output: &'static str,
+    pub quick: &'static str,
+    pub night_light: &'static str,
+    pub on: &'static str,
+    pub off: &'static str,
+    pub unavailable: &'static str,
+    pub primary: &'static str,
+    pub make_primary: &'static str,
     pub accents: [&'static str; 5],
 }
 
@@ -311,6 +318,13 @@ const RU: Tr = Tr {
     mute: "Без звука",
     unmute: "Включить звук",
     no_output: "Нет устройства вывода",
+    quick: "Быстрые настройки",
+    night_light: "Ночной свет",
+    on: "Вкл",
+    off: "Выкл",
+    unavailable: "Недоступно",
+    primary: "основной",
+    make_primary: "Сделать основным",
     accents: ["Лайм", "Фиолетовый", "Индиго", "Фуксия", "Лазурь"],
 };
 
@@ -467,6 +481,13 @@ const EN: Tr = Tr {
     mute: "Mute",
     unmute: "Unmute",
     no_output: "No output device",
+    quick: "Quick settings",
+    night_light: "Night light",
+    on: "On",
+    off: "Off",
+    unavailable: "Unavailable",
+    primary: "primary",
+    make_primary: "Make primary",
     accents: ["Lime", "Violet", "Indigo", "Fuchsia", "Sky"],
 };
 

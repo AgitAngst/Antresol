@@ -8,6 +8,7 @@ pub mod clipboard;
 pub mod display;
 pub mod github;
 pub mod media;
+pub mod quick;
 pub mod resources;
 pub mod sound;
 pub mod timers;
@@ -82,7 +83,7 @@ pub trait Module {
         None
     }
     /// Пояснение справа в заголовке карточки: монитор, программа плеера.
-    fn meta(&self) -> String {
+    fn meta(&self, _t: &Tr) -> String {
         String::new()
     }
     /// Какой профиль экрана стоит сейчас (шапка выделяет его чип).
@@ -107,6 +108,7 @@ pub fn icon_of(key: &str) -> Icon {
         "bluetooth" => Icon::Broadcast,
         "timers" => Icon::Clock,
         "github" => Icon::Branch,
+        "quick" => Icon::Tiles,
         _ => Icon::Rocket,
     }
 }
@@ -138,6 +140,7 @@ pub fn card_header(ui: &mut Ui, key: &str, title: &str, meta: &str) {
 pub fn all() -> Vec<Box<dyn Module>> {
     vec![
         Box::new(display::Display::default()),
+        Box::new(quick::Quick::default()),
         Box::new(brightness::Brightness::default()),
         Box::new(media::Media::default()),
         Box::new(sound::Sound::default()),

@@ -13,9 +13,9 @@ use windows::Win32::Devices::Display::{
 };
 use windows::Win32::Foundation::{ERROR_SUCCESS, LUID};
 use windows::Win32::Graphics::Gdi::{
-    CDS_UPDATEREGISTRY, ChangeDisplaySettingsExW, DEVMODEW, DISP_CHANGE_RESTART, DISP_CHANGE_SUCCESSFUL, DM_BITSPERPEL,
-    DM_DISPLAYFREQUENCY, DM_PELSHEIGHT, DM_PELSWIDTH, ENUM_CURRENT_SETTINGS, ENUM_DISPLAY_SETTINGS_MODE,
-    EnumDisplaySettingsW,
+    CDS_NORESET, CDS_SET_PRIMARY, CDS_TYPE, CDS_UPDATEREGISTRY, ChangeDisplaySettingsExW, DEVMODEW,
+    DISP_CHANGE_RESTART, DISP_CHANGE_SUCCESSFUL, DM_BITSPERPEL, DM_DISPLAYFREQUENCY, DM_PELSHEIGHT, DM_PELSWIDTH,
+    DM_POSITION, ENUM_CURRENT_SETTINGS, ENUM_DISPLAY_SETTINGS_MODE, EnumDisplaySettingsW,
 };
 use windows::core::PCWSTR;
 
@@ -89,6 +89,45 @@ pub fn apply(device: &str, mode: Mode) -> Result<(), String> {
         DISP_CHANGE_SUCCESSFUL => Ok(()),
         DISP_CHANGE_RESTART => Err("restart required".into()),
         other => Err(format!("ChangeDisplaySettingsEx failed: {}", other.0)),
+    }
+}
+
+// ─── Основной монитор ──────────────────────────────────────────────────────
+
+/// Новые места мониторов, чтобы `primary` встал в (0, 0): все сдвигаются на его угол, взаимное
+/// расположение не меняется (основной у Windows всегда в начале координат).
+pub fn shifted(places: &[(String, i32, i32)], primary: &str) -> Option<Vec<(String, i32, i32)>> {
+    let (_, px, py) = places.iter().find(|(d, _, _)| d == primary)?;
+    Some(places.iter().map(|(d, x, y)| (d.clone(), x - px, y - py)).collect())
+}
+
+/// Сделать монитор основным: места всех мониторов (левый верхний угол в пикселях экрана) — `places`.
+/// Пишется в реестр без применения (`CDS_NORESET`), потом применяется разом.
+pub fn set_primary(device: &str, places: &[(String, i32, i32)]) -> Result<(), String> {
+    let moved = shifted(places, device).ok_or("monitor not found")?;
+    for (d, x, y) in &moved {
+        let name = wide(d);
+        let mut dm = DEVMODEW { dmSize: size_of::<DEVMODEW>() as u16, ..Default::default() };
+        if !unsafe { EnumDisplaySettingsW(PCWSTR(name.as_ptr()), ENUM_CURRENT_SETTINGS, &mut dm) }.as_bool() {
+            return Err(format!("cannot read {d}"));
+        }
+        dm.dmFields = DM_POSITION;
+        dm.Anonymous1.Anonymous2.dmPosition.x = *x;
+        dm.Anonymous1.Anonymous2.dmPosition.y = *y;
+        let mut flags: CDS_TYPE = CDS_UPDATEREGISTRY | CDS_NORESET;
+        if d == device {
+            flags |= CDS_SET_PRIMARY;
+        }
+        let r = unsafe { ChangeDisplaySettingsExW(PCWSTR(name.as_ptr()), Some(&dm), None, flags, None) };
+        if r != DISP_CHANGE_SUCCESSFUL {
+            return Err(format!("ChangeDisplaySettingsEx failed on {d}: {}", r.0));
+        }
+    }
+    // Применить записанное разом.
+    let r = unsafe { ChangeDisplaySettingsExW(PCWSTR::null(), None, None, CDS_TYPE(0), None) };
+    match r {
+        DISP_CHANGE_SUCCESSFUL => Ok(()),
+        other => Err(format!("ChangeDisplaySettingsEx apply failed: {}", other.0)),
     }
 }
 
@@ -245,5 +284,18 @@ mod tests {
         let s = scale_from(0, 0, 2).unwrap();
         assert_eq!((s.recommended, s.current), (100, 100));
         assert_eq!(s.options, vec![100, 125, 150]);
+    }
+}
+
+#[cfg(test)]
+mod primary_tests {
+    use super::*;
+
+    #[test]
+    fn shifts_to_origin() {
+        let places = vec![("A".to_string(), 0, 0), ("B".to_string(), 2560, -200), ("C".to_string(), -1920, 0)];
+        let s = shifted(&places, "B").unwrap();
+        assert_eq!(s, vec![("A".to_string(), -2560, 200), ("B".to_string(), 0, 0), ("C".to_string(), -4480, 200)]);
+        assert!(shifted(&places, "D").is_none());
     }
 }

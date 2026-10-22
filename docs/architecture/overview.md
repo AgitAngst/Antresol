@@ -8,8 +8,8 @@
 | `src/app.rs` | окно-панель: место у края, выезд, шапка с профилями, карточки модулей, настройки, «Свой цвет…», полоска (простая, с медиа, плашка таймера), ручки размера |
 | `src/look.rs` | цвет программы: пять готовых (лайм — по умолчанию) и свой — вывод под тему с контрастом 4,5:1, HSV, `accent=` |
 | `src/panel.rs` | логика «показана / спрятана» без окна (тесты) |
-| `src/modules/` | модули: `display.rs`, `brightness.rs`, `media.rs`, `resources.rs`, `clipboard.rs`, `tray.rs`, `bluetooth.rs`, `timers.rs`, `github.rs`, `buttons.rs`, `sound.rs`; общий `Module` в `mod.rs` |
-| `src/sys/` | Windows: `monitor.rs` (мониторы, курсор, полноэкранное), `display.rs` (режимы, масштаб), `ddc.rs` (DDC/CI; HMONITOR берётся из `Monitor::handle`), `media.rs` (медиа-сеансы WinRT, обложка через WIC), `kamerton.rs` (канал к Kamerton), `res.rs` (ресурсы), `clip.rs` (буфер обмена), `bt.rs` (Bluetooth), `gh.rs` (GitHub по WinHTTP), `mod.rs` (запуск, горячая клавиша, автозапуск, скругление окна, цвет акцента Windows) |
+| `src/modules/` | модули: `display.rs`, `brightness.rs`, `media.rs`, `resources.rs`, `clipboard.rs`, `tray.rs`, `bluetooth.rs`, `timers.rs`, `github.rs`, `buttons.rs`, `sound.rs`, `quick.rs` (быстрые настройки); общий `Module` в `mod.rs` |
+| `src/sys/` | Windows: `monitor.rs` (мониторы, курсор, полноэкранное), `display.rs` (режимы, масштаб), `ddc.rs` (DDC/CI; HMONITOR берётся из `Monitor::handle`), `media.rs` (медиа-сеансы WinRT, обложка через WIC), `kamerton.rs` (канал к Kamerton), `nightlight.rs` (ночной свет), `res.rs` (ресурсы), `clip.rs` (буфер обмена), `bt.rs` (Bluetooth), `gh.rs` (GitHub по WinHTTP), `mod.rs` (запуск, горячая клавиша, автозапуск, скругление окна, цвет акцента Windows) |
 | `src/config.rs` | `config.txt` (в том числе профили `profile=`, избранное `favorite=`, частоты `rate=`, лоток `tray=`) и `buttons.txt` |
 | `src/texts.rs` | строки RU/EN |
 | `src/shot.rs` | `ANTRESOL_SHOT`: снимок своего окна в PNG (для документации) |
@@ -78,6 +78,13 @@
   не чаще раза в 5 минут. Токен — `Authorization: Bearer`, если задан.
 - Порядок и видимость карточек — `config::arrange` по ключам модулей (`Module::key`); `refresh` зовётся только у
   видимых, `background` и `attention` — у всех.
+- Основной монитор — `ChangeDisplaySettingsExW`: каждому монитору `DM_POSITION` со сдвигом на угол нового
+  основного (`display::shifted`), новому — `CDS_SET_PRIMARY`, всё с `CDS_NORESET`, потом применение разом.
+- Ночной свет — двоичное значение `Data` в `HKCU\Software\Microsoft\Windows\CurrentVersion\CloudStore\Store\
+  DefaultAccount\Current\default$windows.data.bluelightreduction.bluelightreductionstate\…`: заголовок
+  `43 42 01 00`, время изменения (секунды Unix, LEB128, байты 10–14), длина вложенного блока (байт 18) и флаг
+  `02 01` (байты 23–24) — есть, значит включён. Переключение — вставить или убрать флаг, длина ±2, время —
+  сейчас (`nightlight::with_state`); незнакомое значение не трогается.
 - Звук — через Kamerton: именованный канал `\\.\pipe\kamerton-ipc`, одна строка запроса (`state`, `volume`,
   `mute`, `app-volume`, `app-mute`, `open`; поля через табуляцию), ответ до закрытия канала (`sys::kamerton`).
   Канала нет — «не запущен». Запросы — в потоке модуля «Звук»; скопившиеся громкости одной цели сводятся к

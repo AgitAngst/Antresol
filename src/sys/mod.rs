@@ -8,6 +8,7 @@ pub mod gh;
 pub mod kamerton;
 pub mod media;
 pub mod monitor;
+pub mod nightlight;
 pub mod res;
 
 use std::sync::Mutex;

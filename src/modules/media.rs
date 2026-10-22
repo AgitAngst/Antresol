@@ -181,7 +181,7 @@ impl Module for Media {
         let _ = self.jobs.send(Job::Read);
     }
 
-    fn meta(&self) -> String {
+    fn meta(&self, _t: &Tr) -> String {
         let s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
         s.now.as_ref().map(|n| n.app.trim_end_matches(".exe").to_string()).unwrap_or_default()
     }

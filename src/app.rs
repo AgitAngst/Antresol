@@ -1086,7 +1086,7 @@ impl App {
             w::card_frame(&child).show(&mut child, |ui| {
                 ui.set_min_size(ui.available_size());
                 ui.set_clip_rect(ui.max_rect().intersect(rect.expand(1.0)));
-                modules::card_header(ui, module.key(), module.title(t), &module.meta());
+                modules::card_header(ui, module.key(), module.title(t), &module.meta(t));
                 ui.add_space(8.0);
                 let mut cx = Ctx { t, lang, monitor: device, toasts: &mut toasts, settings: &mut *settings };
                 module.ui(ui, &mut cx);
