@@ -8,8 +8,10 @@ pub mod gh;
 pub mod kamerton;
 pub mod media;
 pub mod monitor;
+pub mod net;
 pub mod nightlight;
 pub mod res;
+pub mod system;
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};

@@ -8,7 +8,7 @@ python E:/dev_personal/tools/checks.py --repo . -j 4 fmt test clippy
 ```
 
 Тесты — логика показа/скрытия (`panel.rs`), разбор файлов (`config.rs`), выбор режима и масштаба
-(`modules/display.rs`, `sys/display.rs`), цвета и их контраст, свой цвет, HSV (`look.rs`), протокол Kamerton (`sys/kamerton.rs`), ночной свет (`sys/nightlight.rs`), сдвиг мониторов для основного (`sys/display.rs`), наполнение полоски
+(`modules/display.rs`, `sys/display.rs`), цвета и их контраст, свой цвет, HSV (`look.rs`), протокол Kamerton (`sys/kamerton.rs`), ночной свет (`sys/nightlight.rs`), живое чтение Wi‑Fi, VPN, плана, темы (`sys/net.rs`, `--ignored`), сдвиг мониторов для основного (`sys/display.rs`), наполнение полоски
 (`panel.rs`), профили и сочетания клавиш (`config.rs`, `modules/display.rs`),
 коды клавиш (`sys/mod.rs`), входы DDC/CI (`sys/ddc.rs`), имя программы и мониторы (`sys/monitor.rs`), PNG
 снимка (`shot.rs`), ключ трека (`modules/media.rs`), ресурсы (`sys/res.rs` — в том числе настоящий замер этого ПК), история буфера
@@ -42,5 +42,5 @@ python E:/dev_personal/tools/checks.py --repo . -j 4 fmt test clippy
   `powershell -NoProfile -File scripts\squeeze-png.ps1 -In снимок.png -Out docs\img\имя.png` (без потерь, ~100 КБ).
 - Снимки захватом экрана — только для своей проверки после запуска (панель видна 2 с). Курсор не двигать: за ПК может
   работать владелец. В `docs/img` класть только вырезку самой панели.
-- Не нажимать в проверках смену режима экрана, основного монитора, ночного света, масштаба, яркости и автозапуск без команды
+- Не нажимать в проверках смену режима экрана, основного монитора, ночного света, темы, уведомлений, Wi‑Fi, VPN, плана питания, масштаба, яркости и автозапуск без команды
   владельца — это его настройки.

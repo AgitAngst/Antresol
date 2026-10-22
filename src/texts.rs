@@ -162,6 +162,12 @@ pub struct Tr {
     pub unavailable: &'static str,
     pub primary: &'static str,
     pub make_primary: &'static str,
+    pub keep_awake: &'static str,
+    pub dark_theme_win: &'static str,
+    pub quiet: &'static str,
+    pub power_plan: &'static str,
+    pub connect: &'static str,
+    pub disconnect: &'static str,
     pub accents: [&'static str; 5],
 }
 
@@ -325,6 +331,12 @@ const RU: Tr = Tr {
     unavailable: "Недоступно",
     primary: "основной",
     make_primary: "Сделать основным",
+    keep_awake: "Не спать",
+    dark_theme_win: "Тёмная тема",
+    quiet: "Без уведомлений",
+    power_plan: "План питания",
+    connect: "Подключить",
+    disconnect: "Отключить",
     accents: ["Лайм", "Фиолетовый", "Индиго", "Фуксия", "Лазурь"],
 };
 
@@ -488,6 +500,12 @@ const EN: Tr = Tr {
     unavailable: "Unavailable",
     primary: "primary",
     make_primary: "Make primary",
+    keep_awake: "Keep awake",
+    dark_theme_win: "Dark mode",
+    quiet: "No notifications",
+    power_plan: "Power plan",
+    connect: "Connect",
+    disconnect: "Disconnect",
     accents: ["Lime", "Violet", "Indigo", "Fuchsia", "Sky"],
 };
 

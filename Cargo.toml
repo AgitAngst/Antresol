@@ -1,6 +1,6 @@
 [package]
 name = "antresol"
-version = "1.4.0"
+version = "1.5.0"
 edition = "2024"
 description = "Quick-access panel at the top edge of the monitor"
 license = "MIT"
@@ -19,7 +19,10 @@ eframe = "0.36.2"
 # WinRT: медиа-сеансы (что играет), WIC — обложка; ресурсы: процессор, память, сеть, батарея, диски, PDH.
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = [
+    "Devices_Radios",
     "Foundation",
+    "Foundation_Collections",
+    "Networking_Connectivity",
     "Media_Control",
     "Storage_Streams",
     "Win32_Foundation",
@@ -27,6 +30,7 @@ windows = { version = "0.62.2", features = [
     "Win32_Graphics_Imaging",
     "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_Ndis",
+    "Win32_NetworkManagement_Rras",
     "Win32_Networking_WinHttp",
     "Win32_Storage_FileSystem",
     "Win32_Devices_Bluetooth",

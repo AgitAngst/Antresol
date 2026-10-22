@@ -1,19 +1,85 @@
-// Быстрые настройки: плитки «включить / выключить» системного (как быстрые настройки Windows).
-// Плитка — состояние, прочитанное при показе панели, и щелчок — поменять. Не узнали состояние —
-// плитка «Недоступно» и не нажимается.
+// Быстрые настройки: плитки «включить / выключить» системного (как быстрые настройки Windows),
+// план питания и VPN Windows. Плитка — состояние, прочитанное при показе панели, и щелчок — поменять.
+// Не узнали состояние — плитка «Недоступно» и не нажимается. Wi‑Fi и VPN отвечают медленно — их
+// читает и меняет поток модуля.
 
-use anvil_ui::widgets as w;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
+
+use anvil_ui::widgets::{self as w, Kind};
 use anvil_ui::{Icon, Palette, Tone};
 use eframe::egui::{self, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 
-use super::{Ctx, Module};
-use crate::sys::nightlight;
+use super::{Ctx, Module, chips};
+use crate::sys::net::{self, Vpn, Wifi};
+use crate::sys::{nightlight, system};
 use crate::texts::Tr;
 
+enum Job {
+    Read,
+    Wifi(bool),
+    Vpn(String, bool),
+}
+
 #[derive(Default)]
+struct Shared {
+    /// `None` — ещё не прочитано; `Some(None)` — радио Wi‑Fi нет.
+    wifi: Option<Option<Wifi>>,
+    vpns: Vec<Vpn>,
+    /// Ошибка последнего действия — показать уведомлением.
+    error: Option<String>,
+}
+
 pub struct Quick {
     /// Ночной свет: включён ли; `None` — не узнать.
     night: Option<bool>,
+    /// «Не спать» — только пока работает программа.
+    awake: bool,
+    dark: Option<bool>,
+    quiet: Option<bool>,
+    plans: Vec<system::Plan>,
+    plan: Option<windows::core::GUID>,
+    jobs: Sender<Job>,
+    shared: Arc<Mutex<Shared>>,
+}
+
+impl Default for Quick {
+    fn default() -> Self {
+        let (tx, rx) = mpsc::channel();
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        let s = shared.clone();
+        std::thread::spawn(move || worker(rx, s));
+        Quick { night: None, awake: false, dark: None, quiet: None, plans: Vec::new(), plan: None, jobs: tx, shared }
+    }
+}
+
+fn worker(rx: Receiver<Job>, shared: Arc<Mutex<Shared>>) {
+    crate::sys::media::init_thread();
+    while let Ok(first) = rx.recv() {
+        let mut jobs = vec![first];
+        while let Ok(j) = rx.try_recv() {
+            jobs.push(j);
+        }
+        let mut error = None;
+        for j in jobs {
+            let r = match j {
+                Job::Read => Ok(()),
+                Job::Wifi(on) => net::set_wifi(on),
+                Job::Vpn(name, on) => net::set_vpn(&name, on),
+            };
+            if let Err(e) = r {
+                eprintln!("quick settings failed: {e}");
+                error = Some(e);
+            }
+        }
+        let (wifi, vpns) = (net::wifi(), net::vpns());
+        let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
+        s.wifi = Some(wifi);
+        s.vpns = vpns;
+        if error.is_some() {
+            s.error = error;
+        }
+    }
 }
 
 /// Плитка 2 строки: значок и название, ниже состояние. Включена — подложка акцента.
@@ -75,27 +141,117 @@ impl Module for Quick {
 
     fn refresh(&mut self, _monitor: &str) {
         self.night = nightlight::state();
+        self.dark = system::dark_theme();
+        self.quiet = system::notifications_off();
+        (self.plans, self.plan) = system::plans();
+        let _ = self.jobs.send(Job::Read);
     }
 
     fn ui(&mut self, ui: &mut Ui, cx: &mut Ctx) {
         let t = cx.t;
-        let gap = 6.0;
-        let half = ((ui.available_width() - gap) / 2.0).floor();
-        let mut night_click = false;
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = gap;
-            ui.allocate_ui(Vec2::new(half, 54.0), |ui| {
-                night_click = tile(ui, Icon::Moon, t.night_light, self.night, t);
-            });
-        });
-        if night_click && let Some(on) = self.night {
-            match nightlight::set(!on) {
-                Ok(()) => self.night = Some(!on),
-                Err(e) => {
-                    eprintln!("night light failed: {e}");
-                    cx.toasts.push((format!("{}: {e}", t.failed), Tone::Danger));
+        let (wifi, vpns, error) = {
+            let mut s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+            (s.wifi.clone(), s.vpns.clone(), s.error.take())
+        };
+        if let Some(e) = error {
+            cx.toasts.push((format!("{}: {e}", t.failed), Tone::Danger));
+        }
+        let wifi_state = wifi.clone().flatten();
+        let wifi_label = match &wifi_state {
+            Some(wf) if !wf.network.is_empty() => format!("Wi‑Fi · {}", wf.network),
+            _ => "Wi‑Fi".to_string(),
+        };
+        egui::ScrollArea::vertical().id_salt("quick").auto_shrink([false, false]).show(ui, |ui| {
+            // Плитки по две в ряд.
+            let tiles: [(Icon, &str, Option<bool>); 5] = [
+                (Icon::Moon, t.night_light, self.night),
+                (Icon::Sun, t.keep_awake, Some(self.awake)),
+                (Icon::Image, t.dark_theme_win, self.dark),
+                (Icon::Pause, t.quiet, self.quiet),
+                (Icon::Broadcast, wifi_label.as_str(), wifi_state.as_ref().map(|wf| wf.on)),
+            ];
+            let gap = 6.0;
+            let half = ((ui.available_width() - gap) / 2.0).floor();
+            let mut clicked = None;
+            for (r, row) in tiles.chunks(2).enumerate() {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = gap;
+                    for (c, (icon, label, state)) in row.iter().enumerate() {
+                        ui.allocate_ui(Vec2::new(half, 54.0), |ui| {
+                            if tile(ui, *icon, label, *state, t) {
+                                clicked = Some(r * 2 + c);
+                            }
+                        });
+                    }
+                });
+            }
+            if let Some(i) = clicked {
+                self.toggle(i, wifi_state.as_ref(), cx);
+            }
+
+            if !self.plans.is_empty() {
+                ui.add_space(8.0);
+                w::section_label(ui, t.power_plan);
+                let opts: Vec<(Option<windows::core::GUID>, &str)> =
+                    self.plans.iter().map(|p| (Some(p.guid), p.name.as_str())).collect();
+                let mut want = self.plan;
+                if chips(ui, &mut want, &opts)
+                    && let Some(g) = want
+                {
+                    match system::set_plan(&g) {
+                        Ok(()) => self.plan = Some(g),
+                        Err(e) => cx.toasts.push((format!("{}: {e}", t.failed), Tone::Danger)),
+                    }
                 }
             }
+
+            if !vpns.is_empty() {
+                ui.add_space(8.0);
+                w::section_label(ui, "VPN");
+                for v in &vpns {
+                    ui.horizontal(|ui| {
+                        w::dot(ui, if v.connected { Tone::Success } else { Tone::Neutral });
+                        let p = Palette::of(ui);
+                        ui.label(egui::RichText::new(&v.name).color(if v.connected { p.text } else { p.weak }));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let label = if v.connected { t.disconnect } else { t.connect };
+                            if w::button(ui, Kind::Ghost, None, label).clicked() {
+                                let _ = self.jobs.send(Job::Vpn(v.name.clone(), !v.connected));
+                            }
+                        });
+                    });
+                }
+            }
+        });
+    }
+}
+
+impl Quick {
+    /// Щелчок по плитке с номером `i` (порядок — как в `ui`).
+    fn toggle(&mut self, i: usize, wifi: Option<&Wifi>, cx: &mut Ctx) {
+        let t = cx.t;
+        let result = match i {
+            0 => self.night.map(|on| nightlight::set(!on).map(|()| self.night = Some(!on))),
+            1 => {
+                let on = !self.awake;
+                Some(if system::keep_awake(on) {
+                    self.awake = on;
+                    Ok(())
+                } else {
+                    Err("SetThreadExecutionState failed".to_string())
+                })
+            }
+            2 => self.dark.map(|on| system::set_dark_theme(!on).map(|()| self.dark = Some(!on))),
+            3 => self.quiet.map(|on| system::set_notifications_off(!on).map(|()| self.quiet = Some(!on))),
+            4 => wifi.map(|wf| {
+                let _ = self.jobs.send(Job::Wifi(!wf.on));
+                Ok(())
+            }),
+            _ => None,
+        };
+        if let Some(Err(e)) = result {
+            eprintln!("quick settings failed: {e}");
+            cx.toasts.push((format!("{}: {e}", t.failed), Tone::Danger));
         }
     }
 }

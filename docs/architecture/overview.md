@@ -9,7 +9,7 @@
 | `src/look.rs` | цвет программы: пять готовых (лайм — по умолчанию) и свой — вывод под тему с контрастом 4,5:1, HSV, `accent=` |
 | `src/panel.rs` | логика «показана / спрятана» без окна (тесты) |
 | `src/modules/` | модули: `display.rs`, `brightness.rs`, `media.rs`, `resources.rs`, `clipboard.rs`, `tray.rs`, `bluetooth.rs`, `timers.rs`, `github.rs`, `buttons.rs`, `sound.rs`, `quick.rs` (быстрые настройки); общий `Module` в `mod.rs` |
-| `src/sys/` | Windows: `monitor.rs` (мониторы, курсор, полноэкранное), `display.rs` (режимы, масштаб), `ddc.rs` (DDC/CI; HMONITOR берётся из `Monitor::handle`), `media.rs` (медиа-сеансы WinRT, обложка через WIC), `kamerton.rs` (канал к Kamerton), `nightlight.rs` (ночной свет), `res.rs` (ресурсы), `clip.rs` (буфер обмена), `bt.rs` (Bluetooth), `gh.rs` (GitHub по WinHTTP), `mod.rs` (запуск, горячая клавиша, автозапуск, скругление окна, цвет акцента Windows) |
+| `src/sys/` | Windows: `monitor.rs` (мониторы, курсор, полноэкранное), `display.rs` (режимы, масштаб), `ddc.rs` (DDC/CI; HMONITOR берётся из `Monitor::handle`), `media.rs` (медиа-сеансы WinRT, обложка через WIC), `kamerton.rs` (канал к Kamerton), `nightlight.rs` (ночной свет), `system.rs` («не спать», тема, уведомления, план питания), `net.rs` (Wi‑Fi, VPN), `res.rs` (ресурсы), `clip.rs` (буфер обмена), `bt.rs` (Bluetooth), `gh.rs` (GitHub по WinHTTP), `mod.rs` (запуск, горячая клавиша, автозапуск, скругление окна, цвет акцента Windows) |
 | `src/config.rs` | `config.txt` (в том числе профили `profile=`, избранное `favorite=`, частоты `rate=`, лоток `tray=`) и `buttons.txt` |
 | `src/texts.rs` | строки RU/EN |
 | `src/shot.rs` | `ANTRESOL_SHOT`: снимок своего окна в PNG (для документации) |
@@ -85,6 +85,13 @@
   `43 42 01 00`, время изменения (секунды Unix, LEB128, байты 10–14), длина вложенного блока (байт 18) и флаг
   `02 01` (байты 23–24) — есть, значит включён. Переключение — вставить или убрать флаг, длина ±2, время —
   сейчас (`nightlight::with_state`); незнакомое значение не трогается.
+- «Не спать» — `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED)` из потока окна.
+- Тема Windows — `AppsUseLightTheme` и `SystemUsesLightTheme` в `HKCU\…\Themes\Personalize`, потом
+  `WM_SETTINGCHANGE` «ImmersiveColorSet» всем окнам. Уведомления — `ToastEnabled` в `HKCU\…\PushNotifications`.
+- План питания — powrprof (`PowerEnumerate`, `PowerReadFriendlyName`, `PowerGetActiveScheme`, `PowerSetActiveScheme`).
+- Wi‑Fi — WinRT `Windows.Devices.Radios` (`RequestAccessAsync`, `SetStateAsync`), имя сети —
+  `NetworkInformation.GetInternetConnectionProfile`. VPN — RAS (`RasEnumEntriesW`, `RasEnumConnectionsW`),
+  вкл/выкл — `rasdial имя [/disconnect]` без окна. Всё это — в потоке модуля «Быстрые настройки».
 - Звук — через Kamerton: именованный канал `\\.\pipe\kamerton-ipc`, одна строка запроса (`state`, `volume`,
   `mute`, `app-volume`, `app-mute`, `open`; поля через табуляцию), ответ до закрытия канала (`sys::kamerton`).
   Канала нет — «не запущен». Запросы — в потоке модуля «Звук»; скопившиеся громкости одной цели сводятся к
