@@ -28,6 +28,11 @@
 - Применение — с «Оставить этот режим?» и откатом всех изменённых мониторов через 15 с.
 - Не вошло: расположение мониторов в профиле, клавиши на избранное, выбор клавиши показа панели.
 
+## Этап 0.5 — медиа (сделан 22.10.2026)
+
+Изменение OpenSpec `media`. Карточка «Медиа»: обложка, название, исполнитель, программа; «Назад»,
+«Пауза», «Вперёд». Ряд карточек листается вбок на узкой панели.
+
 ## Этап 0.4 — яркость мониторов (сделан 22.10.2026)
 
 Изменение OpenSpec `monitor-brightness`. Карточка «Яркость»: яркость, контраст, вход внешних мониторов
@@ -52,7 +57,7 @@
 | ✓ 0.3 | Профили экрана | Сохранить весь режим (разрешение, частота, масштаб, расположение мониторов) и ставить одним щелчком | [Display Changer X](https://www.softpedia.com/hubs/Resolution-Changer/), [Display Hot Keys](https://alternativeto.net/software/display-hot-keys/about/) |
 | ✓ 0.3 (профили; избранное — нет) | Горячие клавиши на избранное и профили | Сменить режим, не открывая панель; несколько мониторов одной клавишей | [Display Hot Keys](https://alternativeto.net/software/display-hot-keys/about/), [RezSwap](https://github.com/nullvalue0/RezSwap) |
 | ✓ 0.4 (без выравнивания) | Яркость внешних мониторов | DDC/CI: яркость, контраст, вход монитора; выравнивание яркости между мониторами | [Twinkle Tray](https://cdn.jsdelivr.net/gh/xanderfrangos/twinkle-tray@master/README.md) |
-| ★ | Медиа | Пауза, следующий трек, название и обложка из Spotify, браузера, плееров (системные медиа-сеансы) | [Isle Notch](https://toolradar.com/tools/isle-notch), [DynamicWin](https://github.com/FlorianButz/DynamicWin), [Command Palette Dock](https://windowslatest.com/2026/02/07/windows-11-is-testing-an-optional-dock-that-sits-on-the-top-of-the-screen-with-music-playback-control-cpu-gpu-ram-stats-and-more) |
+| ✓ 0.5 | Медиа | Пауза, следующий трек, название и обложка из Spotify, браузера, плееров (системные медиа-сеансы) | [Isle Notch](https://toolradar.com/tools/isle-notch), [DynamicWin](https://github.com/FlorianButz/DynamicWin), [Command Palette Dock](https://windowslatest.com/2026/02/07/windows-11-is-testing-an-optional-dock-that-sits-on-the-top-of-the-screen-with-music-playback-control-cpu-gpu-ram-stats-and-more) |
 | | Полоска в покое | Тонкая метка у края, что панель есть; раскрывается при наведении или событии | [Isle Notch](https://toolradar.com/tools/isle-notch), [Notchify](https://www.windowscentral.com/software-apps/notchify-brings-macos-style-dynamic-island-flair-to-windows-11) |
 | | Не выезжать над выбранными программами | Список программ, над которыми панель не выезжает, — не только полный экран | [Isle Notch](https://toolradar.com/tools/isle-notch) |
 | | Несколько мониторов | Панель на всех мониторах или на выбранных, у каждой свои настройки | [Isle Notch](https://toolradar.com/tools/isle-notch) |

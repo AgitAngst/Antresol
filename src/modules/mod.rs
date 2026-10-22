@@ -4,6 +4,7 @@
 pub mod brightness;
 pub mod buttons;
 pub mod display;
+pub mod media;
 
 use anvil_ui::Tone;
 use eframe::egui::{self, Ui};
@@ -36,6 +37,10 @@ pub trait Module {
     fn weight(&self) -> f32 {
         1.0
     }
+    /// Уже этого карточка не бывает: панель уже — ряд карточек листается вбок.
+    fn min_width(&self) -> f32 {
+        220.0
+    }
     /// Перечитать состояние системы: при появлении панели и раз в 1,5 с, пока она открыта.
     fn refresh(&mut self, monitor: &str);
     fn ui(&mut self, ui: &mut Ui, cx: &mut Ctx);
@@ -54,6 +59,7 @@ pub fn all() -> Vec<Box<dyn Module>> {
     vec![
         Box::new(display::Display::default()),
         Box::new(brightness::Brightness::default()),
+        Box::new(media::Media::default()),
         Box::new(buttons::Buttons::default()),
     ]
 }

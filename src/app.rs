@@ -432,20 +432,38 @@ impl App {
         });
     }
 
+    /// Карточки в ряд по долям ширины; узкая панель — у каждой своя наименьшая ширина, а ряд
+    /// листается вбок (колесо мыши с Shift или полоса снизу).
     fn cards(&mut self, ui: &mut Ui, device: &str) {
-        let t = texts::tr(self.lang());
-        let lang = self.lang();
         let area = ui.available_rect_before_wrap();
         let gap = 10.0;
         let total: f32 = self.modules.iter().map(|m| m.weight()).sum();
         let free = area.width() - gap * (self.modules.len().saturating_sub(1)) as f32;
-        let mut x = area.left();
+        let widths: Vec<f32> = self.modules.iter().map(|m| (free * m.weight() / total).max(m.min_width())).collect();
+        let content = widths.iter().sum::<f32>() + gap * (widths.len().saturating_sub(1)) as f32;
+        if content <= area.width() + 0.5 {
+            self.card_row(ui, area.min, &widths, area.height(), device);
+            return;
+        }
+        let mut child = ui.new_child(UiBuilder::new().max_rect(area));
+        egui::ScrollArea::horizontal().id_salt("cards").auto_shrink([false, false]).show(&mut child, |ui| {
+            // Под полосу прокрутки — 12 снизу.
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(content, area.height() - 12.0), Sense::hover());
+            self.card_row(ui, rect.min, &widths, rect.height(), device);
+        });
+    }
+
+    fn card_row(&mut self, ui: &mut Ui, origin: Pos2, widths: &[f32], height: f32, device: &str) {
+        let t = texts::tr(self.lang());
+        let lang = self.lang();
+        let gap = 10.0;
+        let mut x = origin.x;
         let mut toasts = Vec::new();
         let before = self.settings.clone();
         let settings = &mut self.settings;
         for (i, module) in self.modules.iter_mut().enumerate() {
-            let width = free * module.weight() / total;
-            let rect = Rect::from_min_size(Pos2::new(x, area.top()), Vec2::new(width, area.height()));
+            let width = widths[i];
+            let rect = Rect::from_min_size(Pos2::new(x, origin.y), Vec2::new(width, height));
             x += width + gap;
             // Карточки входят по очереди: сдвиг и прозрачность, как строки списка.
             let (alpha, dy) = Motion::of(ui.ctx()).enter(ui.ctx(), ui.id().with(("card", module.key())), i);

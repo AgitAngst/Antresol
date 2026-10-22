@@ -227,7 +227,7 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             common: CommonSettings::default(),
-            width: 1100.0,
+            width: 1300.0,
             height: 300.0,
             monitor: String::new(),
             show_delay_ms: 150,

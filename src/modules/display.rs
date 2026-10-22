@@ -399,6 +399,10 @@ impl Module for Display {
         1.8
     }
 
+    fn min_width(&self) -> f32 {
+        420.0
+    }
+
     fn refresh(&mut self, panel: &str) {
         if self.pending.is_some() {
             return;

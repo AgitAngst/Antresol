@@ -2,6 +2,7 @@
 
 pub mod ddc;
 pub mod display;
+pub mod media;
 pub mod monitor;
 
 use std::sync::Mutex;

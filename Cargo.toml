@@ -1,6 +1,6 @@
 [package]
 name = "antresol"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 description = "Quick-access panel at the top edge of the monitor"
 license = "MIT"
@@ -15,14 +15,21 @@ path = "src/main.rs"
 anvil-ui = { git = "https://github.com/AgitAngst/Anvil", tag = "kit-v0.6.1" }
 eframe = "0.36.2"
 
-# Win32: мониторы, режимы экрана и масштаб, запуск, горячая клавиша, автозапуск.
+# Win32: мониторы, режимы экрана и масштаб, DDC/CI, запуск, горячая клавиша, автозапуск;
+# WinRT: медиа-сеансы (что играет), WIC — обложка.
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = [
+    "Foundation",
+    "Media_Control",
+    "Storage_Streams",
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    "Win32_Graphics_Imaging",
     "Win32_Devices_Display",
+    "Win32_System_Com",
     "Win32_System_Registry",
     "Win32_System_Threading",
+    "Win32_System_WinRT",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
