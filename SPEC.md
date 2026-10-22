@@ -20,6 +20,30 @@
 - Частота запоминается для каждого разрешения и ставится при переходе на него.
 - Частоты и масштабы — чипами с переносом (в 0.1 полоса обрезалась).
 
+## Кандидаты этапов — по аналогам (22.10.2026, не согласованы, порядок решит владелец)
+
+Собраны по программам, которые обсуждают в r/software и r/Windows11 (сам Reddit прочитать не удалось —
+взяты страницы, README и обзоры этих программ). ★ — первыми, по мнению сессии: ближе всего к
+назначению панели (быстрые настройки системы).
+
+| | Кандидат | Что | Аналоги |
+|---|---|---|---|
+| ★ | Профили экрана | Сохранить весь режим (разрешение, частота, масштаб, расположение мониторов) и ставить одним щелчком | [Display Changer X](https://www.softpedia.com/hubs/Resolution-Changer/), [Display Hot Keys](https://alternativeto.net/software/display-hot-keys/about/) |
+| ★ | Горячие клавиши на избранное и профили | Сменить режим, не открывая панель; несколько мониторов одной клавишей | [Display Hot Keys](https://alternativeto.net/software/display-hot-keys/about/), [RezSwap](https://github.com/nullvalue0/RezSwap) |
+| ★ | Яркость внешних мониторов | DDC/CI: яркость, контраст, вход монитора; выравнивание яркости между мониторами | [Twinkle Tray](https://cdn.jsdelivr.net/gh/xanderfrangos/twinkle-tray@master/README.md) |
+| ★ | Громкость по программам | Ползунок и «без звука» для каждой программы; колесо мыши над всей карточкой | [EarTrumpet](https://github.com/File-New-Project/EarTrumpet/blob/master/CHANGELOG.md) |
+| ★ | Медиа | Пауза, следующий трек, название и обложка из Spotify, браузера, плееров (системные медиа-сеансы) | [Isle Notch](https://toolradar.com/tools/isle-notch), [DynamicWin](https://github.com/FlorianButz/DynamicWin), [Command Palette Dock](https://windowslatest.com/2026/02/07/windows-11-is-testing-an-optional-dock-that-sits-on-the-top-of-the-screen-with-music-playback-control-cpu-gpu-ram-stats-and-more) |
+| | Полоска в покое | Тонкая метка у края, что панель есть; раскрывается при наведении или событии | [Isle Notch](https://toolradar.com/tools/isle-notch), [Notchify](https://www.windowscentral.com/software-apps/notchify-brings-macos-style-dynamic-island-flair-to-windows-11) |
+| | Не выезжать над выбранными программами | Список программ, над которыми панель не выезжает, — не только полный экран | [Isle Notch](https://toolradar.com/tools/isle-notch) |
+| | Несколько мониторов | Панель на всех мониторах или на выбранных, у каждой свои настройки | [Isle Notch](https://toolradar.com/tools/isle-notch) |
+| | Ресурсы | ЦП, видеокарта, память, сеть, батарея, температура | [Command Palette Dock](https://pureinfotech.com/powertoys-command-palette-dock-windows-11/) |
+| | История буфера обмена | Последние скопированные тексты, вставить щелчком | [Notchify](https://www.windowscentral.com/software-apps/want-your-pc-to-be-a-bit-more-like-a-mac-the-dynamic-island-for-windows-just-got-a-big-update), [Command Palette Dock](https://windowslatest.com/2026/02/07/windows-11-is-testing-an-optional-dock-that-sits-on-the-top-of-the-screen-with-music-playback-control-cpu-gpu-ram-stats-and-more) |
+| | Лоток файлов | Бросить файл в панель, забрать или открыть позже | [DynamicWin](https://github.com/FlorianButz/DynamicWin) |
+| | Bluetooth-устройства | Подключить наушники и мышь, увидеть заряд | [DynamicWin](https://github.com/FlorianButz/DynamicWin) |
+| | Режим правки | Перетаскивать модули, включать и выключать, показывать только значки | [Command Palette Dock](https://windowslatest.com/2026/02/07/windows-11-is-testing-an-optional-dock-that-sits-on-the-top-of-the-screen-with-music-playback-control-cpu-gpu-ram-stats-and-more) |
+| | Таймеры, напоминания, календарь | Короткий таймер, «помидор», ближайшие события | [Command Palette Dock](https://windowslatest.com/2026/02/07/windows-11-is-testing-an-optional-dock-that-sits-on-the-top-of-the-screen-with-music-playback-control-cpu-gpu-ram-stats-and-more), [DynamicWin](https://github.com/FlorianButz/DynamicWin) |
+| | Состояние GitHub | CI и пулл-реквесты своих репозиториев (без запуска CI) | [Command Palette Dock](https://windowslatest.com/2026/02/07/windows-11-is-testing-an-optional-dock-that-sits-on-the-top-of-the-screen-with-music-playback-control-cpu-gpu-ram-stats-and-more) |
+
 ## Дальше — идеи из мозгового штурма (не согласованы, порядок решит владелец)
 
 | Раздел | Что |
