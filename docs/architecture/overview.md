@@ -7,7 +7,7 @@
 | `src/main.rs` | окно: без рамки, поверх всех, без кнопки на панели задач |
 | `src/app.rs` | окно-панель: место у края, выезд, шапка, карточки модулей, настройки, ручки размера |
 | `src/panel.rs` | логика «показана / спрятана» без окна (тесты) |
-| `src/modules/` | модули: `display.rs`, `brightness.rs`, `media.rs`, `resources.rs`, `clipboard.rs`, `tray.rs`, `bluetooth.rs`, `buttons.rs`; общий `Module` в `mod.rs` |
+| `src/modules/` | модули: `display.rs`, `brightness.rs`, `media.rs`, `resources.rs`, `clipboard.rs`, `tray.rs`, `bluetooth.rs`, `timers.rs`, `buttons.rs`; общий `Module` в `mod.rs` |
 | `src/sys/` | Windows: `monitor.rs` (мониторы, курсор, полноэкранное), `display.rs` (режимы, масштаб), `ddc.rs` (DDC/CI; HMONITOR берётся из `Monitor::handle`), `media.rs` (медиа-сеансы WinRT, обложка через WIC), `res.rs` (ресурсы), `clip.rs` (буфер обмена), `bt.rs` (Bluetooth), `mod.rs` (запуск, горячая клавиша, автозапуск, скругление окна) |
 | `src/config.rs` | `config.txt` (в том числе профили `profile=`, избранное `favorite=`, частоты `rate=`, лоток `tray=`) и `buttons.txt` |
 | `src/texts.rs` | строки RU/EN |
@@ -58,7 +58,8 @@
 - Bluetooth — `BluetoothFindFirstDevice` (запомненные, без поиска новых); заряд — свойство устройства
   `{104EA319-6EE2-4701-BD47-8DDBF425BBE5} 2` у узлов `BTHENUM` и `BTHLEDEVICE` (SetupAPI), сопоставленных с
   устройством по 12-значному адресу в ID узла. Перечисление — в потоке модуля.
-- Порядок и видимость карточек — `config::arrange` по ключам модулей (`Module::key`).
+- Порядок и видимость карточек — `config::arrange` по ключам модулей (`Module::key`); `refresh` зовётся только у
+  видимых, `background` и `attention` — у всех.
 - Автозапуск — строка `Antresol` в `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
 
 ## Как добавить модуль
@@ -66,7 +67,7 @@
 1. Файл в `src/modules/`, структура с `impl Module`: `key`, `title`, `refresh` (перечитать систему —
    при выезде и раз в 1,5 с), `ui` (карточка; в `Ctx` — строки, язык, монитор, уведомления и `settings`:
    свои данные модуль хранит в настройках, панель сама сохранит файл, если они изменились), по желанию `weight` (доля ширины), `min_width` (наименьшая ширина, по умолчанию 220; уже — ряд листается вбок), `command` (команда извне карточки — клавиша профиля, брошенные файлы), `background` (каждый кадр,
-   даже у спрятанной панели — только дешёвое), `busy` (не прятать
+   даже у спрятанной панели — только дешёвое), `attention` (модуль просит выехать с уведомлением — таймер дошёл), `busy` (не прятать
    панель), `ticking` (нужны кадры).
 2. Строка в `modules::all()`; строки — в `texts.rs` на двух языках; системное — в `src/sys/`.
 3. Вид — по [гайдлайну](../ui-guideline.md); страницу [usage](../guide/usage.md) дополнить.

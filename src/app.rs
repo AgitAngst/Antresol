@@ -226,8 +226,24 @@ impl App {
             self.monitors = monitor::monitors();
             self.monitors_at = Some(now);
         }
+        let t = texts::tr(self.lang());
+        let mut calls = Vec::new();
         for module in &mut self.modules {
             module.background(&self.settings);
+            if let Some(msg) = module.attention(t) {
+                calls.push(msg);
+            }
+        }
+        // Модуль зовёт (таймер дошёл) — уведомление и выезд, как по клавише.
+        if !calls.is_empty() {
+            for msg in calls {
+                self.toasts.push(msg, Tone::Accent);
+            }
+            if !self.edge.shown {
+                self.edge.reveal(Instant::now());
+                self.refreshed = None;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
         }
         self.take_dropped(ctx);
         let cursor = monitor::cursor();

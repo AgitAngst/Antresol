@@ -67,6 +67,11 @@
 «Bluetooth» (подключено, заряд). Не вошло: перетаскивание карточек мышью, «только значки», подключение
 устройств из панели.
 
+## Этап 1.0 — таймеры (сделан 22.10.2026)
+
+Изменение OpenSpec `timers`. Быстрые таймеры и «помидор»; дошёл — уведомление и выезд панели. Не вошло:
+напоминания по времени суток, календарь (без учётной записи Windows событий не отдаёт).
+
 ## Кандидаты этапов — по аналогам (22.10.2026, не согласованы, порядок решит владелец)
 
 Собраны по программам, которые обсуждают в r/software и r/Windows11 (сам Reddit прочитать не удалось —
@@ -87,7 +92,7 @@
 | ✓ 0.8 (без перетаскивания наружу) | Лоток файлов | Бросить файл в панель, забрать или открыть позже | [DynamicWin](https://github.com/FlorianButz/DynamicWin) |
 | ✓ 0.9 (без подключения из панели) | Bluetooth-устройства | Подключить наушники и мышь, увидеть заряд | [DynamicWin](https://github.com/FlorianButz/DynamicWin) |
 | ✓ 0.9 (стрелками, без «только значки») | Режим правки | Перетаскивать модули, включать и выключать, показывать только значки | [Command Palette Dock](https://windowslatest.com/2026/02/07/windows-11-is-testing-an-optional-dock-that-sits-on-the-top-of-the-screen-with-music-playback-control-cpu-gpu-ram-stats-and-more) |
-| | Таймеры, напоминания, календарь | Короткий таймер, «помидор», ближайшие события | [Command Palette Dock](https://windowslatest.com/2026/02/07/windows-11-is-testing-an-optional-dock-that-sits-on-the-top-of-the-screen-with-music-playback-control-cpu-gpu-ram-stats-and-more), [DynamicWin](https://github.com/FlorianButz/DynamicWin) |
+| ✓ 1.0 (без календаря) | Таймеры, напоминания, календарь | Короткий таймер, «помидор», ближайшие события | [Command Palette Dock](https://windowslatest.com/2026/02/07/windows-11-is-testing-an-optional-dock-that-sits-on-the-top-of-the-screen-with-music-playback-control-cpu-gpu-ram-stats-and-more), [DynamicWin](https://github.com/FlorianButz/DynamicWin) |
 | | Интеграция Kamerton | Звук в панели — из Kamerton (после согласования с владельцем) | [Kamerton](https://github.com/AgitAngst/Kamerton) |
 | | Состояние GitHub | CI и пулл-реквесты своих репозиториев (без запуска CI) | [Command Palette Dock](https://windowslatest.com/2026/02/07/windows-11-is-testing-an-optional-dock-that-sits-on-the-top-of-the-screen-with-music-playback-control-cpu-gpu-ram-stats-and-more) |
 

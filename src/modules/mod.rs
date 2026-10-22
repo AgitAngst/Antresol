@@ -8,6 +8,7 @@ pub mod clipboard;
 pub mod display;
 pub mod media;
 pub mod resources;
+pub mod timers;
 pub mod tray;
 
 use anvil_ui::Tone;
@@ -61,6 +62,10 @@ pub trait Module {
     fn command(&mut self, _cmd: &Command, _cx: &mut Ctx) {}
     /// Каждый кадр панели, даже спрятанной: дешёвая слежка (номер копирования буфера).
     fn background(&mut self, _settings: &crate::config::Settings) {}
+    /// Модулю есть что сказать (таймер дошёл): панель покажет уведомление и выедет.
+    fn attention(&mut self, _t: &Tr) -> Option<String> {
+        None
+    }
 }
 
 pub fn all() -> Vec<Box<dyn Module>> {
@@ -72,6 +77,7 @@ pub fn all() -> Vec<Box<dyn Module>> {
         Box::new(clipboard::Clipboard::default()),
         Box::new(tray::Tray::default()),
         Box::new(bluetooth::Bluetooth::default()),
+        Box::new(timers::Timers::default()),
         Box::new(buttons::Buttons::default()),
     ]
 }

@@ -12,7 +12,8 @@ python E:/dev_personal/tools/checks.py --repo . -j 4 fmt test clippy
 коды клавиш (`sys/mod.rs`), входы DDC/CI (`sys/ddc.rs`), имя программы и мониторы (`sys/monitor.rs`), PNG
 снимка (`shot.rs`), ключ трека (`modules/media.rs`), ресурсы (`sys/res.rs` — в том числе настоящий замер этого ПК), история буфера
 (`modules/clipboard.rs`), лоток (`modules/tray.rs`), порядок карточек (`config.rs`),
-адреса Bluetooth и настоящий опрос (`sys/bt.rs`).
+адреса Bluetooth и настоящий опрос (`sys/bt.rs`),
+таймеры и «помидор» (`modules/timers.rs`).
 
 ## Живая проверка
 
