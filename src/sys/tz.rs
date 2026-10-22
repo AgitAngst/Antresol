@@ -13,22 +13,25 @@ fn utf16(s: &[u16]) -> String {
     String::from_utf16_lossy(&s[..end])
 }
 
-/// Все пояса Windows: ключ и описание пояса.
-fn all() -> Vec<DYNAMIC_TIME_ZONE_INFORMATION> {
-    let mut out = Vec::new();
-    for i in 0.. {
-        let mut z = DYNAMIC_TIME_ZONE_INFORMATION::default();
-        if unsafe { EnumDynamicTimeZoneInformation(i, &mut z) } != 0 {
-            break;
+/// Все пояса Windows (ключ и описание), прочитанные из реестра один раз за запуск.
+fn all() -> &'static [(String, DYNAMIC_TIME_ZONE_INFORMATION)] {
+    static ZONES: std::sync::OnceLock<Vec<(String, DYNAMIC_TIME_ZONE_INFORMATION)>> = std::sync::OnceLock::new();
+    ZONES.get_or_init(|| {
+        let mut out = Vec::new();
+        for i in 0.. {
+            let mut z = DYNAMIC_TIME_ZONE_INFORMATION::default();
+            if unsafe { EnumDynamicTimeZoneInformation(i, &mut z) } != 0 {
+                break;
+            }
+            out.push((utf16(&z.TimeZoneKeyName), z));
         }
-        out.push(z);
-    }
-    out
+        out
+    })
 }
 
 /// Ключи всех поясов, по алфавиту.
 pub fn keys() -> Vec<String> {
-    let mut k: Vec<String> = all().iter().map(|z| utf16(&z.TimeZoneKeyName)).collect();
+    let mut k: Vec<String> = all().iter().map(|(key, _)| key.clone()).collect();
     k.sort();
     k.dedup();
     k
@@ -36,23 +39,21 @@ pub fn keys() -> Vec<String> {
 
 /// Время в поясе сейчас: часы, минуты и смещение от UTC в минутах; пояса нет — `None`.
 pub fn now_in(key: &str) -> Option<(u16, u16, i32)> {
-    let z = all().into_iter().find(|z| utf16(&z.TimeZoneKeyName) == key)?;
+    let (_, z) = all().iter().find(|(k, _)| k == key)?;
     let utc = unsafe { GetSystemTime() };
     let mut local = SYSTEMTIME::default();
     unsafe {
-        SystemTimeToTzSpecificLocalTimeEx(Some(&z), &utc, &mut local).ok()?;
+        SystemTimeToTzSpecificLocalTimeEx(Some(z), &utc, &mut local).ok()?;
     }
     Some((local.wHour, local.wMinute, offset(&utc, &local)))
 }
 
-/// Смещение пояса этого ПК от UTC в минутах.
+/// Смещение пояса этого ПК от UTC в минутах; не узнать — 0.
 pub fn local_offset() -> i32 {
     let utc = unsafe { GetSystemTime() };
     let mut local = SYSTEMTIME::default();
-    unsafe {
-        let _ = windows::Win32::System::Time::SystemTimeToTzSpecificLocalTime(None, &utc, &mut local);
-    }
-    offset(&utc, &local)
+    let ok = unsafe { windows::Win32::System::Time::SystemTimeToTzSpecificLocalTime(None, &utc, &mut local) }.is_ok();
+    if ok { offset(&utc, &local) } else { 0 }
 }
 
 /// Разница двух моментов (местное − UTC) в минутах, с учётом смены суток.

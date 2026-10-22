@@ -235,6 +235,10 @@ impl App {
 
     /// Сочетание показа панели, которое сейчас работает: своё или первое свободное из готовых.
     fn panel_combo(&self) -> Option<String> {
+        // Снимки в открытый репозиторий: не выдавать, какие сочетания заняты на этом ПК.
+        if sys::demo() {
+            return Some(sys::HOTKEYS[0].0.join("+"));
+        }
         match sys::panel_hotkey() {
             sys::PanelKey::Custom(_) => self.settings.panel_hotkey.as_ref().map(|h| h.to_string()),
             sys::PanelKey::Auto(Some(i)) => Some(sys::HOTKEYS[i].0.join("+")),
@@ -1650,6 +1654,7 @@ impl App {
             && self.capture.is_none()
             && !self.capture_panel
             && self.naming.is_none()
+            && !self.modules.iter().any(|m| m.typing())
         {
             if self.view == View::Color {
                 self.restore_accent(&ctx);

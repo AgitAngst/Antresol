@@ -610,11 +610,13 @@ pub fn time_diff(lang: Lang, minutes: i32) -> String {
     }
     let sign = if minutes > 0 { "+" } else { "−" };
     let (h, m) = (minutes.abs() / 60, minutes.abs() % 60);
-    match (lang, m) {
-        (Lang::Ru, 0) => format!("{sign}{h} ч"),
-        (Lang::Ru, _) => format!("{sign}{h} ч {m} мин"),
-        (Lang::En, 0) => format!("{sign}{h} h"),
-        (Lang::En, _) => format!("{sign}{h} h {m} min"),
+    match (lang, h, m) {
+        (Lang::Ru, _, 0) => format!("{sign}{h} ч"),
+        (Lang::Ru, 0, _) => format!("{sign}{m} мин"),
+        (Lang::Ru, _, _) => format!("{sign}{h} ч {m} мин"),
+        (Lang::En, _, 0) => format!("{sign}{h} h"),
+        (Lang::En, 0, _) => format!("{sign}{m} min"),
+        (Lang::En, _, _) => format!("{sign}{h} h {m} min"),
     }
 }
 
@@ -761,5 +763,8 @@ mod tests {
         assert_eq!(ago(Lang::Ru, 12 * 60), "12 мин назад");
         assert_eq!(ago(Lang::En, 3 * 3600 + 5), "3 h ago");
         assert_eq!(ago(Lang::Ru, 2 * 86400), "2 дн назад");
+        assert_eq!(time_diff(Lang::Ru, -30), "−30 мин");
+        assert_eq!(time_diff(Lang::Ru, 330), "+5 ч 30 мин");
+        assert_eq!(time_diff(Lang::En, 0), "same as here");
     }
 }

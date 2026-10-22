@@ -126,7 +126,7 @@ VPN Windows. Не вошло: VPN-программы со своим клиен�
 | ✓ 0.6 | Полоска в покое | Тонкая метка у края, что панель есть; раскрывается при наведении или событии | [Isle Notch](https://toolradar.com/tools/isle-notch), [Notchify](https://www.windowscentral.com/software-apps/notchify-brings-macos-style-dynamic-island-flair-to-windows-11) |
 | ✓ 0.6 | Не выезжать над выбранными программами | Список программ, над которыми панель не выезжает, — не только полный экран | [Isle Notch](https://toolradar.com/tools/isle-notch) |
 | ✓ 0.6 (без своих настроек у монитора) | Несколько мониторов | Панель на всех мониторах или на выбранных, у каждой свои настройки | [Isle Notch](https://toolradar.com/tools/isle-notch) |
-| ✓ 0.7 (без температуры) | Ресурсы | ЦП, видеокарта, память, сеть, батарея, температура | [Command Palette Dock](https://pureinfotech.com/powertoys-command-palette-dock-windows-11/) |
+| ✓ 0.7, температура — 1.7 | Ресурсы | ЦП, видеокарта, память, сеть, батарея, температура | [Command Palette Dock](https://pureinfotech.com/powertoys-command-palette-dock-windows-11/) |
 | ✓ 0.8 | История буфера обмена | Последние скопированные тексты, вставить щелчком | [Notchify](https://www.windowscentral.com/software-apps/want-your-pc-to-be-a-bit-more-like-a-mac-the-dynamic-island-for-windows-just-got-a-big-update), [Command Palette Dock](https://windowslatest.com/2026/02/07/windows-11-is-testing-an-optional-dock-that-sits-on-the-top-of-the-screen-with-music-playback-control-cpu-gpu-ram-stats-and-more) |
 | ✓ 0.8 (без перетаскивания наружу) | Лоток файлов | Бросить файл в панель, забрать или открыть позже | [DynamicWin](https://github.com/FlorianButz/DynamicWin) |
 | ✓ 0.9 (без подключения из панели) | Bluetooth-устройства | Подключить наушники и мышь, увидеть заряд | [DynamicWin](https://github.com/FlorianButz/DynamicWin) |
@@ -136,6 +136,9 @@ VPN Windows. Не вошло: VPN-программы со своим клиен�
 | ✓ 1.1 | Состояние GitHub | CI и пулл-реквесты своих репозиториев (без запуска CI) | [Command Palette Dock](https://windowslatest.com/2026/02/07/windows-11-is-testing-an-optional-dock-that-sits-on-the-top-of-the-screen-with-music-playback-control-cpu-gpu-ram-stats-and-more) |
 
 ## Дальше — идеи из мозгового штурма (не согласованы, порядок решит владелец)
+
+Сделано всё, кроме раздела «Окна» (владелец 22.10.2026: не нужны): экран — 0.4, 0.3, 1.4; система — 0.9, 1.5;
+буфер и снимки — 0.8, 1.6; состояние — 0.7, 1.1, 1.7; медиа и время — 0.5, 1.0, 1.7; сама панель — 0.6, 0.9, 1.2.
 
 | Раздел | Что |
 |---|---|

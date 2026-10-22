@@ -74,6 +74,10 @@ pub trait Module {
     fn busy(&self) -> bool {
         false
     }
+    /// В карточке вводят текст: Esc отменяет ввод, а не прячет панель.
+    fn typing(&self) -> bool {
+        false
+    }
     /// Модулю нужен кадр, даже если мышь стоит (обратный отсчёт).
     fn ticking(&self) -> bool {
         false
