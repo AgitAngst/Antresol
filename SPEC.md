@@ -28,6 +28,13 @@
 - Применение — с «Оставить этот режим?» и откатом всех изменённых мониторов через 15 с.
 - Не вошло: расположение мониторов в профиле, клавиши на избранное, выбор клавиши показа панели.
 
+## 0.3.1 — звук убран (22.10.2026, решение владельца)
+
+Владелец: «Исключи всё что связано со звуком. Потом сделаем интеграцию Kamerton.» Карточка «Звук»
+(громкость, «без звука», устройство вывода) и её системная часть удалены; громкость по программам и
+микрофон из планов сняты. Звук в панели появится через интеграцию с
+[Kamerton](https://github.com/AgitAngst/Kamerton) — отдельный этап после согласования с владельцем.
+
 ## Кандидаты этапов — по аналогам (22.10.2026, не согласованы, порядок решит владелец)
 
 Собраны по программам, которые обсуждают в r/software и r/Windows11 (сам Reddit прочитать не удалось —
@@ -39,7 +46,6 @@
 | ★ | Профили экрана | Сохранить весь режим (разрешение, частота, масштаб, расположение мониторов) и ставить одним щелчком | [Display Changer X](https://www.softpedia.com/hubs/Resolution-Changer/), [Display Hot Keys](https://alternativeto.net/software/display-hot-keys/about/) |
 | ★ | Горячие клавиши на избранное и профили | Сменить режим, не открывая панель; несколько мониторов одной клавишей | [Display Hot Keys](https://alternativeto.net/software/display-hot-keys/about/), [RezSwap](https://github.com/nullvalue0/RezSwap) |
 | ★ | Яркость внешних мониторов | DDC/CI: яркость, контраст, вход монитора; выравнивание яркости между мониторами | [Twinkle Tray](https://cdn.jsdelivr.net/gh/xanderfrangos/twinkle-tray@master/README.md) |
-| ★ | Громкость по программам | Ползунок и «без звука» для каждой программы; колесо мыши над всей карточкой | [EarTrumpet](https://github.com/File-New-Project/EarTrumpet/blob/master/CHANGELOG.md) |
 | ★ | Медиа | Пауза, следующий трек, название и обложка из Spotify, браузера, плееров (системные медиа-сеансы) | [Isle Notch](https://toolradar.com/tools/isle-notch), [DynamicWin](https://github.com/FlorianButz/DynamicWin), [Command Palette Dock](https://windowslatest.com/2026/02/07/windows-11-is-testing-an-optional-dock-that-sits-on-the-top-of-the-screen-with-music-playback-control-cpu-gpu-ram-stats-and-more) |
 | | Полоска в покое | Тонкая метка у края, что панель есть; раскрывается при наведении или событии | [Isle Notch](https://toolradar.com/tools/isle-notch), [Notchify](https://www.windowscentral.com/software-apps/notchify-brings-macos-style-dynamic-island-flair-to-windows-11) |
 | | Не выезжать над выбранными программами | Список программ, над которыми панель не выезжает, — не только полный экран | [Isle Notch](https://toolradar.com/tools/isle-notch) |
@@ -50,6 +56,7 @@
 | | Bluetooth-устройства | Подключить наушники и мышь, увидеть заряд | [DynamicWin](https://github.com/FlorianButz/DynamicWin) |
 | | Режим правки | Перетаскивать модули, включать и выключать, показывать только значки | [Command Palette Dock](https://windowslatest.com/2026/02/07/windows-11-is-testing-an-optional-dock-that-sits-on-the-top-of-the-screen-with-music-playback-control-cpu-gpu-ram-stats-and-more) |
 | | Таймеры, напоминания, календарь | Короткий таймер, «помидор», ближайшие события | [Command Palette Dock](https://windowslatest.com/2026/02/07/windows-11-is-testing-an-optional-dock-that-sits-on-the-top-of-the-screen-with-music-playback-control-cpu-gpu-ram-stats-and-more), [DynamicWin](https://github.com/FlorianButz/DynamicWin) |
+| | Интеграция Kamerton | Звук в панели — из Kamerton (после согласования с владельцем) | [Kamerton](https://github.com/AgitAngst/Kamerton) |
 | | Состояние GitHub | CI и пулл-реквесты своих репозиториев (без запуска CI) | [Command Palette Dock](https://windowslatest.com/2026/02/07/windows-11-is-testing-an-optional-dock-that-sits-on-the-top-of-the-screen-with-music-playback-control-cpu-gpu-ram-stats-and-more) |
 
 ## Дальше — идеи из мозгового штурма (не согласованы, порядок решит владелец)
@@ -57,8 +64,7 @@
 | Раздел | Что |
 |---|---|
 | Экран | яркость внешних мониторов (DDC/CI), ночной свет, основной монитор, профили «работа/игра» |
-| Звук | громкость по программам, микрофон: устройство и выключение с индикатором |
-| Система | не давать уснуть, план питания, тема Windows, «не беспокоить», Bluetooth-наушники, Wi‑Fi и VPN |
+| Система | не давать уснуть, план питания, тема Windows, «не беспокоить», Bluetooth-устройства, Wi‑Fi и VPN |
 | Окна | раскладки по зонам, «поверх всех», перенос на другой монитор |
 | Буфер и снимки | история буфера, заготовки текста, пипетка, снимок области с распознаванием |
 | Состояние | ЦП, видеокарта, память, температура, место на E:, сеть, CI на GitHub |

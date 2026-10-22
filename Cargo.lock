@@ -192,12 +192,11 @@ dependencies = [
 
 [[package]]
 name = "antresol"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anvil-ui",
  "eframe",
  "windows",
- "windows-core",
 ]
 
 [[package]]

@@ -1,7 +1,6 @@
 // Модули панели: каждый — карточка со своими быстрыми настройками. Новый модуль — файл здесь,
 // `impl Module` и строка в `all()`; остальное (раскладка, появление, обновление) панель делает сама.
 
-pub mod audio;
 pub mod buttons;
 pub mod display;
 
@@ -51,11 +50,7 @@ pub trait Module {
 }
 
 pub fn all() -> Vec<Box<dyn Module>> {
-    vec![
-        Box::new(display::Display::default()),
-        Box::new(audio::Audio::default()),
-        Box::new(buttons::Buttons::default()),
-    ]
+    vec![Box::new(display::Display::default()), Box::new(buttons::Buttons::default())]
 }
 
 /// Строка списка с текстом слева и пометкой справа; выбранная — с полоской акцента.
@@ -72,7 +67,7 @@ pub fn row(ui: &mut Ui, id: egui::Id, selected: bool, label: &str, trailing: &st
             ui.painter().text(right, egui::Align2::RIGHT_CENTER, trailing, egui::FontId::proportional(12.0), p.faint);
         room -= g.width() + 8.0;
     }
-    // Длинное имя (устройства звука) — с многоточием, а не за край карточки.
+    // Длинное имя — с многоточием, а не за край карточки.
     let mut job = egui::text::LayoutJob::simple_singleline(label.to_owned(), font, color);
     job.wrap = egui::text::TextWrapping::truncate_at_width(room.max(20.0));
     let galley = ui.painter().layout_job(job);

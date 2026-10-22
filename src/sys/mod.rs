@@ -1,6 +1,5 @@
 // Всё, что идёт в Windows напрямую. Остальная программа зовёт только эти функции.
 
-pub mod audio;
 pub mod display;
 pub mod monitor;
 
@@ -26,7 +25,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::PCWSTR;
 
 /// Демо-режим для снимков в открытый репозиторий (`ANTRESOL_DEMO=1`): вместо настоящих имён
-/// монитора и звуковых устройств — выдуманные. Остальное работает как обычно.
+/// (монитор) — выдуманные. Остальное работает как обычно.
 pub fn demo() -> bool {
     std::env::var_os("ANTRESOL_DEMO").is_some()
 }

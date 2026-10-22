@@ -7,8 +7,8 @@
 | `src/main.rs` | окно: без рамки, поверх всех, без кнопки на панели задач |
 | `src/app.rs` | окно-панель: место у края, выезд, шапка, карточки модулей, настройки, ручки размера |
 | `src/panel.rs` | логика «показана / спрятана» без окна (тесты) |
-| `src/modules/` | модули: `display.rs`, `audio.rs`, `buttons.rs`; общий `Module` в `mod.rs` |
-| `src/sys/` | Windows: `monitor.rs` (мониторы, курсор, полноэкранное), `display.rs` (режимы, масштаб), `audio.rs` (Core Audio), `mod.rs` (запуск, горячая клавиша, автозапуск, скругление окна) |
+| `src/modules/` | модули: `display.rs`, `buttons.rs`; общий `Module` в `mod.rs` |
+| `src/sys/` | Windows: `monitor.rs` (мониторы, курсор, полноэкранное), `display.rs` (режимы, масштаб), `mod.rs` (запуск, горячая клавиша, автозапуск, скругление окна) |
 | `src/config.rs` | `config.txt` (в том числе профили `profile=`, избранное `favorite=`, частоты `rate=`) и `buttons.txt` |
 | `src/texts.rs` | строки RU/EN |
 
@@ -36,8 +36,6 @@
 - Режимы экрана — `EnumDisplaySettingsW` / `ChangeDisplaySettingsExW` (с записью в реестр).
 - Масштаб — `DisplayConfigGetDeviceInfo` / `SetDeviceInfo` с недокументированными пакетами −3/−4:
   масштаб задаётся шагом от рекомендованного по шкале 100…500 %.
-- Звук — `IMMDeviceEnumerator`, `IAudioEndpointVolume`; основное устройство — недокументированный
-  `IPolicyConfig` (как панель звука Windows).
 - Автозапуск — строка `Antresol` в `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
 
 ## Как добавить модуль

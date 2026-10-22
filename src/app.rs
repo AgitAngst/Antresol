@@ -72,7 +72,6 @@ impl App {
         let settings = config::load();
         anvil_ui::install(&cc.egui_ctx, ACCENT, settings.common.theme);
         settings.common.apply(&cc.egui_ctx);
-        sys::audio::init();
         let ctx = cc.egui_ctx.clone();
         let hotkey = sys::start_hotkey(move || ctx.request_repaint());
         match hotkey {
@@ -81,7 +80,12 @@ impl App {
         }
         App {
             settings,
-            edge: Edge::default(),
+            // Для снимков: закрепить сразу, чтобы панель после показа при запуске не уезжала.
+            edge: {
+                let mut edge = Edge::default();
+                edge.pinned = std::env::var_os("ANTRESOL_PIN").is_some();
+                edge
+            },
             modules: modules::all(),
             toasts: Toasts::default(),
             // Для снимков: открыть сразу настройки, не щёлкая мышью.
