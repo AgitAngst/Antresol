@@ -7,8 +7,8 @@
 | `src/main.rs` | окно: без рамки, поверх всех, без кнопки на панели задач |
 | `src/app.rs` | окно-панель: место у края, выезд, шапка, карточки модулей, настройки, ручки размера |
 | `src/panel.rs` | логика «показана / спрятана» без окна (тесты) |
-| `src/modules/` | модули: `display.rs`, `brightness.rs`, `media.rs`, `resources.rs`, `clipboard.rs`, `tray.rs`, `buttons.rs`; общий `Module` в `mod.rs` |
-| `src/sys/` | Windows: `monitor.rs` (мониторы, курсор, полноэкранное), `display.rs` (режимы, масштаб), `ddc.rs` (DDC/CI; HMONITOR берётся из `Monitor::handle`), `media.rs` (медиа-сеансы WinRT, обложка через WIC), `res.rs` (ресурсы), `clip.rs` (буфер обмена), `mod.rs` (запуск, горячая клавиша, автозапуск, скругление окна) |
+| `src/modules/` | модули: `display.rs`, `brightness.rs`, `media.rs`, `resources.rs`, `clipboard.rs`, `tray.rs`, `bluetooth.rs`, `buttons.rs`; общий `Module` в `mod.rs` |
+| `src/sys/` | Windows: `monitor.rs` (мониторы, курсор, полноэкранное), `display.rs` (режимы, масштаб), `ddc.rs` (DDC/CI; HMONITOR берётся из `Monitor::handle`), `media.rs` (медиа-сеансы WinRT, обложка через WIC), `res.rs` (ресурсы), `clip.rs` (буфер обмена), `bt.rs` (Bluetooth), `mod.rs` (запуск, горячая клавиша, автозапуск, скругление окна) |
 | `src/config.rs` | `config.txt` (в том числе профили `profile=`, избранное `favorite=`, частоты `rate=`, лоток `tray=`) и `buttons.txt` |
 | `src/texts.rs` | строки RU/EN |
 | `src/shot.rs` | `ANTRESOL_SHOT`: снимок своего окна в PNG (для документации) |
@@ -55,6 +55,10 @@
   сменился — `CF_UNICODETEXT`, кроме копий с форматами `ExcludeClipboardContentFromMonitorProcessing` или
   `CanIncludeInClipboardHistory` = 0. Запись — `SetClipboardData` (память отдаётся буферу).
 - Лоток — брошенные на окно файлы (`dropped_files` egui) окно отдаёт модулям как `Command::Dropped`.
+- Bluetooth — `BluetoothFindFirstDevice` (запомненные, без поиска новых); заряд — свойство устройства
+  `{104EA319-6EE2-4701-BD47-8DDBF425BBE5} 2` у узлов `BTHENUM` и `BTHLEDEVICE` (SetupAPI), сопоставленных с
+  устройством по 12-значному адресу в ID узла. Перечисление — в потоке модуля.
+- Порядок и видимость карточек — `config::arrange` по ключам модулей (`Module::key`).
 - Автозапуск — строка `Antresol` в `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
 
 ## Как добавить модуль

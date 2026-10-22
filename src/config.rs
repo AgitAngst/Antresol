@@ -73,6 +73,10 @@ pub struct Settings {
     pub clipboard: bool,
     /// Лоток файлов: полные пути, новые сверху.
     pub tray: Vec<String>,
+    /// Порядок карточек (ключи модулей); незнакомые и забытые — по порядку программы, в конце.
+    pub order: Vec<String>,
+    /// Выключенные карточки (ключи модулей).
+    pub hidden: Vec<String>,
     /// Любимые разрешения, до трёх на монитор, в порядке добавления.
     pub favorites: Vec<Res>,
     /// Какая частота была у разрешения в последний раз — её и ставим, когда на него переходят.
@@ -256,6 +260,8 @@ impl Default for Settings {
             panel_hotkey: None,
             clipboard: true,
             tray: Vec::new(),
+            order: Vec::new(),
+            hidden: Vec::new(),
             favorites: Vec::new(),
             rates: Vec::new(),
             profiles: Vec::new(),
@@ -279,6 +285,34 @@ pub fn buttons_path() -> Option<PathBuf> {
 pub fn load() -> Settings {
     let text = settings_path().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
     parse(&text)
+}
+
+/// Список через запятую: без пустых и повторов.
+fn list(value: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for v in value.split(',').map(str::trim).filter(|v| !v.is_empty()) {
+        if !out.iter().any(|o| o == v) {
+            out.push(v.to_string());
+        }
+    }
+    out
+}
+
+/// Порядок карточек: сначала из `order` (только знакомые ключи), остальные — как в программе.
+/// Возвращает номера в `keys` и включена ли карточка.
+pub fn arrange(keys: &[&str], order: &[String], hidden: &[String]) -> Vec<(usize, bool)> {
+    let mut out: Vec<usize> = Vec::new();
+    for i in order.iter().filter_map(|k| keys.iter().position(|x| x == k)) {
+        if !out.contains(&i) {
+            out.push(i);
+        }
+    }
+    for i in 0..keys.len() {
+        if !out.contains(&i) {
+            out.push(i);
+        }
+    }
+    out.into_iter().map(|i| (i, !hidden.iter().any(|h| h == keys[i]))).collect()
 }
 
 pub fn parse(text: &str) -> Settings {
@@ -308,6 +342,8 @@ pub fn parse(text: &str) -> Settings {
             }
             "panel_hotkey" => s.panel_hotkey = Hotkey::parse(value),
             "clipboard" => s.clipboard = value != "false",
+            "modules" => s.order = list(value),
+            "hidden" => s.hidden = list(value),
             "tray" if !value.is_empty() && s.tray.len() < crate::modules::tray::KEEP => s.tray.push(value.to_string()),
             "favorite" => {
                 let words: Vec<&str> = value.split_whitespace().collect();
@@ -356,6 +392,7 @@ pub fn format(s: &Settings) -> String {
         s.fullscreen_guard
     );
     out.push_str(&format!("strip={}\nexclude={}\nclipboard={}\n", s.strip, s.exclude.join(","), s.clipboard));
+    out.push_str(&format!("modules={}\nhidden={}\n", s.order.join(","), s.hidden.join(",")));
     for t in &s.tray {
         out.push_str(&format!("tray={t}\n"));
     }
@@ -624,6 +661,20 @@ mod tests {
         assert!(back.excluded("GAME.EXE") && !back.excluded("chrome.exe"));
         assert!(parse("exclude= A.exe , ,b.exe\n").excluded("a.exe"));
         assert!(Settings::default().strip, "полоска по умолчанию есть");
+    }
+
+    #[test]
+    fn card_order() {
+        let keys = ["display", "media", "buttons"];
+        let order = vec!["buttons".to_string(), "nope".into(), "display".into()];
+        let hidden = vec!["media".to_string()];
+        assert_eq!(arrange(&keys, &order, &hidden), vec![(2, true), (0, true), (1, false)]);
+        assert_eq!(arrange(&keys, &[], &[]), vec![(0, true), (1, true), (2, true)]);
+        let twice = vec!["media".to_string(), "display".into(), "media".into()];
+        assert_eq!(arrange(&keys, &twice, &[]), vec![(1, true), (0, true), (2, true)], "повтор не через соседа");
+        let s = parse("modules=a, b,a,,c\nhidden=b\n");
+        assert_eq!(s.order, ["a", "b", "c"]);
+        assert_eq!(parse(&format(&s)), s);
     }
 
     #[test]

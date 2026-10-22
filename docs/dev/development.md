@@ -11,7 +11,8 @@ python E:/dev_personal/tools/checks.py --repo . -j 4 fmt test clippy
 (`modules/display.rs`, `sys/display.rs`), профили и сочетания клавиш (`config.rs`, `modules/display.rs`),
 коды клавиш (`sys/mod.rs`), входы DDC/CI (`sys/ddc.rs`), имя программы и мониторы (`sys/monitor.rs`), PNG
 снимка (`shot.rs`), ключ трека (`modules/media.rs`), ресурсы (`sys/res.rs` — в том числе настоящий замер этого ПК), история буфера
-(`modules/clipboard.rs`), лоток (`modules/tray.rs`).
+(`modules/clipboard.rs`), лоток (`modules/tray.rs`), порядок карточек (`config.rs`),
+адреса Bluetooth и настоящий опрос (`sys/bt.rs`).
 
 ## Живая проверка
 
@@ -29,6 +30,8 @@ python E:/dev_personal/tools/checks.py --repo . -j 4 fmt test clippy
 - `ANTRESOL_SHOT=файл.png` — панель через 4 с снимает своё окно (egui, только само окно — чужой экран в
   кадр не попадёт) и закрывается (сам закрепляет панель; нет снимка за 20 с — закрывается без него); для
   `docs/img` — только так, вместе с `ANTRESOL_DEMO=1`. Монитор уснул — окно не рисуется и снимка не будет.
+- Снимок `ANTRESOL_SHOT` — без сжатия (мегабайты); в `docs/img` — только через
+  `powershell -NoProfile -File scripts\squeeze-png.ps1 -In снимок.png -Out docs\img\имя.png` (без потерь, ~100 КБ).
 - Снимки захватом экрана — только для своей проверки после запуска (панель видна 2 с). Курсор не двигать: за ПК может
   работать владелец. В `docs/img` класть только вырезку самой панели.
 - Не нажимать в проверках смену режима экрана, масштаба, яркости и автозапуск без команды

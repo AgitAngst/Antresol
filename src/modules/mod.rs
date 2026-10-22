@@ -1,6 +1,7 @@
 // Модули панели: каждый — карточка со своими быстрыми настройками. Новый модуль — файл здесь,
 // `impl Module` и строка в `all()`; остальное (раскладка, появление, обновление) панель делает сама.
 
+pub mod bluetooth;
 pub mod brightness;
 pub mod buttons;
 pub mod clipboard;
@@ -70,6 +71,7 @@ pub fn all() -> Vec<Box<dyn Module>> {
         Box::new(resources::Resources::default()),
         Box::new(clipboard::Clipboard::default()),
         Box::new(tray::Tray::default()),
+        Box::new(bluetooth::Bluetooth::default()),
         Box::new(buttons::Buttons::default()),
     ]
 }

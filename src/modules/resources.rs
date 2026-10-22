@@ -24,14 +24,22 @@ pub struct Resources {
 }
 
 /// Строка «подпись … значение» и полоса доли под ней.
+/// Не влезают в одну строку — значение уходит под подпись, а не налезает на неё.
 fn meter(ui: &mut Ui, label: &str, value: &str, fraction: Option<f32>) {
     let p = Palette::of(ui);
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(label).color(p.weak));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            w::mono(ui, value, Some(p.text));
+    let label_w = ui.painter().layout_no_wrap(label.to_owned(), egui::FontId::proportional(14.0), p.weak).size().x;
+    let value_w = ui.painter().layout_no_wrap(value.to_owned(), egui::FontId::monospace(12.5), p.text).size().x;
+    if label_w + value_w + 12.0 <= ui.available_width() {
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(label).color(p.weak));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                w::mono(ui, value, Some(p.text));
+            });
         });
-    });
+    } else {
+        ui.label(egui::RichText::new(label).color(p.weak));
+        w::mono(ui, value, Some(p.text));
+    }
     if let Some(f) = fraction {
         w::progress(ui, Some(f.clamp(0.0, 1.0)), ui.available_width());
     }
@@ -67,6 +75,10 @@ impl Module for Resources {
 
     fn title(&self, t: &Tr) -> &'static str {
         t.resources
+    }
+
+    fn min_width(&self) -> f32 {
+        260.0
     }
 
     fn refresh(&mut self, _monitor: &str) {

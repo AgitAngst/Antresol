@@ -312,8 +312,9 @@ impl App {
         }
 
         if self.edge.shown && self.refreshed.is_none_or(|at| at.elapsed() > REFRESH) {
-            for module in &mut self.modules {
-                module.refresh(&m.device);
+            // Выключенные карточки систему не опрашивают (их `background` идёт и так).
+            for i in self.visible_cards() {
+                self.modules[i].refresh(&m.device);
             }
             self.refreshed = Some(now);
         }
@@ -535,6 +536,52 @@ impl App {
         }
     }
 
+    /// «Карточки панели»: включить и выключить, сдвинуть выше или ниже. Порядок пишется целиком.
+    fn cards_card(&mut self, ui: &mut Ui) {
+        let t = texts::tr(self.lang());
+        w::section_label(ui, t.cards_title);
+        let keys: Vec<&'static str> = self.modules.iter().map(|m| m.key()).collect();
+        let arranged = config::arrange(&keys, &self.settings.order, &self.settings.hidden);
+        let mut order: Vec<String> = arranged.iter().map(|(i, _)| keys[*i].to_string()).collect();
+        let mut moved = false;
+        for (pos, (i, on)) in arranged.iter().enumerate() {
+            let title = self.modules[*i].title(t);
+            let key = keys[*i];
+            // Справа налево: «выше», «ниже», потом переключатель на всю оставшуюся ширину.
+            let row = Vec2::new(ui.available_width(), 32.0);
+            ui.allocate_ui_with_layout(row, egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_enabled_ui(pos > 0, |ui| {
+                    if w::icon_button(ui, Icon::ArrowUp, t.card_up).clicked() {
+                        order.swap(pos, pos - 1);
+                        moved = true;
+                    }
+                });
+                ui.add_enabled_ui(pos + 1 < arranged.len(), |ui| {
+                    if w::icon_button(ui, Icon::ArrowDown, t.card_down).clicked() {
+                        order.swap(pos, pos + 1);
+                        moved = true;
+                    }
+                });
+                ui.add_space(6.0);
+                let mut v = *on;
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    w::switch(ui, &mut v, title);
+                });
+                if v != *on {
+                    if v {
+                        self.settings.hidden.retain(|h| h != key);
+                    } else {
+                        self.settings.hidden.push(key.to_string());
+                    }
+                }
+            });
+        }
+        if moved {
+            self.settings.order = order;
+        }
+        w::note(ui, t.cards_note);
+    }
+
     /// «Не выезжать над программами»: список с крестиками и «Добавить» последнюю программу на
     /// переднем плане.
     fn exclude_ui(&mut self, ui: &mut Ui) {
@@ -602,28 +649,47 @@ impl App {
         });
     }
 
+    /// Карточки в порядке из настроек, включённые: номера в `self.modules`.
+    fn visible_cards(&self) -> Vec<usize> {
+        let keys: Vec<&str> = self.modules.iter().map(|m| m.key()).collect();
+        config::arrange(&keys, &self.settings.order, &self.settings.hidden)
+            .into_iter()
+            .filter(|(_, on)| *on)
+            .map(|(i, _)| i)
+            .collect()
+    }
+
     /// Карточки в ряд по долям ширины; узкая панель — у каждой своя наименьшая ширина, а ряд
     /// листается вбок (колесо мыши с Shift или полоса снизу).
     fn cards(&mut self, ui: &mut Ui, device: &str) {
         let area = ui.available_rect_before_wrap();
         let gap = 10.0;
-        let total: f32 = self.modules.iter().map(|m| m.weight()).sum();
-        let free = area.width() - gap * (self.modules.len().saturating_sub(1)) as f32;
-        let widths: Vec<f32> = self.modules.iter().map(|m| (free * m.weight() / total).max(m.min_width())).collect();
+        let visible = self.visible_cards();
+        if visible.is_empty() {
+            let t = texts::tr(self.lang());
+            w::note(ui, t.no_cards);
+            return;
+        }
+        let total: f32 = visible.iter().map(|&i| self.modules[i].weight()).sum();
+        let free = area.width() - gap * (visible.len().saturating_sub(1)) as f32;
+        let widths: Vec<f32> = visible
+            .iter()
+            .map(|&i| (free * self.modules[i].weight() / total).max(self.modules[i].min_width()))
+            .collect();
         let content = widths.iter().sum::<f32>() + gap * (widths.len().saturating_sub(1)) as f32;
         if content <= area.width() + 0.5 {
-            self.card_row(ui, area.min, &widths, area.height(), device);
+            self.card_row(ui, area.min, &visible, &widths, area.height(), device);
             return;
         }
         let mut child = ui.new_child(UiBuilder::new().max_rect(area));
         egui::ScrollArea::horizontal().id_salt("cards").auto_shrink([false, false]).show(&mut child, |ui| {
             // Под полосу прокрутки — 12 снизу.
             let (rect, _) = ui.allocate_exact_size(Vec2::new(content, area.height() - 12.0), Sense::hover());
-            self.card_row(ui, rect.min, &widths, rect.height(), device);
+            self.card_row(ui, rect.min, &visible, &widths, rect.height(), device);
         });
     }
 
-    fn card_row(&mut self, ui: &mut Ui, origin: Pos2, widths: &[f32], height: f32, device: &str) {
+    fn card_row(&mut self, ui: &mut Ui, origin: Pos2, visible: &[usize], widths: &[f32], height: f32, device: &str) {
         let t = texts::tr(self.lang());
         let lang = self.lang();
         let gap = 10.0;
@@ -631,7 +697,8 @@ impl App {
         let mut toasts = Vec::new();
         let before = self.settings.clone();
         let settings = &mut self.settings;
-        for (i, module) in self.modules.iter_mut().enumerate() {
+        for (i, &m) in visible.iter().enumerate() {
+            let module = &mut self.modules[m];
             let width = widths[i];
             let rect = Rect::from_min_size(Pos2::new(x, origin.y), Vec2::new(width, height));
             x += width + gap;
@@ -656,20 +723,42 @@ impl App {
         }
     }
 
+    /// Настройки — четыре карточки; уже 1240 точек — листаются вбок, а не сжимаются.
     fn settings_view(&mut self, ui: &mut Ui) {
+        const MIN: f32 = 1240.0;
+        let area = ui.available_rect_before_wrap();
+        if area.width() >= MIN {
+            self.settings_columns(ui, area);
+            return;
+        }
+        let mut child = ui.new_child(UiBuilder::new().max_rect(area));
+        egui::ScrollArea::horizontal().id_salt("settings").auto_shrink([false, false]).show(&mut child, |ui| {
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(MIN, area.height() - 12.0), Sense::hover());
+            self.settings_columns(ui, rect);
+        });
+    }
+
+    fn settings_columns(&mut self, ui: &mut Ui, area: Rect) {
         let t = texts::tr(self.lang());
         let ctx = ui.ctx().clone();
         let before = self.settings.clone();
-        let area = ui.available_rect_before_wrap();
-        // Три карточки: «Панель», «Профили экрана», «Оформление».
-        let third = (area.width() - 20.0) / 3.0;
+        // Четыре карточки: «Панель», «Профили экрана», «Карточки панели», «Оформление».
+        let quarter = (area.width() - 30.0) / 4.0;
         let col = |i: f32| {
             Rect::from_min_size(
-                Pos2::new(area.left() + i * (third + 10.0), area.top()),
-                Vec2::new(third, area.height()),
+                Pos2::new(area.left() + i * (quarter + 10.0), area.top()),
+                Vec2::new(quarter, area.height()),
             )
         };
-        let (left, middle, right) = (col(0.0), col(1.0), col(2.0));
+        let (left, middle, third, right) = (col(0.0), col(1.0), col(2.0), col(3.0));
+
+        let mut c3 = ui.new_child(UiBuilder::new().max_rect(third));
+        w::card_frame(&c3).show(&mut c3, |ui| {
+            ui.set_min_size(ui.available_size());
+            egui::ScrollArea::vertical().id_salt("set-c").auto_shrink([false, false]).show(ui, |ui| {
+                self.cards_card(ui);
+            });
+        });
 
         let mut mid = ui.new_child(UiBuilder::new().max_rect(middle));
         w::card_frame(&mid).show(&mut mid, |ui| {
