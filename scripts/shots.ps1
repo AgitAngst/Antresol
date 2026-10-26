@@ -4,7 +4,8 @@
 # ничего не пишется. Сцены, избранное и кнопки — выдуманные, по языку кадра.
 # Кадры: полки (`shelf` — номер полки, `ANTRESOL_SHELF`), правка полок (`view = "edit"`), правка сцены (`view = "scene"`,
 # `scene` — её номер, `ANTRESOL_SCENE`; `scene-ask` — с вопросом «Удалить сцену?», `scene-name` — с негодным именем),
-# настройки (`settings-ask` — с тем же вопросом у сцены), «Свой цвет…», полоска у края. Тёмная RU и светлая EN.
+# поиск действий (`view = "search"`, `query` — запрос, `ANTRESOL_QUERY`), настройки (`settings-ask` — с тем же вопросом у
+# сцены), «Свой цвет…», полоска у края. Тёмная RU и светлая EN.
 param([string]$Exe = "E:\dev_personal\antresol-scratch\target-shot\debug\antresol.exe",
       [string]$Out = "E:\dev_personal\antresol-scratch\shots", [string]$Only = "",
       [string]$App = "E:\dev_personal\antresol-scratch\appdata-shot")
@@ -44,6 +45,8 @@ $scenes = @(
   @{ n = "scene-ask-light-en"; lang = "en"; theme = "light"; view = "scene-ask"; scene = "3" },
   @{ n = "scene-name-dark-ru";  lang = "ru"; theme = "dark";  view = "scene-name"; scene = "3" },
   @{ n = "scene-name-light-en"; lang = "en"; theme = "light"; view = "scene-name"; scene = "3" },
+  @{ n = "search-dark-ru";   lang = "ru"; theme = "dark";  view = "search"; query = "1080" },
+  @{ n = "search-light-en";  lang = "en"; theme = "light"; view = "search"; query = "1080" },
   @{ n = "settings-dark-ru"; lang = "ru"; theme = "dark";  view = "settings" },
   @{ n = "settings-ask-dark-ru";  lang = "ru"; theme = "dark";  view = "settings-ask"; scene = "3" },
   @{ n = "settings-ask-light-en"; lang = "en"; theme = "light"; view = "settings-ask"; scene = "3" },
@@ -68,6 +71,7 @@ foreach ($s in $scenes) {
   $env:ANTRESOL_VIEW = $s.view
   $env:ANTRESOL_SHELF = $s.shelf
   $env:ANTRESOL_SCENE = $s.scene
+  $env:ANTRESOL_QUERY = $s.query
   $p = Start-Process -FilePath $exe -PassThru -WindowStyle Normal -RedirectStandardError "$Out\$($s.n).log"
   if (-not $p.WaitForExit(30000)) { $p.Kill(); "timeout $($s.n)" } else { "done $($s.n)" }
 }
