@@ -1,22 +1,25 @@
 ﻿# Снимки для docs/img своим окном в демо-режиме, на выдуманных настройках (своя папка APPDATA):
-# powershell -File scripts\shots.ps1 [-Exe antresol.exe] [-Out папка] [-Only сцена]; потом squeeze-png.ps1.
-# Правило демо: клавиш профилей нет, монитор несуществующий (\\.\DISPLAY9 — выдуманный экран демо-режима), в Windows
-# ничего не пишется. Профили, избранное и кнопки — выдуманные, по языку сцены.
-# Сцены: полки (`shelf` — номер полки, `ANTRESOL_SHELF`), правка полок (`view = "edit"`), настройки, «Свой цвет…»,
-# полоска у края. Тёмная RU и светлая EN.
+# powershell -File scripts\shots.ps1 [-Exe antresol.exe] [-Out папка] [-Only кадр] [-App папка настроек]; потом squeeze-png.ps1.
+# Правило демо: клавиш сцен нет, монитор несуществующий (\\.\DISPLAY9 — выдуманный экран демо-режима), в Windows
+# ничего не пишется. Сцены, избранное и кнопки — выдуманные, по языку кадра.
+# Кадры: полки (`shelf` — номер полки, `ANTRESOL_SHELF`), правка полок (`view = "edit"`), правка сцены (`view = "scene"`,
+# `scene` — её номер, `ANTRESOL_SCENE`), настройки, «Свой цвет…», полоска у края. Тёмная RU и светлая EN.
 param([string]$Exe = "E:\dev_personal\antresol-scratch\target-shot\debug\antresol.exe",
-      [string]$Out = "E:\dev_personal\antresol-scratch\shots", [string]$Only = "")
+      [string]$Out = "E:\dev_personal\antresol-scratch\shots", [string]$Only = "",
+      [string]$App = "E:\dev_personal\antresol-scratch\appdata-shot")
 $exe = $Exe
-$app = "E:\dev_personal\antresol-scratch\appdata-shot"
+$app = $App
 New-Item -ItemType Directory -Force "$app\Antresol" | Out-Null
 New-Item -ItemType Directory -Force $Out | Out-Null
 $dev = '\\.\DISPLAY9'
-# Профили — без клавиш и на выдуманном мониторе; первый совпадает с режимом выдуманного экрана (его чип выделен). «Кино» — с HDR (`hdr` после масштаба).
+# Сцены — без клавиш и на выдуманном мониторе; первая совпадает с тем, что стоит в выдуманном мире (тёмная тема, 70 %,
+# 4K 120 Гц 150 %) — её чип выделен. «Кино» — с HDR (`hdr` после масштаба) и «Тишиной», «Не спать», яркостью, ночным светом.
 function Get-Profiles($lang) {
-  if ($lang -eq "en") { $n = @("Work", "Games", "Movies") } else { $n = @("Работа", "Игры", "Кино") }
-  return @("profile=$($n[0]) |  | $dev 3840x2160@120 150%",
-          "profile=$($n[1]) |  | $dev 2560x1440@144 100%",
-          "profile=$($n[2]) |  | $dev 3840x2160@60 175% hdr")
+  if ($lang -eq "en") { $n = @("Work", "Game", "Movie", "Slides") } else { $n = @("Работа", "Игра", "Кино", "Слайды") }
+  return @("profile=$($n[0]) |  | $dev 3840x2160@120 150% | dark=1; bright=70",
+          "profile=$($n[1]) |  | $dev 2560x1440@144 100% | quiet=1; awake=1; bright=100",
+          "profile=$($n[2]) |  | $dev 3840x2160@60 150% hdr | night=0; quiet=1; awake=1; bright=80",
+          "profile=$($n[3]) |  | $dev 1920x1080@60 100% | dark=0; quiet=1")
 }
 # Свои кнопки: образец по языку сцены (демо файл не заводит сам).
 function Get-Buttons($lang) {
@@ -34,6 +37,8 @@ $scenes = @(
   @{ n = "shelf-hand-light-en";   lang = "en"; theme = "light"; view = ""; shelf = "3" },
   @{ n = "edit-dark-ru";     lang = "ru"; theme = "dark";  view = "edit"; extra = @("hidden=media") },
   @{ n = "edit-light-en";    lang = "en"; theme = "light"; view = "edit"; extra = @("hidden=media") },
+  @{ n = "scene-dark-ru";    lang = "ru"; theme = "dark";  view = "scene"; scene = "3" },
+  @{ n = "scene-light-en";   lang = "en"; theme = "light"; view = "scene"; scene = "3" },
   @{ n = "settings-dark-ru"; lang = "ru"; theme = "dark";  view = "settings" },
   @{ n = "settings-light-en"; lang = "en"; theme = "light"; view = "settings" },
   @{ n = "color-dark-ru";    lang = "ru"; theme = "dark";  view = "color" },
@@ -55,6 +60,7 @@ foreach ($s in $scenes) {
   $env:ANTRESOL_SHOT = "$Out\$($s.n).png"
   $env:ANTRESOL_VIEW = $s.view
   $env:ANTRESOL_SHELF = $s.shelf
+  $env:ANTRESOL_SCENE = $s.scene
   $p = Start-Process -FilePath $exe -PassThru -WindowStyle Normal -RedirectStandardError "$Out\$($s.n).log"
   if (-not $p.WaitForExit(30000)) { $p.Kill(); "timeout $($s.n)" } else { "done $($s.n)" }
 }
