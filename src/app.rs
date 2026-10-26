@@ -1091,7 +1091,9 @@ impl App {
         if let Some(i) = delete {
             self.delete_scene(i);
         }
-        if let Some(i) = open {
+        if let Some(i) = open
+            && !self.scene_blocked()
+        {
             self.open_scene(i, false, View::Settings);
         }
     }
@@ -4507,7 +4509,16 @@ mod tests {
         rig.right_click(at);
         rig.click_anchor("scene-new");
         assert!(rig.app.view == View::Cards && rig.app.settings.profiles.len() == 2);
-        assert_eq!(rig.app.toasts.since(before), vec![warn.clone(), warn.clone(), warn]);
+        assert_eq!(rig.app.toasts.since(before), vec![warn.clone(), warn.clone(), warn.clone()]);
+        // «Изменить…» в настройках — тоже.
+        rig.app.view = View::Settings;
+        rig.settle();
+        let before = Instant::now();
+        rig.click_anchor("scene-open-1");
+        assert!(rig.app.view == View::Settings && rig.app.scene.is_none());
+        assert_eq!(rig.app.toasts.since(before), vec![warn]);
+        rig.app.view = View::Cards;
+        rig.settle();
         // Ответили («Вернуть» — вторым щелчком по первой сцене), и другая сцена ставится.
         rig.click_anchor("scene-chip-0");
         rig.click_anchor("scene-chip-1");
