@@ -5,7 +5,8 @@
 # Кадры: полки (`shelf` — номер полки, `ANTRESOL_SHELF`), правка полок (`view = "edit"`), правка сцены (`view = "scene"`,
 # `scene` — её номер, `ANTRESOL_SCENE`; `scene-ask` — с вопросом «Удалить сцену?», `scene-name` — с негодным именем),
 # поиск действий (`view = "search"`, `query` — запрос, `ANTRESOL_QUERY`), настройки (`settings-ask` — с тем же вопросом у
-# сцены), «Свой цвет…», полоска у края. Тёмная RU и светлая EN.
+# сцены), «Свой цвет…», полоска у края. Тёмная RU и светлая EN. У кадра может быть своя высота панели (`height`, по умолчанию
+# 340): «Под рукой» снимается на 400 — буферу с чипами нужны строки.
 param([string]$Exe = "E:\dev_personal\antresol-scratch\target-shot\debug\antresol.exe",
       [string]$Out = "E:\dev_personal\antresol-scratch\shots", [string]$Only = "",
       [string]$App = "E:\dev_personal\antresol-scratch\appdata-shot")
@@ -35,8 +36,8 @@ $scenes = @(
   @{ n = "panel-light-en";   lang = "en"; theme = "light"; view = "" },
   @{ n = "shelf-system-dark-ru";  lang = "ru"; theme = "dark";  view = ""; shelf = "2" },
   @{ n = "shelf-system-light-en"; lang = "en"; theme = "light"; view = ""; shelf = "2" },
-  @{ n = "shelf-hand-dark-ru";    lang = "ru"; theme = "dark";  view = ""; shelf = "3" },
-  @{ n = "shelf-hand-light-en";   lang = "en"; theme = "light"; view = ""; shelf = "3" },
+  @{ n = "shelf-hand-dark-ru";    lang = "ru"; theme = "dark";  view = ""; shelf = "3"; height = 400 },
+  @{ n = "shelf-hand-light-en";   lang = "en"; theme = "light"; view = ""; shelf = "3"; height = 400 },
   @{ n = "edit-dark-ru";     lang = "ru"; theme = "dark";  view = "edit"; extra = @("hidden=media") },
   @{ n = "edit-light-en";    lang = "en"; theme = "light"; view = "edit"; extra = @("hidden=media") },
   @{ n = "scene-dark-ru";    lang = "ru"; theme = "dark";  view = "scene"; scene = "3" },
@@ -58,7 +59,7 @@ $scenes = @(
 )
 foreach ($s in $scenes) {
   if ($Only -and $s.n -ne $Only) { continue }
-  $cfg = @("lang=$($s.lang)", "theme=$($s.theme)", "width=1300", "height=340", "monitor=\\.\DISPLAY1",
+  $cfg = @("lang=$($s.lang)", "theme=$($s.theme)", "width=1300", "height=$(if ($s.height) { $s.height } else { 340 })", "monitor=\\.\DISPLAY1",
     "favorite=$dev 3840x2160", "favorite=$dev 2560x1440", "favorite=$dev 1920x1080",
     "rate=$dev 2560x1440 144", "rate=$dev 1920x1080 144") + (Get-Profiles $s.lang)
   if ($s.extra) { $cfg += $s.extra }
