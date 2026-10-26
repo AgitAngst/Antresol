@@ -27,6 +27,20 @@ pub fn hdr_button_id() -> egui::Id {
     egui::Id::new("hdr-toggle")
 }
 
+/// Наименьшая ширина карточки при `monitors` мониторах. Без HDR ни у кого — 420, как было. С HDR плашке режима нужно место
+/// под кнопку: у одного монитора — 480 (кнопка целиком рядом с «120 Гц · масштаб 150 %»), у двух — 548 (целиком и рядом с
+/// номерами мониторов), у трёх и больше — столько, чтобы влезла двустрочная кнопка (448 и по 28 на монитор), но не меньше
+/// 548. До четырёх мониторов это не больше 560 — полка «Экран и звук» в 1300 не листается; дальше шире.
+pub fn min_width_for(monitors: usize, hdr: bool) -> f32 {
+    if !hdr {
+        return 420.0;
+    }
+    match monitors {
+        0 | 1 => 480.0,
+        n => (448.0 + 28.0 * n as f32).max(548.0),
+    }
+}
+
 /// Что вернуть при откате: прежний режим, масштаб и (или) HDR монитора.
 struct Change {
     device: String,
@@ -98,6 +112,17 @@ fn hdr_usable(hdr: display::Hdr) -> bool {
 /// HDR монитора для профилей: `Some(включён)`, если монитор его умеет.
 fn hdr_state(device: &str) -> Option<bool> {
     display::hdr(device).filter(|h| h.supported).map(|h| h.enabled)
+}
+
+/// Что сказать об отказе смены HDR: своим текстом программы, а английский служебный — только в журнал. Windows не даёт
+/// включить — `hdr_blocked` (предупреждение); её сбой на самом вызове — «Не получилось: код»; прочее — «Не получилось».
+fn hdr_toast(e: &display::HdrError, t: &Tr) -> (String, Tone) {
+    use display::HdrError::*;
+    match e {
+        Forbidden => (t.hdr_blocked.to_string(), Tone::Warning),
+        Windows(code) => (format!("{}: {code}", t.failed), Tone::Danger),
+        NotSupported | Unavailable => (t.failed.to_string(), Tone::Danger),
+    }
 }
 
 /// Соотношение сторон для подписи: «16:9», «21:9»; странные — пусто.
@@ -236,11 +261,12 @@ impl Display {
     }
 
     /// «HDR» в плашке: включить или выключить HDR этого монитора и перечитать. Без «Оставить?»: тот же щелчок вернёт
-    /// назад, Windows тоже не спрашивает. Состояние перечитывается и при отказе — Windows могла передумать.
+    /// назад, Windows тоже не спрашивает. Состояние перечитывается и при отказе — Windows могла передумать (например,
+    /// запретила включать между чтением и щелчком: тогда карточка узнает об этом тут же).
     fn toggle_hdr(&mut self, device: &str, on: bool, cx: &mut Ctx) {
         if let Err(e) = display::set_hdr(device, on) {
             eprintln!("HDR change failed: {e}");
-            cx.toasts.push((format!("{}: {e}", cx.t.failed), Tone::Danger));
+            cx.toasts.push(hdr_toast(&e, cx.t));
         }
         self.hdr = display::hdr(device);
         self.read_states();
@@ -320,17 +346,12 @@ impl Display {
                 && let Some(now) = display::hdr(&dev).filter(|h| h.supported)
                 && want != now.enabled
             {
-                if want && now.force_disabled {
-                    hdr_refused = true;
-                    cx.toasts.push((t.hdr_blocked.to_string(), Tone::Warning));
-                } else {
-                    match display::set_hdr(&dev, want) {
-                        Ok(()) => change.hdr = Some(now.enabled),
-                        Err(e) => {
-                            hdr_refused = true;
-                            eprintln!("profile HDR change failed on {dev}: {e}");
-                            cx.toasts.push((format!("{}: {e}", t.failed), Tone::Danger));
-                        }
+                match display::set_hdr(&dev, want) {
+                    Ok(()) => change.hdr = Some(now.enabled),
+                    Err(e) => {
+                        hdr_refused = true;
+                        eprintln!("profile HDR change failed on {dev}: {e}");
+                        cx.toasts.push(hdr_toast(&e, t));
                     }
                 }
             }
@@ -528,10 +549,11 @@ impl Display {
         r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
     }
 
-    /// Кнопка «HDR Вкл» / «HDR Выкл» справа в плашке режима: высота 30, поля 10, скругление 6; «HDR» полужирным 12,5,
-    /// состояние обычным. Включено — подложка акцента с рамкой акцента; выключено — `card` с рамкой `border_strong`;
-    /// Windows не даёт включить — `faint` и не нажимается (подсказка — причина). Не хватает места слева — без слова
-    /// состояния (оно видно по заливке); не хватает и на это — `None`, кнопки нет. Щелчок — `clicked()` ответа.
+    /// Кнопка «HDR Вкл» / «HDR Выкл» справа в плашке режима: высота 30, скругление 6. Слово состояния есть всегда — цвет
+    /// не единственный носитель смысла. Одной строкой: поля 10, «HDR» полужирным 12,5 и через 6 состояние обычным. Не
+    /// хватает места слева (рядом с номерами мониторов) — двумя строками: «HDR», под ним состояние, обе 11, поля 8; не
+    /// хватает и на это — `None`, кнопки нет. Включено — подложка акцента с рамкой акцента; выключено — `card` с рамкой
+    /// `border_strong`; Windows не даёт включить — `faint` и не нажимается (подсказка — причина). Щелчок — `clicked()`.
     fn hdr_button(ui: &mut Ui, hdr: display::Hdr, t: &Tr) -> Option<egui::Response> {
         let p = Palette::of(ui);
         let usable = hdr_usable(hdr);
@@ -540,18 +562,25 @@ impl Display {
             (false, true) => (p.text, p.weak),
             (false, false) => (p.faint, p.faint),
         };
-        let name = ui.painter().layout_no_wrap(t.hdr.to_string(), anvil_ui::semibold(12.5), name_color);
         let state_text = if hdr.enabled { t.on } else { t.off };
-        let state = ui.painter().layout_no_wrap(state_text.to_string(), egui::FontId::proportional(12.5), state_color);
-        let (short, full) = (20.0 + name.size().x, 20.0 + name.size().x + 6.0 + state.size().x);
+        let lay =
+            |text: &str, font: egui::FontId, color: Color32| ui.painter().layout_no_wrap(text.to_string(), font, color);
+        let proportional = egui::FontId::proportional;
+        let (name, state) =
+            (lay(t.hdr, anvil_ui::semibold(12.5), name_color), lay(state_text, proportional(12.5), state_color));
+        let (name2, state2) =
+            (lay(t.hdr, anvil_ui::semibold(11.0), name_color), lay(state_text, proportional(11.0), state_color));
+        let full = 20.0 + name.size().x + 6.0 + state.size().x;
+        let narrow = 16.0 + name2.size().x.max(state2.size().x);
         let room = ui.available_width();
-        let (width, with_state) = if full <= room {
-            (full, true)
-        } else if short <= room {
-            (short, false)
+        let two_lines = if full <= room {
+            false
+        } else if narrow <= room {
+            true
         } else {
             return None;
         };
+        let width = if two_lines { narrow } else { full };
         // Свой `Id` — чтобы тест без окна находил кнопку.
         let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 30.0), Sense::hover());
         let r = ui.interact(rect, hdr_button_id(), if usable { Sense::click() } else { Sense::hover() });
@@ -570,11 +599,18 @@ impl Display {
             (false, false) => p.border,
         };
         ui.painter().rect(rect, 6, fill, Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
-        let at = |x: f32, h: f32| Pos2::new(x, rect.center().y - h / 2.0);
-        let name_at = at(rect.left() + 10.0, name.size().y);
-        let state_at = at(name_at.x + name.size().x + 6.0, state.size().y);
-        ui.painter().galley(name_at, name, name_color);
-        if with_state {
+        if two_lines {
+            // «HDR» над состоянием, обе строки по центру кнопки.
+            let top = rect.center().y - (name2.size().y + state2.size().y) / 2.0;
+            let name_at = Pos2::new(rect.center().x - name2.size().x / 2.0, top);
+            let state_at = Pos2::new(rect.center().x - state2.size().x / 2.0, top + name2.size().y);
+            ui.painter().galley(name_at, name2, name_color);
+            ui.painter().galley(state_at, state2, state_color);
+        } else {
+            let at = |x: f32, h: f32| Pos2::new(x, rect.center().y - h / 2.0);
+            let name_at = at(rect.left() + 10.0, name.size().y);
+            let state_at = at(name_at.x + name.size().x + 6.0, state.size().y);
+            ui.painter().galley(name_at, name, name_color);
             ui.painter().galley(state_at, state, state_color);
         }
         w::focus_ring(ui, rect, &r, 6);
@@ -597,14 +633,9 @@ impl Module for Display {
         1.8
     }
 
-    /// 420, как было. Если у какого-то монитора есть HDR, плашке режима нужно место и под «HDR» — 480, а при выборе
-    /// монитора (мониторов несколько) и под него, но не больше 560: полка «Экран и звук» в 1300 по-прежнему не листается.
+    /// 420, как было; если у какого-то монитора есть HDR — см. [`min_width_for`].
     fn min_width(&self) -> f32 {
-        if !self.states.iter().any(|s| s.hdr.is_some()) {
-            return 420.0;
-        }
-        let picker = if self.monitors.len() > 1 { 28.0 * self.monitors.len() as f32 + 12.0 } else { 0.0 };
-        (480.0 + picker).min(560.0)
+        min_width_for(self.monitors.len(), self.states.iter().any(|s| s.hdr.is_some()))
     }
 
     fn refresh(&mut self, panel: &str) {
@@ -947,9 +978,31 @@ mod tests {
         let rect = monitor::PxRect { left: 0, top: 0, right: 1, bottom: 1 };
         let mon = |device: &str| monitor::Monitor { device: device.into(), rect, primary: false, handle: 0 };
         display.monitors = vec![mon("A"), mon("B")];
-        assert!(display.min_width() > 480.0, "и выбору монитора");
+        assert_eq!(display.min_width(), 548.0, "и выбору монитора, кнопка по-прежнему целиком");
+        display.monitors = (0..4).map(|i| mon(&i.to_string())).collect();
+        assert_eq!(display.min_width(), 560.0, "четыре монитора — двустрочной кнопке; «Экран и звук» влезает в 1300");
         display.monitors = (0..9).map(|i| mon(&i.to_string())).collect();
-        assert_eq!(display.min_width(), 560.0, "но не шире 560: «Экран и звук» влезает в 1300");
+        assert!(display.min_width() > 560.0, "ещё больше мониторов — шире: двустрочной кнопке тоже нужно место");
+        let widths: Vec<f32> = (1..=9).map(|n| min_width_for(n, true)).collect();
+        assert!(widths.windows(2).all(|w| w[0] <= w[1]), "с мониторами карточка не уже: {widths:?}");
+    }
+
+    #[test]
+    fn hdr_failures_are_told_in_the_programs_words() {
+        use display::HdrError::*;
+        for lang in [anvil_ui::Lang::Ru, anvil_ui::Lang::En] {
+            let t = texts::tr(lang);
+            // Windows не даёт включить — своя фраза (предупреждение), а не английское служебное.
+            assert_eq!(hdr_toast(&Forbidden, t), (t.hdr_blocked.to_string(), Tone::Warning));
+            // Сбой на самом вызове — «Не получилось» и код; прочее — просто «Не получилось».
+            assert_eq!(hdr_toast(&Windows(87), t), (format!("{}: 87", t.failed), Tone::Danger));
+            assert_eq!(hdr_toast(&NotSupported, t), (t.failed.to_string(), Tone::Danger));
+            assert_eq!(hdr_toast(&Unavailable, t), (t.failed.to_string(), Tone::Danger));
+            for e in [Forbidden, Windows(5), NotSupported, Unavailable] {
+                let text = hdr_toast(&e, t).0;
+                assert!(!text.contains("DisplayConfig") && !text.contains("HDR is not"), "служебное в окне: {text}");
+            }
+        }
     }
 
     #[test]
@@ -1002,6 +1055,65 @@ mod profile_tests {
         assert!(!profile_active(&p(vec![with(a(), Some(false))]), &states), "HDR другой");
         assert!(profile_active(&p(vec![with(a(), Some(true)), b()]), &states));
         assert!(profile_active(&p(vec![with(b(), Some(true))]), &states), "у монитора нет HDR — гнаться не за чем");
+    }
+}
+
+// ─── Кнопка «HDR» на узкой плашке ───────────────────────────────────────────
+
+#[cfg(test)]
+mod button_tests {
+    use super::*;
+    use anvil_ui::Lang;
+
+    /// Кнопка «HDR» при `room` свободных точек слева от неё (справа налево, как в плашке): её прямоугольник и тексты,
+    /// что на ней нарисованы.
+    fn button(room: f32, hdr: display::Hdr, lang: Lang) -> (Option<Rect>, Vec<String>) {
+        let settings = crate::config::Settings::default();
+        let ctx = egui::Context::default();
+        anvil_ui::install(&ctx, crate::look::accent_of(&settings.accent), settings.common.theme);
+        let (mut rect, mut drawn) = (None, Vec::new());
+        // Шрифты встают со следующего кадра, поэтому берём последний.
+        for _ in 0..4 {
+            let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(900.0, 200.0));
+            let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| {
+                let layout = egui::Layout::right_to_left(egui::Align::Center);
+                ui.allocate_ui_with_layout(Vec2::new(room, 40.0), layout, |ui| {
+                    rect = Display::hdr_button(ui, hdr, texts::tr(lang)).map(|r| r.rect);
+                });
+            });
+            drawn = out
+                .shapes
+                .iter()
+                .filter_map(|c| match &c.shape {
+                    egui::Shape::Text(text) => Some(text.galley.text().to_string()),
+                    _ => None,
+                })
+                .collect();
+            out.textures_delta.clear();
+        }
+        (rect, drawn)
+    }
+
+    #[test]
+    fn hdr_button_keeps_its_state_word_and_shrinks_to_two_lines() {
+        let off = display::Hdr { supported: true, enabled: false, force_disabled: false };
+        let on = display::Hdr { enabled: true, ..off };
+        for (lang, hdr) in [(Lang::Ru, off), (Lang::En, off), (Lang::Ru, on), (Lang::En, on)] {
+            let t = texts::tr(lang);
+            let words = vec![t.hdr.to_string(), (if hdr.enabled { t.on } else { t.off }).to_string()];
+            // Места вдоволь — одна строка: «HDR Выкл».
+            let (full, drawn) = button(400.0, hdr, lang);
+            let full = full.expect("места вдоволь");
+            assert_eq!((full.height(), &drawn), (30.0, &words));
+            // Чуть не хватает на одну строку — две: уже, высота та же, слово состояния не пропало.
+            let (narrow, drawn) = button(full.width() - 1.0, hdr, lang);
+            let narrow = narrow.expect("двустрочная помещается");
+            assert!(narrow.width() < full.width() - 20.0 && narrow.height() == 30.0, "{narrow:?} против {full:?}");
+            assert_eq!(drawn, words, "слово состояния не пропало, даже когда тесно");
+            // Не хватает и на две — кнопки нет.
+            assert_eq!(button(narrow.width() - 1.0, hdr, lang).0, None);
+        }
     }
 }
 
@@ -1160,17 +1272,41 @@ mod revert_tests {
     }
 
     #[test]
-    fn hdr_refusal_is_a_danger_toast_and_changes_nothing() {
-        let dev = r"\\.\TEST-HDR-REFUSED";
-        let mut display = card(dev);
+    fn hdr_refusal_is_told_in_the_programs_words_and_changes_nothing() {
+        let (dev, no_hdr) = (r"\\.\TEST-HDR-REFUSED", r"\\.\TEST-HDR-NO-HDR");
         let mut settings = crate::config::Settings::default();
-        display::fake_hdr(dev, display::Hdr { supported: true, enabled: false, force_disabled: true });
+        let en = texts::tr(anvil_ui::Lang::En);
+        let forbidden = display::Hdr { supported: true, enabled: false, force_disabled: true };
+        // Карточка уже знает, что включить нельзя: кнопка недоступна (`hdr_usable`), а если щёлкнули — отказ по-человечески.
+        let mut display = card(dev);
+        display::fake_hdr(dev, forbidden);
         display.refresh(dev);
-        assert_eq!(display.hdr.map(|h| h.force_disabled), Some(true), "карточка знает: кнопка недоступна");
+        assert_eq!(display.hdr.map(|h| h.force_disabled), Some(true));
         let toasts = toasts_of(dev, &mut settings, |cx| display.toggle_hdr(dev, true, cx));
-        assert!(matches!(toasts.as_slice(), [(_, Tone::Danger)]), "отказ — уведомление об ошибке");
+        assert_eq!(
+            toasts,
+            vec![(en.hdr_blocked.to_string(), Tone::Warning)],
+            "не английское служебное «…does not allow…»"
+        );
         assert_eq!(hdr_is_on(dev), Some(false));
         assert!(!display.busy());
+        // Запретили между чтением и щелчком: карточка ещё не знает, узнаёт на щелчке — тот же ответ, и состояние перечитано.
+        let later = r"\\.\TEST-HDR-REFUSED-LATER";
+        let mut display = card(later);
+        display::fake_hdr(later, forbidden);
+        assert_eq!(display.hdr.map(|h| h.force_disabled), Some(false), "пока не перечитали — прежнее");
+        let toasts = toasts_of(later, &mut settings, |cx| display.toggle_hdr(later, true, cx));
+        assert_eq!(toasts, vec![(en.hdr_blocked.to_string(), Tone::Warning)]);
+        assert_eq!(
+            display.hdr.map(|h| h.force_disabled),
+            Some(true),
+            "после отказа карточка знает, что включить нельзя"
+        );
+        // Монитору HDR не нужен вовсе (кнопки нет, но щёлкнули бы) — просто «Failed», без английского служебного.
+        display::fake_hdr(no_hdr, display::Hdr { supported: false, ..forbidden });
+        let mut display = card(no_hdr);
+        let toasts = toasts_of(no_hdr, &mut settings, |cx| display.toggle_hdr(no_hdr, true, cx));
+        assert_eq!(toasts, vec![(en.failed.to_string(), Tone::Danger)]);
     }
 
     #[test]

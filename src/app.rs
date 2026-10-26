@@ -3255,6 +3255,31 @@ mod tests {
     }
 
     #[test]
+    fn first_shelf_fits_in_1300_while_the_display_card_has_hdr_up_to_four_monitors() {
+        // «Экран» с HDR и выбором монитора — до четырёх мониторов не шире 560 (`min_width_for`): «Экран и звук» остаётся в
+        // 1300 без прокрутки, хотя запас всего несколько точек.
+        let keys = modules::DEFAULT_SHELVES[0].1;
+        assert_eq!(keys, ["display", "brightness", "sound", "media"], "полка «Экран и звук» по умолчанию");
+        let all = modules::all();
+        let area = SIZE.x - 24.0;
+        let free = area - GAP * (keys.len() - 1) as f32;
+        for monitors in 1..=4 {
+            let sizes: Vec<(f32, f32)> = keys
+                .iter()
+                .map(|key| {
+                    let m = all.iter().find(|m| m.key() == *key).expect("карточка есть");
+                    let min =
+                        if *key == "display" { modules::display::min_width_for(monitors, true) } else { m.min_width() };
+                    (m.weight(), min)
+                })
+                .collect();
+            let widths = fit_widths(free, &sizes);
+            let row = widths.iter().sum::<f32>() + GAP * (widths.len() - 1) as f32;
+            assert!(row <= area + 0.5, "{monitors} мон.: ряд {row} шире места {area}, полка листалась бы");
+        }
+    }
+
+    #[test]
     fn edit_row_fits_on_every_default_shelf_at_1300() {
         let mut rig = Rig::editing();
         for shelf in 0..3 {

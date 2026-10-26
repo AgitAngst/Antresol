@@ -3,9 +3,10 @@
 // Режимы — через GDI (`EnumDisplaySettingsW`, `ChangeDisplaySettingsExW`) по имени устройства
 // `\\.\DISPLAYn`. Масштаб — через DisplayConfig: у Windows нет открытого API для него, поэтому
 // берём недокументированные пакеты -3 (узнать) и -4 (поставить), которыми пользуется сама
-// «Параметры → Дисплей». Масштаб там задаётся шагом относительно рекомендованного. HDR — «расширенный цвет»
-// DisplayConfig (`GET_ADVANCED_COLOR_INFO` / `SET_ADVANCED_COLOR_STATE`) у цели (target) монитора: только его, а не
-// всех сразу, как Win+Alt+B.
+// «Параметры → Дисплей». Масштаб там задаётся шагом относительно рекомендованного. HDR — DisplayConfig у цели (target)
+// монитора, только его, а не всех сразу, как Win+Alt+B: на Windows 11 24H2 и новее `GET_ADVANCED_COLOR_INFO_2` (15) и
+// `SET_HDR_STATE` (16), раньше (и если новый тип не ответил) `GET_ADVANCED_COLOR_INFO` (9) и
+// `SET_ADVANCED_COLOR_STATE` (10).
 //
 // В демо-режиме и в тестах (`sys::isolated`) всё это — выдуманный экран из `static`: Windows не читается и не
 // пишется. У него два режима, как у настоящего: «сейчас» и «в реестре» — `apply` меняет только первый, `commit`
@@ -16,9 +17,8 @@ use windows::Win32::Devices::Display::{
     DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, DISPLAYCONFIG_DEVICE_INFO_HEADER,
     DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE, DISPLAYCONFIG_DEVICE_INFO_TYPE,
     DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO, DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO,
-    DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE, DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME,
-    DisplayConfigGetDeviceInfo, DisplayConfigSetDeviceInfo, GetDisplayConfigBufferSizes, QDC_ONLY_ACTIVE_PATHS,
-    QueryDisplayConfig,
+    DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME, DisplayConfigGetDeviceInfo,
+    DisplayConfigSetDeviceInfo, GetDisplayConfigBufferSizes, QDC_ONLY_ACTIVE_PATHS, QueryDisplayConfig,
 };
 use windows::Win32::Foundation::{ERROR_SUCCESS, LUID};
 use windows::Win32::Graphics::Gdi::{
@@ -53,12 +53,37 @@ pub struct Scale {
 /// HDR монитора: умеет ли, включён ли и не запретила ли Windows включать сейчас.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Hdr {
-    /// Монитор умеет HDR. Монитор, которому Windows навязывает широкий цвет и выключить его нельзя, — не в счёт.
+    /// Монитор умеет HDR. По старому пакету не в счёт монитор, которому Windows навязывает широкий цвет и выключить его
+    /// нельзя; по новому (24H2) — `highDynamicRangeSupported`.
     pub supported: bool,
-    /// HDR включён.
+    /// HDR включён. По новому пакету — режим цвета HDR: широкий цвет (WCG, автоуправление цветом) HDR не считается.
     pub enabled: bool,
     /// Windows сейчас не даёт включить HDR (политика, режим, подключение): включить нельзя, пока она не разрешит.
     pub force_disabled: bool,
+}
+
+/// Почему HDR не поставился. `Display` — по-английски, для журнала; пользователю говорят текстом программы (`texts`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HdrError {
+    /// У монитора нет HDR.
+    NotSupported,
+    /// Windows сейчас не даёт включить HDR (политика, режим, подключение).
+    Forbidden,
+    /// Состояние не прочиталось (нет пути DisplayConfig, сбой Windows): менять не от чего.
+    Unavailable,
+    /// Windows отказала на самом вызове — её код.
+    Windows(i32),
+}
+
+impl std::fmt::Display for HdrError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HdrError::NotSupported => f.write_str("HDR is not supported"),
+            HdrError::Forbidden => f.write_str("Windows does not allow HDR now"),
+            HdrError::Unavailable => f.write_str("HDR is not available"),
+            HdrError::Windows(code) => write!(f, "DisplayConfigSetDeviceInfo failed: {code}"),
+        }
+    }
 }
 
 /// Шкала масштабов «Параметров Windows»; шаг относительного масштаба — индекс в ней.
@@ -453,24 +478,118 @@ pub fn set_scale(device: &str, percent: u32) -> Result<(), String> {
     }
 }
 
-// ─── HDR (DisplayConfig, «расширенный цвет») ────────────────────────────────
+// ─── HDR (DisplayConfig) ────────────────────────────────────────────────────
 
-/// Разобрать биты ответа `DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO`: 0 — расширенный цвет поддерживается, 1 — включён,
-/// 2 — широкий цвет навязан Windows (выключить нельзя — это не переключатель HDR), 3 — Windows не даёт его включить.
+/// Каким пакетом DisplayConfig прочитали HDR — им же его и ставят.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HdrApi {
+    /// Windows 11 24H2 и новее: `GET_ADVANCED_COLOR_INFO_2` (15) и `SET_HDR_STATE` (16). Старый пакет там при
+    /// автоуправлении цветом считает «включённым» и широкий цвет без HDR, а ставить через него — не то, что нужно.
+    Modern,
+    /// Раньше (и если новый тип не ответил): `GET_ADVANCED_COLOR_INFO` (9) и `SET_ADVANCED_COLOR_STATE` (10).
+    Classic,
+}
+
+// Типов 15 и 16 в `windows` 0.62 нет — свои, как `DpiGet` / `DpiSet` выше (раскладка — wingdi.h, SDK 26100).
+const COLOR_INFO_2: DISPLAYCONFIG_DEVICE_INFO_TYPE = DISPLAYCONFIG_DEVICE_INFO_TYPE(15);
+const SET_HDR_STATE: DISPLAYCONFIG_DEVICE_INFO_TYPE = DISPLAYCONFIG_DEVICE_INFO_TYPE(16);
+/// `activeColorMode` у `GET_ADVANCED_COLOR_INFO_2`: 0 — SDR, 1 — WCG, 2 — HDR.
+const COLOR_MODE_HDR: i32 = 2;
+
+/// `DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2`: заголовок, слово битов, кодировка, глубина цвета, режим цвета (36 байт).
+#[repr(C)]
+struct ColorInfo2 {
+    header: DISPLAYCONFIG_DEVICE_INFO_HEADER,
+    bits: u32,
+    encoding: i32,
+    bits_per_channel: u32,
+    mode: i32,
+}
+
+/// `DISPLAYCONFIG_SET_HDR_STATE` и `DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE`: раскладка одна — заголовок и слово,
+/// бит 0 — «включить» (24 байта); отличается только тип в заголовке.
+#[repr(C)]
+struct SetHdr {
+    header: DISPLAYCONFIG_DEVICE_INFO_HEADER,
+    value: u32,
+}
+
+/// Разобрать биты ответа `GET_ADVANCED_COLOR_INFO`: 0 — расширенный цвет поддерживается, 1 — включён, 2 — широкий цвет
+/// навязан Windows (выключить нельзя — это не переключатель HDR), 3 — Windows не даёт его включить.
 fn hdr_from(bits: u32) -> Hdr {
     let bit = |n: u32| bits & (1 << n) != 0;
     Hdr { supported: bit(0) && !bit(2), enabled: bit(1), force_disabled: bit(3) }
 }
 
+/// Разобрать ответ `GET_ADVANCED_COLOR_INFO_2` (24H2): бит 3 — расширенный цвет ограничен политикой, бит 4 — монитор
+/// умеет HDR; включён ли он — по режиму цвета (HDR, а не SDR или WCG: WCG при автоуправлении цветом HDR не считается).
+fn hdr_from_2(bits: u32, mode: i32) -> Hdr {
+    let bit = |n: u32| bits & (1 << n) != 0;
+    Hdr { supported: bit(4), enabled: mode == COLOR_MODE_HDR, force_disabled: bit(3) }
+}
+
+/// Выбор пути чтения по тому, что ответила Windows: сначала новый тип (24H2), не вышло — старый. Старый зовётся, только
+/// если новый не ответил. `None` — не прочиталось ничем.
+fn pick_hdr(
+    modern: impl FnOnce() -> Option<(u32, i32)>,
+    classic: impl FnOnce() -> Option<u32>,
+) -> Option<(Hdr, HdrApi)> {
+    if let Some((bits, mode)) = modern() {
+        return Some((hdr_from_2(bits, mode), HdrApi::Modern));
+    }
+    classic().map(|bits| (hdr_from(bits), HdrApi::Classic))
+}
+
+/// Пакет, которым ставят HDR: тип — по тому, чем его прочитали, слово — бит 0 «включить».
+fn set_request(api: HdrApi, on: bool) -> (DISPLAYCONFIG_DEVICE_INFO_TYPE, u32) {
+    let kind = match api {
+        HdrApi::Modern => SET_HDR_STATE,
+        HdrApi::Classic => DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE,
+    };
+    (kind, u32::from(on))
+}
+
 /// Можно ли поставить HDR `on` при таком состоянии: у монитора HDR нет или Windows не даёт включить — отказ.
-fn hdr_allowed(now: Hdr, on: bool) -> Result<(), String> {
+fn hdr_allowed(now: Hdr, on: bool) -> Result<(), HdrError> {
     if !now.supported {
-        Err("HDR is not supported".into())
+        Err(HdrError::NotSupported)
     } else if on && now.force_disabled {
-        Err("Windows does not allow HDR now".into())
+        Err(HdrError::Forbidden)
     } else {
         Ok(())
     }
+}
+
+/// `GET_ADVANCED_COLOR_INFO_2`: слово битов и режим цвета. Windows такого типа не знает (до 24H2) — ошибка вызова, `None`.
+fn read_color_2(src: &Source) -> Option<(u32, i32)> {
+    let mut info = ColorInfo2 {
+        header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+            r#type: COLOR_INFO_2,
+            size: size_of::<ColorInfo2>() as u32,
+            adapterId: src.target_adapter,
+            id: src.target_id,
+        },
+        bits: 0,
+        encoding: 0,
+        bits_per_channel: 0,
+        mode: 0,
+    };
+    (unsafe { DisplayConfigGetDeviceInfo(&mut info.header) } == 0).then_some((info.bits, info.mode))
+}
+
+/// `GET_ADVANCED_COLOR_INFO`: слово битов.
+fn read_color_1(src: &Source) -> Option<u32> {
+    let mut info = DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO::default();
+    info.header.r#type = DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO;
+    info.header.size = size_of::<DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO>() as u32;
+    info.header.adapterId = src.target_adapter;
+    info.header.id = src.target_id;
+    (unsafe { DisplayConfigGetDeviceInfo(&mut info.header) } == 0).then_some(unsafe { info.Anonymous.value })
+}
+
+/// HDR цели монитора и пакет, которым он прочитался.
+fn read_hdr(src: &Source) -> Option<(Hdr, HdrApi)> {
+    pick_hdr(|| read_color_2(src), || read_color_1(src))
 }
 
 /// HDR монитора `\\.\DISPLAYn`. `None` — не прочитать (нет пути DisplayConfig, ошибка Windows): кнопки HDR нет.
@@ -478,21 +597,12 @@ pub fn hdr(device: &str) -> Option<Hdr> {
     if isolated() {
         return Some(with_fake(device, |f| f.hdr));
     }
-    let src = source_of(device)?;
-    let mut info = DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO::default();
-    info.header.r#type = DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO;
-    info.header.size = size_of::<DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO>() as u32;
-    info.header.adapterId = src.target_adapter;
-    info.header.id = src.target_id;
-    if unsafe { DisplayConfigGetDeviceInfo(&mut info.header) } != 0 {
-        return None;
-    }
-    Some(hdr_from(unsafe { info.Anonymous.value }))
+    read_hdr(&source_of(device)?).map(|(hdr, _)| hdr)
 }
 
 /// Включить или выключить HDR одного монитора. Windows запоминает его сама и ничего не спрашивает, как «Параметры»;
-/// обратно — тем же вызовом. Нет HDR у монитора или Windows не даёт включить — отказ с причиной.
-pub fn set_hdr(device: &str, on: bool) -> Result<(), String> {
+/// обратно — тем же вызовом. Нет HDR у монитора или Windows не даёт включить — отказ с причиной (`HdrError`).
+pub fn set_hdr(device: &str, on: bool) -> Result<(), HdrError> {
     if blocked(&format!("display::set_hdr {device} {on}")) {
         return with_fake(device, |f| {
             hdr_allowed(f.hdr, on)?;
@@ -500,19 +610,23 @@ pub fn set_hdr(device: &str, on: bool) -> Result<(), String> {
             Ok(())
         });
     }
-    hdr_allowed(hdr(device).ok_or("HDR is not available")?, on)?;
-    let src = source_of(device).ok_or("display not found")?;
-    let mut set = DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE::default();
-    set.header.r#type = DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE;
-    set.header.size = size_of::<DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE>() as u32;
-    set.header.adapterId = src.target_adapter;
-    set.header.id = src.target_id;
-    // Бит 0 — enableAdvancedColor.
-    set.Anonymous.value = u32::from(on);
+    let src = source_of(device).ok_or(HdrError::Unavailable)?;
+    let (now, api) = read_hdr(&src).ok_or(HdrError::Unavailable)?;
+    hdr_allowed(now, on)?;
+    let (kind, value) = set_request(api, on);
+    let set = SetHdr {
+        header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+            r#type: kind,
+            size: size_of::<SetHdr>() as u32,
+            adapterId: src.target_adapter,
+            id: src.target_id,
+        },
+        value,
+    };
     real_write("DisplayConfigSetDeviceInfo");
     match unsafe { DisplayConfigSetDeviceInfo(&set.header) } {
         0 => Ok(()),
-        e => Err(format!("DisplayConfigSetDeviceInfo failed: {e}")),
+        e => Err(HdrError::Windows(e)),
     }
 }
 
@@ -555,14 +669,71 @@ mod tests {
     }
 
     #[test]
+    fn hdr_bits_24h2() {
+        // `GET_ADVANCED_COLOR_INFO_2`: бит 3 — ограничено политикой, 4 — монитор умеет HDR; включён ли — по режиму
+        // цвета (0 — SDR, 1 — WCG, 2 — HDR), а не по биту «расширенный цвет активен».
+        let h = |supported, enabled, force_disabled| Hdr { supported, enabled, force_disabled };
+        assert_eq!(hdr_from_2(0b1_0000, 0), h(true, false, false), "HDR есть, идёт SDR");
+        assert_eq!(hdr_from_2(0b11_0010, 2), h(true, true, false), "HDR включён");
+        assert_eq!(hdr_from_2(0b11_0011, 1), h(true, false, false), "идёт WCG (автоуправление цветом) — не HDR");
+        assert_eq!(hdr_from_2(0b1100_0011, 1), h(false, false, false), "монитор умеет только WCG — HDR у него нет");
+        assert_eq!(hdr_from_2(0b1_1000, 0), h(true, false, true), "политика не даёт");
+        assert_eq!(hdr_from_2(0, 0), h(false, false, false), "монитор без HDR");
+        assert_eq!(hdr_from_2(0xFFFF_FF00 | 0b1_0000, 0), h(true, false, false), "лишние биты не мешают");
+        // Старый пакет в том же положении ошибся бы: бит «активен» горит и при WCG.
+        assert!(hdr_from(0b0011).enabled && !hdr_from_2(0b11_0011, 1).enabled);
+    }
+
+    #[test]
+    fn hdr_path_is_chosen_by_what_windows_answers() {
+        let h = |supported, enabled, force_disabled| Hdr { supported, enabled, force_disabled };
+        // 24H2: новый тип ответил — старый не зовётся вовсе.
+        let got = pick_hdr(|| Some((0b1_0000, 2)), || panic!("старый тип без нужды"));
+        assert_eq!(got, Some((h(true, true, false), HdrApi::Modern)));
+        // До 24H2 Windows нового типа не знает — старый.
+        let got = pick_hdr(|| None, || Some(0b0011));
+        assert_eq!(got, Some((h(true, true, false), HdrApi::Classic)));
+        // Не прочиталось ничем — кнопки нет.
+        assert_eq!(pick_hdr(|| None, || None), None);
+    }
+
+    #[test]
+    fn hdr_is_set_by_the_packet_that_read_it() {
+        assert_eq!(set_request(HdrApi::Modern, true), (DISPLAYCONFIG_DEVICE_INFO_TYPE(16), 1));
+        assert_eq!(set_request(HdrApi::Modern, false), (DISPLAYCONFIG_DEVICE_INFO_TYPE(16), 0));
+        assert_eq!(set_request(HdrApi::Classic, true), (DISPLAYCONFIG_DEVICE_INFO_TYPE(10), 1));
+        assert_eq!(set_request(HdrApi::Classic, false), (DISPLAYCONFIG_DEVICE_INFO_TYPE(10), 0));
+        assert_eq!((COLOR_INFO_2.0, SET_HDR_STATE.0), (15, 16), "номера типов — как в wingdi.h SDK 26100");
+        assert_eq!(DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO.0, 9);
+    }
+
+    #[test]
+    fn hdr_packets_have_the_sdk_sizes() {
+        use windows::Win32::Devices::Display::DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE;
+        // Размеры из wingdi.h: заголовок 20 байт, дальше слова по 4.
+        assert_eq!(size_of::<ColorInfo2>(), 36);
+        assert_eq!(size_of::<SetHdr>(), 24);
+        // Старые пакеты — готовые структуры `windows`: раскладка `SetHdr` у них та же.
+        assert_eq!(size_of::<DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO>(), 32);
+        assert_eq!(size_of::<DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE>(), size_of::<SetHdr>());
+    }
+
+    #[test]
     fn hdr_refusals() {
         let on = Hdr { supported: true, enabled: true, force_disabled: false };
         let off = Hdr { enabled: false, ..on };
         assert_eq!(hdr_allowed(off, true), Ok(()));
         assert_eq!(hdr_allowed(on, false), Ok(()));
-        assert!(hdr_allowed(Hdr { supported: false, ..off }, true).is_err(), "у монитора нет HDR");
-        assert!(hdr_allowed(Hdr { force_disabled: true, ..off }, true).is_err(), "Windows не даёт включить");
+        assert_eq!(
+            hdr_allowed(Hdr { supported: false, ..off }, true),
+            Err(HdrError::NotSupported),
+            "у монитора нет HDR"
+        );
+        assert_eq!(hdr_allowed(Hdr { force_disabled: true, ..off }, true), Err(HdrError::Forbidden));
         assert_eq!(hdr_allowed(Hdr { force_disabled: true, ..on }, false), Ok(()), "выключить можно всегда");
+        // Для журнала — по-английски и с кодом Windows, пользователю такой текст не показывают.
+        assert_eq!(HdrError::Forbidden.to_string(), "Windows does not allow HDR now");
+        assert_eq!(HdrError::Windows(87).to_string(), "DisplayConfigSetDeviceInfo failed: 87");
     }
 }
 
@@ -628,7 +799,7 @@ mod fake_tests {
         let d = r"\\.\TEST-HDR-FORBIDDEN";
         let forbidden = Hdr { force_disabled: true, ..FAKE_HDR };
         fake_hdr(d, forbidden);
-        assert!(set_hdr(d, true).is_err(), "Windows не даёт включить");
+        assert_eq!(set_hdr(d, true), Err(HdrError::Forbidden), "Windows не даёт включить");
         assert_eq!(hdr(d), Some(forbidden), "неудачная смена ничего не меняет");
         fake_hdr(d, FAKE_HDR);
         set_hdr(d, true).unwrap();
@@ -638,7 +809,8 @@ mod fake_tests {
         assert_eq!(hdr(d).map(|h| h.enabled), Some(false));
         // Монитор без HDR: переключать нечего.
         fake_hdr(d, Hdr { supported: false, ..FAKE_HDR });
-        assert!(set_hdr(d, true).is_err() && set_hdr(d, false).is_err());
+        assert_eq!(set_hdr(d, true), Err(HdrError::NotSupported));
+        assert_eq!(set_hdr(d, false), Err(HdrError::NotSupported));
     }
 
     #[test]
