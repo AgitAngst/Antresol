@@ -13,4 +13,9 @@
 - [x] 2.2 `checks.py fmt test clippy` зелёные
 - [x] 2.3 docs (`guide/usage.md`, `architecture/overview.md`), `docs/ui-guideline.md` (кнопка HDR, журнал), SPEC
       («Этап 2.0 — HDR»), HANDOFF
-- [ ] 2.4 Сверка судьёй (docs с кодом)
+- [x] 2.4 Сверка судьёй (docs с кодом)
+- [x] 2.5 Круг исправлений по судье: путь Windows 11 24H2 (`GET_ADVANCED_COLOR_INFO_2` / `SET_HDR_STATE`, запасной —
+      прежние типы), слово состояния на тесной кнопке (две строки), отказ смены словами программы, снимки с версией 2.0.0,
+      живые проверки в HANDOFF, заметка о клоне экрана, тест запаса полки при «Экране» 560
+- [ ] 2.6 При архиве: MODIFIED-требование в `openspec/specs/display-profiles` (профиль хранит режим, масштаб и HDR) —
+      иначе две спецификации (`display-profiles` и `hdr`) говорят об одном и том же
