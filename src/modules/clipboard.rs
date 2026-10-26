@@ -1228,6 +1228,52 @@ mod tests {
         );
     }
 
+    /// DIB в 32 бита, как его отдаёт Windows для снимка экрана: `BI_BITFIELDS`, маски BGRA; заголовок 40 и три маски за ним либо
+    /// `BITMAPV5HEADER` (124) с масками внутри.
+    fn dib32(w: usize, h: usize, v5: bool, color: impl Fn(usize, usize) -> [u8; 3]) -> Vec<u8> {
+        let header = if v5 { 124 } else { 40 };
+        let masks = [0x00ff_0000u32, 0x0000_ff00, 0x0000_00ff];
+        let mut b = vec![0u8; header];
+        b[0..4].copy_from_slice(&(header as u32).to_le_bytes());
+        b[4..8].copy_from_slice(&(w as i32).to_le_bytes());
+        b[8..12].copy_from_slice(&(h as i32).to_le_bytes());
+        b[12..14].copy_from_slice(&1u16.to_le_bytes());
+        b[14..16].copy_from_slice(&32u16.to_le_bytes());
+        b[16..20].copy_from_slice(&3u32.to_le_bytes());
+        if v5 {
+            for (i, m) in masks.iter().enumerate() {
+                b[40 + i * 4..44 + i * 4].copy_from_slice(&m.to_le_bytes());
+            }
+        } else {
+            masks.iter().for_each(|m| b.extend_from_slice(&m.to_le_bytes()));
+        }
+        for y in (0..h).rev() {
+            for x in 0..w {
+                let [r, g, bl] = color(x, y);
+                b.extend_from_slice(&[bl, g, r, 0]);
+            }
+        }
+        b
+    }
+
+    /// Снимки экрана приходят 32-битными с масками (`CF_DIB` и `CF_DIBV5`): тот же результат, что у 24 бит.
+    #[test]
+    fn thumbnails_of_32_bit_dibs_with_masks() {
+        let half = |x: usize, _: usize| if x < 3 { [200, 30, 20] } else { [10, 40, 220] };
+        for v5 in [false, true] {
+            let dib = dib32(6, 4, v5, half);
+            let img = clip::image_of(dib.clone(), v5).expect("в пределах");
+            assert_eq!((img.width, img.height, img.v5), (6, 4, v5));
+            let thumb = make_thumb(&dib).expect("32 бита с масками разбираются");
+            let at = |x: usize, y: usize| thumb.pixels[y * 72 + x];
+            assert_eq!(
+                (at(0, 0), at(71, 47)),
+                (Color32::from_rgb(200, 30, 20), Color32::from_rgb(10, 40, 220)),
+                "v5 = {v5}"
+            );
+        }
+    }
+
     #[test]
     fn a_thumbnail_is_the_middle_of_the_picture_in_three_by_two() {
         // 300 × 100 шире 3 : 2 — края срезаются; слева красное, справа синее, граница посередине кадра миниатюры.
@@ -1244,8 +1290,10 @@ mod tests {
         let thumb = make_thumb(&ramp).unwrap();
         let reds: Vec<u8> = (0..72).map(|x| thumb.pixels[x].r()).collect();
         assert!(reds.windows(2).all(|w| w[0] <= w[1]) && reds[0] < 8 && reds[71] > 247, "{reds:?}");
-        // Высокая: срезаются верх и низ; крошечная и в один пиксель — не падает.
-        assert!(make_thumb(&dib24(100, 300, |_, y| [y as u8, 0, 0])).is_some());
+        // Высокая: срезаются верх и низ, а верх остаётся верхом (строки в DIB идут снизу вверх): сверху красное, снизу синее.
+        let tall = make_thumb(&dib24(30, 90, |_, y| if y < 45 { [255, 0, 0] } else { [0, 0, 255] })).unwrap();
+        assert_eq!((tall.pixels[0], tall.pixels[47 * 72]), (Color32::RED, Color32::BLUE));
+        // Крошечная и в один пиксель — не падает.
         assert!(
             make_thumb(&dib24(1, 1, |_, _| [9, 9, 9])).is_some()
                 && make_thumb(&dib24(3, 1, |_, _| [9, 9, 9])).is_some()
