@@ -222,7 +222,8 @@ impl std::fmt::Display for Hotkey {
     }
 }
 
-/// Режим одного монитора в профиле. Масштаб `None` — не трогать.
+/// Режим одного монитора в профиле. Масштаб и HDR `None` — не трогать (HDR не записан у профилей, сохранённых до 2.0,
+/// и у мониторов без HDR).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ProfileMonitor {
     pub device: String,
@@ -230,6 +231,8 @@ pub struct ProfileMonitor {
     pub height: u32,
     pub hz: u32,
     pub scale: Option<u32>,
+    /// HDR монитора: `Some(true)` — включить (`hdr` в файле), `Some(false)` — выключить (`sdr`).
+    pub hdr: Option<bool>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -245,7 +248,8 @@ impl Profile {
         name.replace(['|', ';', '\n', '\r'], " ").trim().to_string()
     }
 
-    /// `Игры | Ctrl+Alt+1 | \\.\DISPLAY1 1920x1080@144 100% ; \\.\DISPLAY2 2560x1440@60`.
+    /// `Игры | Ctrl+Alt+1 | \\.\DISPLAY1 1920x1080@144 100% hdr ; \\.\DISPLAY2 2560x1440@60`. После режима — по
+    /// желанию масштаб (`100%`) и `hdr` или `sdr`, в любом порядке; незнакомое слово или повтор — строка негодная.
     fn parse(value: &str) -> Option<Profile> {
         let mut parts = value.split('|').map(str::trim);
         let name = Profile::clean_name(parts.next()?);
@@ -255,16 +259,24 @@ impl Profile {
             let words: Vec<&str> = m.split_whitespace().collect();
             let (size, hz) = words.get(1)?.split_once('@')?;
             let (w, h) = size.split_once('x')?;
-            let scale = match words.get(2) {
-                Some(s) => Some(s.trim_end_matches('%').parse().ok()?),
-                None => None,
-            };
+            let (mut scale, mut hdr) = (None, None);
+            for word in &words[2..] {
+                let hdr_word = word.eq_ignore_ascii_case("hdr") || word.eq_ignore_ascii_case("sdr");
+                if hdr_word && hdr.is_none() {
+                    hdr = Some(word.eq_ignore_ascii_case("hdr"));
+                } else if !hdr_word && scale.is_none() {
+                    scale = Some(word.trim_end_matches('%').parse().ok()?);
+                } else {
+                    return None;
+                }
+            }
             monitors.push(ProfileMonitor {
                 device: words.first()?.to_string(),
                 width: w.parse().ok()?,
                 height: h.parse().ok()?,
                 hz: hz.parse().ok()?,
                 scale,
+                hdr,
             });
         }
         (!name.is_empty() && !monitors.is_empty()).then_some(Profile { name, hotkey, monitors })
@@ -279,7 +291,8 @@ impl std::fmt::Display for Profile {
             .iter()
             .map(|m| {
                 let scale = m.scale.map(|s| format!(" {s}%")).unwrap_or_default();
-                format!("{} {}x{}@{}{scale}", m.device, m.width, m.height, m.hz)
+                let hdr = m.hdr.map(|on| if on { " hdr" } else { " sdr" }).unwrap_or_default();
+                format!("{} {}x{}@{}{scale}{hdr}", m.device, m.width, m.height, m.hz)
             })
             .collect();
         write!(f, "{} | {key} | {}", self.name, monitors.join(" ; "))
@@ -855,12 +868,37 @@ mod tests {
             name: "Игры".into(),
             hotkey: Hotkey::parse("Ctrl+Alt+1"),
             monitors: vec![
-                ProfileMonitor { device: r"\\.\DISPLAY1".into(), width: 1920, height: 1080, hz: 144, scale: Some(100) },
-                ProfileMonitor { device: r"\\.\DISPLAY2".into(), width: 2560, height: 1440, hz: 60, scale: None },
+                ProfileMonitor {
+                    device: r"\\.\DISPLAY1".into(),
+                    width: 1920,
+                    height: 1080,
+                    hz: 144,
+                    scale: Some(100),
+                    hdr: Some(true),
+                },
+                ProfileMonitor {
+                    device: r"\\.\DISPLAY2".into(),
+                    width: 2560,
+                    height: 1440,
+                    hz: 60,
+                    scale: None,
+                    hdr: None,
+                },
+                ProfileMonitor {
+                    device: r"\\.\DISPLAY3".into(),
+                    width: 1280,
+                    height: 720,
+                    hz: 60,
+                    scale: None,
+                    hdr: Some(false),
+                },
             ],
         };
         let line = p.to_string();
-        assert_eq!(line, r"Игры | Ctrl+Alt+1 | \\.\DISPLAY1 1920x1080@144 100% ; \\.\DISPLAY2 2560x1440@60");
+        assert_eq!(
+            line,
+            r"Игры | Ctrl+Alt+1 | \\.\DISPLAY1 1920x1080@144 100% hdr ; \\.\DISPLAY2 2560x1440@60 ; \\.\DISPLAY3 1280x720@60 sdr"
+        );
         let s = Settings {
             profiles: vec![p.clone(), Profile { name: "Работа".into(), hotkey: None, ..p }],
             ..Default::default()
@@ -871,6 +909,37 @@ mod tests {
         let names: Vec<String> = parse(bad).profiles.into_iter().map(|p| p.name).collect();
         assert_eq!(names, vec!["Z".to_string()]);
         assert_eq!(Profile::clean_name(" a|b;c "), "a b c");
+    }
+
+    /// `hdr` / `sdr` после режима монитора в `profile=`: порядок слов не важен, старые строки читаются как раньше.
+    #[test]
+    fn profile_hdr_words() {
+        let d = r"\\.\DISPLAY1";
+        let one = |tail: &str| {
+            let line = format!("profile=A | | {d} 1920x1080@60{tail}\n");
+            parse(&line).profiles.into_iter().next().map(|p| p.monitors)
+        };
+        let pm =
+            |scale, hdr| Some(vec![ProfileMonitor { device: d.into(), width: 1920, height: 1080, hz: 60, scale, hdr }]);
+        // Строки до 2.0 — без слова: HDR не задан, его не трогают.
+        assert_eq!(one(""), pm(None, None));
+        assert_eq!(one(" 100%"), pm(Some(100), None));
+        // `hdr` — включить, `sdr` — выключить; до масштаба, после него или без него.
+        assert_eq!(one(" hdr"), pm(None, Some(true)));
+        assert_eq!(one(" sdr"), pm(None, Some(false)));
+        assert_eq!(one(" 125% hdr"), pm(Some(125), Some(true)));
+        assert_eq!(one(" sdr 125%"), pm(Some(125), Some(false)), "порядок слов не важен");
+        assert_eq!(one(" 150 HDR"), pm(Some(150), Some(true)), "знак % и регистр не важны");
+        // Негодное — строка пропущена: незнакомое слово, повтор, два противоположных слова.
+        for bad in [" hdr sdr", " hdr hdr", " 100% 125%", " foo", " 100% hdr foo", " hdr%"] {
+            assert_eq!(one(bad), None, "{bad:?}");
+        }
+        // Старая строка при записи не меняется, новая читается обратно как есть.
+        let d2 = r"\\.\DISPLAY2";
+        let old = format!("A |  | {d} 1920x1080@60 100% ; {d2} 1280x720@60");
+        assert_eq!(Profile::parse(&old).unwrap().to_string(), old);
+        let new = format!("A |  | {d} 1920x1080@60 100% hdr ; {d2} 1280x720@60 sdr");
+        assert_eq!(Profile::parse(&new).unwrap().to_string(), new);
     }
 
     #[test]

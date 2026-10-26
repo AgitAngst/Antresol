@@ -204,6 +204,10 @@ pub struct Tr {
     pub clip_unpinned: &'static str,
     pub shelf_limit: &'static str,
     pub paused: &'static str,
+    // HDR монитора в карточке «Экран» (2.0.0): один блок.
+    pub hdr: &'static str,
+    pub hdr_hint: &'static str,
+    pub hdr_blocked: &'static str,
     pub accents: [&'static str; 5],
 }
 
@@ -408,6 +412,9 @@ const RU: Tr = Tr {
     clip_unpinned: "Откреплено",
     shelf_limit: "Полок не больше девяти — уберите ненужную",
     paused: "на паузе",
+    hdr: "HDR",
+    hdr_hint: "HDR этого монитора. Win+Alt+B переключает все мониторы сразу",
+    hdr_blocked: "Windows сейчас не даёт включить HDR на этом мониторе",
     accents: ["Лайм", "Фиолетовый", "Индиго", "Фуксия", "Лазурь"],
 };
 
@@ -612,6 +619,9 @@ const EN: Tr = Tr {
     clip_unpinned: "Unpinned",
     shelf_limit: "At most nine shelves — remove one first",
     paused: "paused",
+    hdr: "HDR",
+    hdr_hint: "HDR for this monitor. Win+Alt+B toggles all monitors at once",
+    hdr_blocked: "Windows won't turn HDR on for this monitor right now",
     accents: ["Lime", "Violet", "Indigo", "Fuchsia", "Sky"],
 };
 

@@ -3085,7 +3085,8 @@ mod tests {
         let rect = monitor::PxRect { left: 0, top: 0, right: 1920, bottom: 1080 };
         rig.app.monitors = vec![monitor::Monitor { device: dev.into(), rect, primary: true, handle: 0 }];
         rig.app.settings.monitor = dev.into();
-        let screen = config::ProfileMonitor { device: dev.into(), width: 2560, height: 1440, hz: 144, scale: None };
+        let screen =
+            config::ProfileMonitor { device: dev.into(), width: 2560, height: 1440, hz: 144, scale: None, hdr: None };
         rig.app.settings.profiles = vec![config::Profile { name: "P".into(), hotkey: None, monitors: vec![screen] }];
         // «Экран» — на первой полке; открыта третья, и идёт правка.
         rig.app.set_shelf(2);
@@ -3101,7 +3102,8 @@ mod tests {
         let mut rig = Rig::new();
         rig.app.monitors = vec![monitor::Monitor { device: dev.into(), rect, primary: true, handle: 0 }];
         rig.app.settings.monitor = dev.into();
-        let other = config::ProfileMonitor { device: dev.into(), width: 1920, height: 1080, hz: 120, scale: None };
+        let other =
+            config::ProfileMonitor { device: dev.into(), width: 1920, height: 1080, hz: 120, scale: None, hdr: None };
         rig.app.settings.profiles = vec![config::Profile { name: "Q".into(), hotkey: None, monitors: vec![other] }];
         rig.app.set_shelf(1);
         rig.app.command_all(Command::ApplyProfile(0));
@@ -3117,8 +3119,14 @@ mod tests {
         rig.app.settings.monitor = dev.into();
         let start = sys::display::current(dev).expect("выдуманный экран отвечает");
         let start_scale = sys::display::scale(dev).map(|s| s.current);
-        let screen =
-            config::ProfileMonitor { device: dev.into(), width: 1920, height: 1080, hz: 144, scale: Some(200) };
+        let screen = config::ProfileMonitor {
+            device: dev.into(),
+            width: 1920,
+            height: 1080,
+            hz: 144,
+            scale: Some(200),
+            hdr: None,
+        };
         rig.app.settings.profiles = vec![config::Profile { name: "P".into(), hotkey: None, monitors: vec![screen] }];
         rig.app.command_all(Command::ApplyProfile(0));
         assert!(rig.app.modules.iter().any(|m| m.busy()), "режим сменился, ответа нет");

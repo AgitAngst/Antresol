@@ -506,8 +506,11 @@ mod tests {
         assert_eq!(display::apply(dev, mode), Ok(()));
         assert_eq!(display::commit(dev, mode), Ok(()));
         assert_eq!(display::set_scale(dev, 125), Ok(()));
+        assert_eq!(display::set_hdr(dev, true), Ok(()));
         assert_eq!(display::set_primary(dev, &[(dev.to_string(), 0, 0)]), Ok(()));
-        for what in ["display::apply", "display::commit", "display::set_scale", "display::set_primary"] {
+        for what in
+            ["display::apply", "display::commit", "display::set_scale", "display::set_hdr", "display::set_primary"]
+        {
             assert!(was_blocked(&format!("{what} {dev}")), "{what}");
         }
         assert_eq!(ddc::set(4242, 0, ddc::BRIGHTNESS, 42), Ok(()));

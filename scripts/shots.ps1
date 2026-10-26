@@ -11,12 +11,12 @@ $app = "E:\dev_personal\antresol-scratch\appdata-shot"
 New-Item -ItemType Directory -Force "$app\Antresol" | Out-Null
 New-Item -ItemType Directory -Force $Out | Out-Null
 $dev = '\\.\DISPLAY9'
-# Профили — без клавиш и на выдуманном мониторе; первый совпадает с режимом выдуманного экрана (его чип выделен).
+# Профили — без клавиш и на выдуманном мониторе; первый совпадает с режимом выдуманного экрана (его чип выделен). «Кино» — с HDR (`hdr` после масштаба).
 function Get-Profiles($lang) {
   if ($lang -eq "en") { $n = @("Work", "Games", "Movies") } else { $n = @("Работа", "Игры", "Кино") }
   return @("profile=$($n[0]) |  | $dev 3840x2160@120 150%",
           "profile=$($n[1]) |  | $dev 2560x1440@144 100%",
-          "profile=$($n[2]) |  | $dev 3840x2160@60 175%")
+          "profile=$($n[2]) |  | $dev 3840x2160@60 175% hdr")
 }
 # Свои кнопки: образец по языку сцены (демо файл не заводит сам).
 function Get-Buttons($lang) {

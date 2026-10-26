@@ -1,19 +1,24 @@
-// Экран: режимы (разрешение и частота) и масштаб каждого монитора.
+// Экран: режимы (разрешение и частота), масштаб и HDR каждого монитора.
 //
 // Режимы — через GDI (`EnumDisplaySettingsW`, `ChangeDisplaySettingsExW`) по имени устройства
 // `\\.\DISPLAYn`. Масштаб — через DisplayConfig: у Windows нет открытого API для него, поэтому
 // берём недокументированные пакеты -3 (узнать) и -4 (поставить), которыми пользуется сама
-// «Параметры → Дисплей». Масштаб там задаётся шагом относительно рекомендованного.
+// «Параметры → Дисплей». Масштаб там задаётся шагом относительно рекомендованного. HDR — «расширенный цвет»
+// DisplayConfig (`GET_ADVANCED_COLOR_INFO` / `SET_ADVANCED_COLOR_STATE`) у цели (target) монитора: только его, а не
+// всех сразу, как Win+Alt+B.
 //
 // В демо-режиме и в тестах (`sys::isolated`) всё это — выдуманный экран из `static`: Windows не читается и не
 // пишется. У него два режима, как у настоящего: «сейчас» и «в реестре» — `apply` меняет только первый, `commit`
 // переносит его во второй (после «Оставить»), так что откат без окна проверяется тестами.
 
 use windows::Win32::Devices::Display::{
-    DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
-    DISPLAYCONFIG_DEVICE_INFO_HEADER, DISPLAYCONFIG_DEVICE_INFO_TYPE, DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO,
-    DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME, DisplayConfigGetDeviceInfo,
-    DisplayConfigSetDeviceInfo, GetDisplayConfigBufferSizes, QDC_ONLY_ACTIVE_PATHS, QueryDisplayConfig,
+    DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO, DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+    DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, DISPLAYCONFIG_DEVICE_INFO_HEADER,
+    DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE, DISPLAYCONFIG_DEVICE_INFO_TYPE,
+    DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO, DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO,
+    DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE, DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME,
+    DisplayConfigGetDeviceInfo, DisplayConfigSetDeviceInfo, GetDisplayConfigBufferSizes, QDC_ONLY_ACTIVE_PATHS,
+    QueryDisplayConfig,
 };
 use windows::Win32::Foundation::{ERROR_SUCCESS, LUID};
 use windows::Win32::Graphics::Gdi::{
@@ -45,6 +50,17 @@ pub struct Scale {
     pub options: Vec<u32>,
 }
 
+/// HDR монитора: умеет ли, включён ли и не запретила ли Windows включать сейчас.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Hdr {
+    /// Монитор умеет HDR. Монитор, которому Windows навязывает широкий цвет и выключить его нельзя, — не в счёт.
+    pub supported: bool,
+    /// HDR включён.
+    pub enabled: bool,
+    /// Windows сейчас не даёт включить HDR (политика, режим, подключение): включить нельзя, пока она не разрешит.
+    pub force_disabled: bool,
+}
+
 /// Шкала масштабов «Параметров Windows»; шаг относительного масштаба — индекс в ней.
 const SCALES: [u32; 12] = [100, 125, 150, 175, 200, 225, 250, 300, 350, 400, 450, 500];
 
@@ -73,6 +89,8 @@ struct Fake {
     saved: Mode,
     /// Масштаб, %.
     scale: u32,
+    /// HDR: у выдуманного монитора он есть и вначале выключен.
+    hdr: Hdr,
 }
 
 /// Выдуманные мониторы по именам устройств: нужный заводится при первом обращении.
@@ -87,6 +105,8 @@ const FAKE_START: Mode = fake_mode(3840, 2160, 120);
 /// Масштаб выдуманного монитора вначале и рекомендованный ему.
 const FAKE_SCALE: u32 = 150;
 const FAKE_RECOMMENDED: u32 = 175;
+/// HDR выдуманного монитора вначале: есть, выключен, Windows не запрещает.
+const FAKE_HDR: Hdr = Hdr { supported: true, enabled: false, force_disabled: false };
 
 /// Режимы выдуманного монитора.
 fn fake_modes() -> Vec<Mode> {
@@ -114,7 +134,8 @@ fn with_fake<R>(device: &str, f: impl FnOnce(&mut Fake) -> R) -> R {
     let i = match list.iter().position(|(d, _)| d.eq_ignore_ascii_case(device)) {
         Some(i) => i,
         None => {
-            list.push((device.to_string(), Fake { now: FAKE_START, saved: FAKE_START, scale: FAKE_SCALE }));
+            let fake = Fake { now: FAKE_START, saved: FAKE_START, scale: FAKE_SCALE, hdr: FAKE_HDR };
+            list.push((device.to_string(), fake));
             list.len() - 1
         }
     };
@@ -296,10 +317,12 @@ struct DpiSet {
 const DPI_GET: DISPLAYCONFIG_DEVICE_INFO_TYPE = DISPLAYCONFIG_DEVICE_INFO_TYPE(-3);
 const DPI_SET: DISPLAYCONFIG_DEVICE_INFO_TYPE = DISPLAYCONFIG_DEVICE_INFO_TYPE(-4);
 
-/// Активный путь DisplayConfig для устройства GDI: источник (для масштаба) и имя монитора.
+/// Активный путь DisplayConfig для устройства GDI: источник (для масштаба), цель (для HDR) и имя монитора.
 struct Source {
     adapter: LUID,
     source_id: u32,
+    target_adapter: LUID,
+    target_id: u32,
     monitor_name: String,
 }
 
@@ -349,7 +372,13 @@ fn source_of(device: &str) -> Option<Source> {
         } else {
             String::new()
         };
-        return Some(Source { adapter: path.sourceInfo.adapterId, source_id: path.sourceInfo.id, monitor_name });
+        return Some(Source {
+            adapter: path.sourceInfo.adapterId,
+            source_id: path.sourceInfo.id,
+            target_adapter: path.targetInfo.adapterId,
+            target_id: path.targetInfo.id,
+            monitor_name,
+        });
     }
     None
 }
@@ -424,6 +453,75 @@ pub fn set_scale(device: &str, percent: u32) -> Result<(), String> {
     }
 }
 
+// ─── HDR (DisplayConfig, «расширенный цвет») ────────────────────────────────
+
+/// Разобрать биты ответа `DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO`: 0 — расширенный цвет поддерживается, 1 — включён,
+/// 2 — широкий цвет навязан Windows (выключить нельзя — это не переключатель HDR), 3 — Windows не даёт его включить.
+fn hdr_from(bits: u32) -> Hdr {
+    let bit = |n: u32| bits & (1 << n) != 0;
+    Hdr { supported: bit(0) && !bit(2), enabled: bit(1), force_disabled: bit(3) }
+}
+
+/// Можно ли поставить HDR `on` при таком состоянии: у монитора HDR нет или Windows не даёт включить — отказ.
+fn hdr_allowed(now: Hdr, on: bool) -> Result<(), String> {
+    if !now.supported {
+        Err("HDR is not supported".into())
+    } else if on && now.force_disabled {
+        Err("Windows does not allow HDR now".into())
+    } else {
+        Ok(())
+    }
+}
+
+/// HDR монитора `\\.\DISPLAYn`. `None` — не прочитать (нет пути DisplayConfig, ошибка Windows): кнопки HDR нет.
+pub fn hdr(device: &str) -> Option<Hdr> {
+    if isolated() {
+        return Some(with_fake(device, |f| f.hdr));
+    }
+    let src = source_of(device)?;
+    let mut info = DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO::default();
+    info.header.r#type = DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO;
+    info.header.size = size_of::<DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO>() as u32;
+    info.header.adapterId = src.target_adapter;
+    info.header.id = src.target_id;
+    if unsafe { DisplayConfigGetDeviceInfo(&mut info.header) } != 0 {
+        return None;
+    }
+    Some(hdr_from(unsafe { info.Anonymous.value }))
+}
+
+/// Включить или выключить HDR одного монитора. Windows запоминает его сама и ничего не спрашивает, как «Параметры»;
+/// обратно — тем же вызовом. Нет HDR у монитора или Windows не даёт включить — отказ с причиной.
+pub fn set_hdr(device: &str, on: bool) -> Result<(), String> {
+    if blocked(&format!("display::set_hdr {device} {on}")) {
+        return with_fake(device, |f| {
+            hdr_allowed(f.hdr, on)?;
+            f.hdr.enabled = on;
+            Ok(())
+        });
+    }
+    hdr_allowed(hdr(device).ok_or("HDR is not available")?, on)?;
+    let src = source_of(device).ok_or("display not found")?;
+    let mut set = DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE::default();
+    set.header.r#type = DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE;
+    set.header.size = size_of::<DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE>() as u32;
+    set.header.adapterId = src.target_adapter;
+    set.header.id = src.target_id;
+    // Бит 0 — enableAdvancedColor.
+    set.Anonymous.value = u32::from(on);
+    real_write("DisplayConfigSetDeviceInfo");
+    match unsafe { DisplayConfigSetDeviceInfo(&set.header) } {
+        0 => Ok(()),
+        e => Err(format!("DisplayConfigSetDeviceInfo failed: {e}")),
+    }
+}
+
+/// Выдуманная Windows сообщает о HDR монитора такое состояние (нет HDR, не даёт включить…) — для тестов отказов.
+#[cfg(test)]
+pub fn fake_hdr(device: &str, hdr: Hdr) {
+    with_fake(device, |f| f.hdr = hdr);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -442,6 +540,29 @@ mod tests {
         let s = scale_from(0, 0, 2).unwrap();
         assert_eq!((s.recommended, s.current), (100, 100));
         assert_eq!(s.options, vec![100, 125, 150]);
+    }
+
+    #[test]
+    fn hdr_bits() {
+        // Бит 0 — поддерживается, 1 — включён, 2 — широкий цвет навязан, 3 — Windows не даёт включить.
+        let h = |supported, enabled, force_disabled| Hdr { supported, enabled, force_disabled };
+        assert_eq!(hdr_from(0b0000), h(false, false, false), "монитор без HDR");
+        assert_eq!(hdr_from(0b0001), h(true, false, false), "HDR есть, выключен");
+        assert_eq!(hdr_from(0b0011), h(true, true, false), "HDR включён");
+        assert_eq!(hdr_from(0b1001), h(true, false, true), "Windows не даёт включить");
+        assert_eq!(hdr_from(0b0111), h(false, true, false), "навязанный широкий цвет — не переключатель HDR");
+        assert_eq!(hdr_from(0xFFFF_FFF1), h(true, false, false), "лишние биты не мешают");
+    }
+
+    #[test]
+    fn hdr_refusals() {
+        let on = Hdr { supported: true, enabled: true, force_disabled: false };
+        let off = Hdr { enabled: false, ..on };
+        assert_eq!(hdr_allowed(off, true), Ok(()));
+        assert_eq!(hdr_allowed(on, false), Ok(()));
+        assert!(hdr_allowed(Hdr { supported: false, ..off }, true).is_err(), "у монитора нет HDR");
+        assert!(hdr_allowed(Hdr { force_disabled: true, ..off }, true).is_err(), "Windows не даёт включить");
+        assert_eq!(hdr_allowed(Hdr { force_disabled: true, ..on }, false), Ok(()), "выключить можно всегда");
     }
 }
 
@@ -487,6 +608,37 @@ mod fake_tests {
         assert_eq!(scale(d).unwrap().current, 200);
         assert!(set_scale(d, 133).is_err(), "такого масштаба нет");
         assert_eq!(scale(d).unwrap().current, 200);
+    }
+
+    #[test]
+    fn fake_hdr_changes_only_its_monitor() {
+        let (d, other) = (r"\\.\TEST-HDR", r"\\.\TEST-HDR-OTHER");
+        assert_eq!(hdr(d), Some(FAKE_HDR), "у выдуманного монитора HDR есть, он выключен");
+        set_hdr(d, true).unwrap();
+        assert_eq!(hdr(d).map(|h| (h.supported, h.enabled)), Some((true, true)));
+        assert_eq!(hdr(other), Some(FAKE_HDR), "другой монитор не тронут");
+        set_hdr(d, false).unwrap();
+        assert_eq!(hdr(d), Some(FAKE_HDR));
+        // Режим и масштаб от HDR не зависят.
+        assert_eq!((current(d), scale(d).map(|s| s.current)), (Some(FAKE_START), Some(FAKE_SCALE)));
+    }
+
+    #[test]
+    fn fake_hdr_obeys_windows_refusal() {
+        let d = r"\\.\TEST-HDR-FORBIDDEN";
+        let forbidden = Hdr { force_disabled: true, ..FAKE_HDR };
+        fake_hdr(d, forbidden);
+        assert!(set_hdr(d, true).is_err(), "Windows не даёт включить");
+        assert_eq!(hdr(d), Some(forbidden), "неудачная смена ничего не меняет");
+        fake_hdr(d, FAKE_HDR);
+        set_hdr(d, true).unwrap();
+        // Запретили, когда уже включён: выключить можно.
+        fake_hdr(d, Hdr { enabled: true, ..forbidden });
+        set_hdr(d, false).unwrap();
+        assert_eq!(hdr(d).map(|h| h.enabled), Some(false));
+        // Монитор без HDR: переключать нечего.
+        fake_hdr(d, Hdr { supported: false, ..FAKE_HDR });
+        assert!(set_hdr(d, true).is_err() && set_hdr(d, false).is_err());
     }
 
     #[test]

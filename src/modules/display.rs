@@ -1,8 +1,9 @@
-// Экран: разрешение, частота и масштаб. После смены режима — «Оставить?» с обратным отсчётом,
+// Экран: разрешение, частота, масштаб и HDR. После смены режима — «Оставить?» с обратным отсчётом,
 // как в Windows: если картинка пропала, через 15 с всё вернётся само.
 // Избранное — до трёх разрешений на монитор чипами сверху. Частота запоминается для каждого
 // разрешения (то, что сейчас стоит и не ждёт «Оставить»), и при переходе на него ставится она.
-// Профили — режим и масштаб всех мониторов разом: сохраняются из текущего, ставятся щелчком или
+// HDR — кнопка в плашке режима: переключает только этот монитор, без «Оставить?» (тот же щелчок вернёт).
+// Профили — режим, масштаб и HDR всех мониторов разом: сохраняются из текущего, ставятся щелчком или
 // клавишей (из app.rs через `Command`), откат — тот же «Оставить?» для всех изменённых мониторов.
 // Режим до «Оставить» стоит только на время (`display::apply` без записи в реестр) и в реестр попадает после ответа
 // (`display::commit`): не ответили, закрыли программу (`shutdown`), она упала — настоящий режим остаётся прежним.
@@ -21,7 +22,7 @@ use crate::texts::{self, Tr};
 
 const REVERT_AFTER: Duration = Duration::from_secs(15);
 
-/// Что вернуть при откате: прежний режим и (или) масштаб монитора.
+/// Что вернуть при откате: прежний режим, масштаб и (или) HDR монитора.
 struct Change {
     device: String,
     /// Режим до смены — его вернёт откат.
@@ -29,6 +30,8 @@ struct Change {
     /// Режим после смены — его запомнит реестр, когда нажмут «Оставить».
     now: Option<Mode>,
     scale: Option<u32>,
+    /// HDR до смены (его поменял профиль) — его вернёт откат.
+    hdr: Option<bool>,
     /// Был основным этот монитор (сменили основной) — вернуть его.
     primary: Option<String>,
 }
@@ -45,6 +48,8 @@ struct State {
     device: String,
     mode: Mode,
     scale: Option<u32>,
+    /// HDR: `Some(включён)`, если монитор его умеет, иначе `None`.
+    hdr: Option<bool>,
 }
 
 #[derive(Default)]
@@ -58,23 +63,31 @@ pub struct Display {
     current: Option<Mode>,
     modes: Vec<Mode>,
     scale: Option<Scale>,
-    /// Режимы и масштаб всех мониторов на момент последнего чтения.
+    /// HDR показанного монитора; `None` — не прочитать (кнопки нет).
+    hdr: Option<display::Hdr>,
+    /// Режимы, масштаб и HDR всех мониторов на момент последнего чтения.
     states: Vec<State>,
     pending: Option<Pending>,
     /// Показан полный список разрешений, а не избранное.
     all_res: bool,
 }
 
-/// Стоит ли профиль сейчас: у всех его мониторов тот же режим и (если задан) масштаб.
-/// Монитора нет — профиль не стоит.
+/// Стоит ли профиль сейчас: у всех его мониторов тот же режим и (если заданы) масштаб и HDR. HDR сверяется там, где
+/// монитор его умеет: чего поставить нельзя, за тем профиль не гонится. Монитора нет — профиль не стоит.
 fn profile_active(p: &Profile, states: &[State]) -> bool {
     p.monitors.iter().all(|pm| {
         states.iter().any(|s| {
             s.device.eq_ignore_ascii_case(&pm.device)
                 && (s.mode.width, s.mode.height, s.mode.hz) == (pm.width, pm.height, pm.hz)
                 && pm.scale.is_none_or(|sc| s.scale == Some(sc))
+                && pm.hdr.is_none_or(|on| s.hdr.is_none_or(|now| now == on))
         })
     })
+}
+
+/// HDR монитора для профилей: `Some(включён)`, если монитор его умеет.
+fn hdr_state(device: &str) -> Option<bool> {
+    display::hdr(device).filter(|h| h.supported).map(|h| h.enabled)
 }
 
 /// Соотношение сторон для подписи: «16:9», «21:9»; странные — пусто.
@@ -181,7 +194,8 @@ impl Display {
             .filter_map(|m| {
                 let mode = display::current(&m.device)?;
                 let scale = display::scale(&m.device).map(|s| s.current);
-                Some(State { device: m.device, mode, scale })
+                let hdr = hdr_state(&m.device);
+                Some(State { device: m.device, mode, scale, hdr })
             })
             .collect();
     }
@@ -193,8 +207,14 @@ impl Display {
         }
         match display::apply(device, mode) {
             Ok(()) => {
-                let change =
-                    Change { device: device.to_string(), mode: Some(old), now: Some(mode), scale: None, primary: None };
+                let change = Change {
+                    device: device.to_string(),
+                    mode: Some(old),
+                    now: Some(mode),
+                    scale: None,
+                    hdr: None,
+                    primary: None,
+                };
                 self.pending = Some(Pending { changes: vec![change], at: Instant::now() });
                 self.current = Some(mode);
             }
@@ -205,7 +225,18 @@ impl Display {
         }
     }
 
-    /// Профиль из того, что стоит сейчас на всех мониторах.
+    /// «HDR» в плашке: включить или выключить HDR этого монитора и перечитать. Без «Оставить?»: тот же щелчок вернёт
+    /// назад, Windows тоже не спрашивает. Состояние перечитывается и при отказе — Windows могла передумать.
+    fn toggle_hdr(&mut self, device: &str, on: bool, cx: &mut Ctx) {
+        if let Err(e) = display::set_hdr(device, on) {
+            eprintln!("HDR change failed: {e}");
+            cx.toasts.push((format!("{}: {e}", cx.t.failed), Tone::Danger));
+        }
+        self.hdr = display::hdr(device);
+        self.read_states();
+    }
+
+    /// Профиль из того, что стоит сейчас на всех мониторах (HDR — у тех, что его умеют).
     fn snapshot(&mut self, name: String) -> Profile {
         self.read_states();
         let monitors = self
@@ -217,6 +248,7 @@ impl Display {
                 height: s.mode.height,
                 hz: s.mode.hz,
                 scale: s.scale,
+                hdr: s.hdr,
             })
             .collect();
         Profile { name, hotkey: None, monitors }
@@ -233,13 +265,16 @@ impl Display {
         let mut changes = Vec::new();
         let mut missing = 0;
         let mut unavailable = 0;
+        // HDR из профиля, который не поставился (Windows не даёт включить, сбой): профиль уже «не стоит».
+        let mut hdr_refused = false;
         for pm in &profile.monitors {
             let Some(m) = present.iter().find(|m| m.device.eq_ignore_ascii_case(&pm.device)) else {
                 missing += 1;
                 continue;
             };
             let dev = m.device.clone();
-            let mut change = Change { device: dev.clone(), mode: None, now: None, scale: None, primary: None };
+            let mut change =
+                Change { device: dev.clone(), mode: None, now: None, scale: None, hdr: None, primary: None };
             let want = mode_for(&display::modes(&dev), pm.width, pm.height, pm.hz);
             if want.is_none() {
                 unavailable += 1;
@@ -270,7 +305,26 @@ impl Display {
                     }
                 }
             }
-            if change.mode.is_some() || change.scale.is_some() {
+            // HDR — после режима и масштаба. У профилей до 2.0 и у мониторов без HDR его не трогаем.
+            if let Some(want) = pm.hdr
+                && let Some(now) = display::hdr(&dev).filter(|h| h.supported)
+                && want != now.enabled
+            {
+                if want && now.force_disabled {
+                    hdr_refused = true;
+                    cx.toasts.push((t.hdr_blocked.to_string(), Tone::Warning));
+                } else {
+                    match display::set_hdr(&dev, want) {
+                        Ok(()) => change.hdr = Some(now.enabled),
+                        Err(e) => {
+                            hdr_refused = true;
+                            eprintln!("profile HDR change failed on {dev}: {e}");
+                            cx.toasts.push((format!("{}: {e}", t.failed), Tone::Danger));
+                        }
+                    }
+                }
+            }
+            if change.mode.is_some() || change.scale.is_some() || change.hdr.is_some() {
                 changes.push(change);
             }
         }
@@ -281,7 +335,7 @@ impl Display {
             cx.toasts.push((t.mode_unavailable.to_string(), Tone::Warning));
         }
         if changes.is_empty() {
-            if missing == 0 && unavailable == 0 {
+            if missing == 0 && unavailable == 0 && !hdr_refused {
                 cx.toasts.push((t.profile_already.to_string(), Tone::Neutral));
             }
             return;
@@ -296,6 +350,7 @@ impl Display {
         self.current = display::current(&device);
         self.modes = display::modes(&device);
         self.scale = display::scale(&device);
+        self.hdr = display::hdr(&device);
         self.read_states();
     }
 
@@ -316,6 +371,12 @@ impl Display {
     fn revert(&mut self) {
         let Some(pending) = self.pending.take() else { return };
         for c in pending.changes {
+            // HDR ставился последним — возвращается первым; дальше режим и масштаб.
+            if let Some(on) = c.hdr
+                && let Err(e) = display::set_hdr(&c.device, on)
+            {
+                eprintln!("HDR revert failed on {}: {e}", c.device);
+            }
             if let Some(m) = c.mode
                 && let Err(e) = display::apply(&c.device, m)
             {
@@ -345,8 +406,14 @@ impl Display {
         }
         match display::set_primary(device, &self.places()) {
             Ok(()) => {
-                let change =
-                    Change { device: device.to_string(), mode: None, now: None, scale: None, primary: Some(old) };
+                let change = Change {
+                    device: device.to_string(),
+                    mode: None,
+                    now: None,
+                    scale: None,
+                    hdr: None,
+                    primary: Some(old),
+                };
                 self.pending = Some(Pending { changes: vec![change], at: Instant::now() });
                 self.monitors = display::monitors(&self.panel);
                 self.after_change();
@@ -450,6 +517,60 @@ impl Display {
         w::focus_ring(ui, rect, &r, 6);
         r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
     }
+
+    /// Кнопка «HDR Вкл» / «HDR Выкл» справа в плашке режима: высота 30, поля 10, скругление 6; «HDR» полужирным 12,5,
+    /// состояние обычным. Включено — подложка акцента с рамкой акцента; выключено — `card` с рамкой `border_strong`;
+    /// Windows не даёт включить — `faint` и не нажимается (подсказка — причина). Не хватает места слева — без слова
+    /// состояния (оно видно по заливке); не хватает и на это — `None`, кнопки нет. Щелчок — `clicked()` ответа.
+    fn hdr_button(ui: &mut Ui, hdr: display::Hdr, t: &Tr) -> Option<egui::Response> {
+        let p = Palette::of(ui);
+        let usable = !hdr.force_disabled;
+        let (name_color, state_color) = match (hdr.enabled, usable) {
+            (true, _) => (p.accent_text, p.accent_text),
+            (false, true) => (p.text, p.weak),
+            (false, false) => (p.faint, p.faint),
+        };
+        let name = ui.painter().layout_no_wrap(t.hdr.to_string(), anvil_ui::semibold(12.5), name_color);
+        let state_text = if hdr.enabled { t.on } else { t.off };
+        let state = ui.painter().layout_no_wrap(state_text.to_string(), egui::FontId::proportional(12.5), state_color);
+        let (short, full) = (20.0 + name.size().x, 20.0 + name.size().x + 6.0 + state.size().x);
+        let room = ui.available_width();
+        let (width, with_state) = if full <= room {
+            (full, true)
+        } else if short <= room {
+            (short, false)
+        } else {
+            return None;
+        };
+        let sense = if usable { Sense::click() } else { Sense::hover() };
+        let (rect, r) = ui.allocate_exact_size(Vec2::new(width, 30.0), sense);
+        let fill = if hdr.enabled {
+            p.badge_fill(p.accent)
+        } else if usable && r.hovered() {
+            p.hover
+        } else {
+            p.card
+        };
+        let fill =
+            anvil_ui::motion::Motion::of(ui.ctx()).color(ui.ctx(), r.id.with("fill"), fill, anvil_ui::motion::HOVER);
+        let stroke = match (hdr.enabled, usable) {
+            (true, _) => p.accent,
+            (false, true) => p.border_strong,
+            (false, false) => p.border,
+        };
+        ui.painter().rect(rect, 6, fill, Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
+        let at = |x: f32, h: f32| Pos2::new(x, rect.center().y - h / 2.0);
+        let name_at = at(rect.left() + 10.0, name.size().y);
+        let state_at = at(name_at.x + name.size().x + 6.0, state.size().y);
+        ui.painter().galley(name_at, name, name_color);
+        if with_state {
+            ui.painter().galley(state_at, state, state_color);
+        }
+        w::focus_ring(ui, rect, &r, 6);
+        r.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, usable, hdr.enabled, t.hdr));
+        let r = r.on_hover_text(if usable { t.hdr_hint } else { t.hdr_blocked });
+        Some(if usable { r.on_hover_cursor(egui::CursorIcon::PointingHand) } else { r })
+    }
 }
 
 impl Module for Display {
@@ -465,8 +586,14 @@ impl Module for Display {
         1.8
     }
 
+    /// 420, как было. Если у какого-то монитора есть HDR, плашке режима нужно место и под «HDR» — 480, а при выборе
+    /// монитора (мониторов несколько) и под него, но не больше 560: полка «Экран и звук» в 1300 по-прежнему не листается.
     fn min_width(&self) -> f32 {
-        420.0
+        if !self.states.iter().any(|s| s.hdr.is_some()) {
+            return 420.0;
+        }
+        let picker = if self.monitors.len() > 1 { 28.0 * self.monitors.len() as f32 + 12.0 } else { 0.0 };
+        (480.0 + picker).min(560.0)
     }
 
     fn refresh(&mut self, panel: &str) {
@@ -484,6 +611,8 @@ impl Module for Display {
         self.current = display::current(&device);
         self.modes = display::modes(&device);
         self.scale = display::scale(&device);
+        // HDR — вместе с режимом: изменение извне (Win+Alt+B) видно при следующем чтении.
+        self.hdr = display::hdr(&device);
     }
 
     fn busy(&self) -> bool {
@@ -562,6 +691,7 @@ impl Module for Display {
 
         let right_w = 168.0;
         let mut make_primary = false;
+        let mut toggle_hdr = None;
         let left_w = (ui.available_width() - right_w - 16.0).max(170.0);
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 16.0;
@@ -578,6 +708,7 @@ impl Module for Display {
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
                             ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 8.0;
                                 ui.vertical(|ui| {
                                     ui.spacing_mut().item_spacing.y = 0.0;
                                     ui.label(
@@ -598,23 +729,34 @@ impl Module for Display {
                                         make_primary = true;
                                     }
                                 });
-                                if self.monitors.len() > 1 {
+                                // Справа по центру плашки: выбор монитора (крайний) и левее него «HDR» — если монитор
+                                // его умеет.
+                                let hdr = self.hdr.filter(|h| h.supported);
+                                if self.monitors.len() > 1 || hdr.is_some() {
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        let mut picked =
-                                            self.monitors.iter().position(|m| m.device == device).unwrap_or(0);
-                                        let names: Vec<String> =
-                                            (1..=self.monitors.len()).map(|i| i.to_string()).collect();
-                                        let opts: Vec<(usize, Option<anvil_ui::Icon>, &str)> = names
-                                            .iter()
-                                            .enumerate()
-                                            .rev()
-                                            .map(|(i, n)| (i, None, n.as_str()))
-                                            .collect();
-                                        let before = picked;
-                                        w::segmented(ui, &mut picked, &opts).on_hover_text(t.monitor);
-                                        if picked != before {
-                                            self.picked = self.monitors[picked].device.clone();
-                                            self.refresh(cx.monitor);
+                                        ui.spacing_mut().item_spacing.x = 8.0;
+                                        if self.monitors.len() > 1 {
+                                            let mut picked =
+                                                self.monitors.iter().position(|m| m.device == device).unwrap_or(0);
+                                            let names: Vec<String> =
+                                                (1..=self.monitors.len()).map(|i| i.to_string()).collect();
+                                            let opts: Vec<(usize, Option<anvil_ui::Icon>, &str)> = names
+                                                .iter()
+                                                .enumerate()
+                                                .rev()
+                                                .map(|(i, n)| (i, None, n.as_str()))
+                                                .collect();
+                                            let before = picked;
+                                            w::segmented(ui, &mut picked, &opts).on_hover_text(t.monitor);
+                                            if picked != before {
+                                                self.picked = self.monitors[picked].device.clone();
+                                                self.refresh(cx.monitor);
+                                            }
+                                        }
+                                        if let Some(h) = hdr
+                                            && Self::hdr_button(ui, h, t).is_some_and(|r| r.clicked())
+                                        {
+                                            toggle_hdr = Some(!h.enabled);
                                         }
                                     });
                                 }
@@ -707,6 +849,9 @@ impl Module for Display {
         if make_primary {
             self.make_primary(&device, cx);
         }
+        if let Some(on) = toggle_hdr {
+            self.toggle_hdr(&device, on, cx);
+        }
     }
 }
 
@@ -787,11 +932,11 @@ mod profile_tests {
     use super::*;
 
     fn st(device: &str, w: u32, h: u32, hz: u32, scale: Option<u32>) -> State {
-        State { device: device.into(), mode: Mode { width: w, height: h, hz, bits: 32 }, scale }
+        State { device: device.into(), mode: Mode { width: w, height: h, hz, bits: 32 }, scale, hdr: None }
     }
 
     fn pm(device: &str, w: u32, h: u32, hz: u32, scale: Option<u32>) -> ProfileMonitor {
-        ProfileMonitor { device: device.into(), width: w, height: h, hz, scale }
+        ProfileMonitor { device: device.into(), width: w, height: h, hz, scale, hdr: None }
     }
 
     fn p(monitors: Vec<ProfileMonitor>) -> Profile {
@@ -806,6 +951,21 @@ mod profile_tests {
         assert!(!profile_active(&p(vec![pm("A", 2560, 1440, 60, None)]), &states), "другая частота");
         assert!(!profile_active(&p(vec![pm("A", 2560, 1440, 144, Some(125))]), &states), "другой масштаб");
         assert!(!profile_active(&p(vec![pm("C", 800, 600, 60, None)]), &states), "монитора нет");
+    }
+
+    #[test]
+    fn active_profile_needs_the_same_hdr_where_it_is_set() {
+        // A — HDR включён, B — монитор без HDR.
+        let hdr_on = State { hdr: Some(true), ..st("A", 2560, 1440, 144, Some(100)) };
+        let states = [hdr_on, st("B", 1920, 1080, 60, Some(125))];
+        let with = |m: ProfileMonitor, hdr| ProfileMonitor { hdr, ..m };
+        let a = || pm("A", 2560, 1440, 144, Some(100));
+        let b = || pm("B", 1920, 1080, 60, Some(125));
+        assert!(profile_active(&p(vec![a()]), &states), "HDR не записан (профиль до 2.0) — не мешает");
+        assert!(profile_active(&p(vec![with(a(), Some(true))]), &states), "HDR тот же");
+        assert!(!profile_active(&p(vec![with(a(), Some(false))]), &states), "HDR другой");
+        assert!(profile_active(&p(vec![with(a(), Some(true)), b()]), &states));
+        assert!(profile_active(&p(vec![with(b(), Some(true))]), &states), "у монитора нет HDR — гнаться не за чем");
     }
 }
 
@@ -893,7 +1053,8 @@ mod revert_tests {
         let start = display::current(dev).unwrap();
         let start_scale = display::scale(dev).unwrap().current;
         let mut settings = crate::config::Settings::default();
-        let monitor = ProfileMonitor { device: dev.into(), width: 2560, height: 1440, hz: 144, scale: Some(200) };
+        let monitor =
+            ProfileMonitor { device: dev.into(), width: 2560, height: 1440, hz: 144, scale: Some(200), hdr: None };
         settings.profiles.push(Profile { name: "Test".into(), hotkey: None, monitors: vec![monitor] });
         with_cx(dev, &mut settings, |cx| display.command(&Command::ApplyProfile(0), cx));
         assert!(display.busy());
@@ -914,6 +1075,152 @@ mod revert_tests {
         assert_eq!(display::saved(dev), mode(2560, 1440, 144));
         assert_eq!(display::scale(dev).unwrap().current, 200);
         assert_eq!(display.active_profile(&settings.profiles), Some(0), "профиль стоит — его чип выделен");
+    }
+
+    /// Что карточка сказала бы уведомлениями, пока шло `f`.
+    fn toasts_of(
+        device: &str,
+        settings: &mut crate::config::Settings,
+        f: impl FnOnce(&mut Ctx),
+    ) -> Vec<(String, Tone)> {
+        let mut toasts = Vec::new();
+        f(&mut Ctx { t: texts::tr(Lang::En), lang: Lang::En, monitor: device, toasts: &mut toasts, settings });
+        toasts
+    }
+
+    /// Включён ли HDR у выдуманного монитора.
+    fn hdr_is_on(device: &str) -> Option<bool> {
+        display::hdr(device).map(|h| h.enabled)
+    }
+
+    fn profile_of(device: &str, hdr: Option<bool>) -> Profile {
+        let (width, height, hz) = (3840, 2160, 120);
+        let monitor = ProfileMonitor { device: device.into(), width, height, hz, scale: None, hdr };
+        Profile { name: "Movie".into(), hotkey: None, monitors: vec![monitor] }
+    }
+
+    #[test]
+    fn hdr_button_switches_only_this_monitor_and_does_not_ask() {
+        let (dev, other) = (r"\\.\TEST-HDR-CARD", r"\\.\TEST-HDR-CARD-2");
+        let mut display = card(dev);
+        let mut settings = crate::config::Settings::default();
+        assert_eq!(
+            display.hdr.map(|h| (h.supported, h.enabled)),
+            Some((true, false)),
+            "у выдуманного монитора HDR есть"
+        );
+        assert!(toasts_of(dev, &mut settings, |cx| display.toggle_hdr(dev, true, cx)).is_empty());
+        assert_eq!(display.hdr.map(|h| h.enabled), Some(true), "карточка перечитала HDR");
+        assert!(!display.busy(), "HDR меняется без «Оставить?»");
+        assert_eq!(hdr_is_on(other), Some(false), "другой монитор не тронут");
+        // Тот же щелчок возвращает назад.
+        toasts_of(dev, &mut settings, |cx| display.toggle_hdr(dev, false, cx));
+        assert_eq!(hdr_is_on(dev), Some(false));
+        // Изменение извне (Win+Alt+B) карточка видит при следующем чтении, раз в 1,5 с.
+        display::set_hdr(dev, true).unwrap();
+        assert_eq!(display.hdr.map(|h| h.enabled), Some(false));
+        display.refresh(dev);
+        assert_eq!(display.hdr.map(|h| h.enabled), Some(true));
+    }
+
+    #[test]
+    fn hdr_refusal_is_a_danger_toast_and_changes_nothing() {
+        let dev = r"\\.\TEST-HDR-REFUSED";
+        let mut display = card(dev);
+        let mut settings = crate::config::Settings::default();
+        display::fake_hdr(dev, display::Hdr { supported: true, enabled: false, force_disabled: true });
+        display.refresh(dev);
+        assert_eq!(display.hdr.map(|h| h.force_disabled), Some(true), "карточка знает: кнопка недоступна");
+        let toasts = toasts_of(dev, &mut settings, |cx| display.toggle_hdr(dev, true, cx));
+        assert!(matches!(toasts.as_slice(), [(_, Tone::Danger)]), "отказ — уведомление об ошибке");
+        assert_eq!(hdr_is_on(dev), Some(false));
+        assert!(!display.busy());
+    }
+
+    #[test]
+    fn profile_remembers_sets_and_reverts_hdr() {
+        let dev = r"\\.\TEST-HDR-PROFILE";
+        let mut display = card(dev);
+        let mut settings = crate::config::Settings::default();
+        // «+» при включённом HDR: профиль помнит его, и он стоит.
+        display::set_hdr(dev, true).unwrap();
+        toasts_of(dev, &mut settings, |cx| display.command(&Command::SaveProfile("Movie".into()), cx));
+        assert_eq!(settings.profiles[0].monitors[0].hdr, Some(true));
+        assert_eq!(display.active_profile(&settings.profiles), Some(0));
+        // HDR выключили: профиль не стоит; щелчок по нему включает HDR (режим и масштаб те же) и спрашивает «Оставить?».
+        display::set_hdr(dev, false).unwrap();
+        display.refresh(dev);
+        assert_eq!(display.active_profile(&settings.profiles), None, "HDR другой — чип не выделен");
+        let toasts = toasts_of(dev, &mut settings, |cx| display.command(&Command::ApplyProfile(0), cx));
+        assert!(toasts.is_empty() && display.busy(), "{toasts:?}");
+        assert_eq!(hdr_is_on(dev), Some(true));
+        // «Вернуть» возвращает и HDR.
+        display.revert();
+        assert_eq!(hdr_is_on(dev), Some(false));
+        // «Оставить» оставляет: HDR стоит, профиль стоит.
+        toasts_of(dev, &mut settings, |cx| display.command(&Command::ApplyProfile(0), cx));
+        display.keep();
+        assert_eq!((hdr_is_on(dev), display.active_profile(&settings.profiles)), (Some(true), Some(0)));
+        // Профиль уже стоит целиком — «Этот профиль уже стоит».
+        let again = toasts_of(dev, &mut settings, |cx| display.command(&Command::ApplyProfile(0), cx));
+        assert!(matches!(again.as_slice(), [(_, Tone::Neutral)]) && !display.busy());
+        // Закрыли программу, не ответив, — HDR вернулся вместе с остальным.
+        display::set_hdr(dev, false).unwrap();
+        toasts_of(dev, &mut settings, |cx| display.command(&Command::ApplyProfile(0), cx));
+        assert_eq!(hdr_is_on(dev), Some(true));
+        display.shutdown();
+        assert_eq!(hdr_is_on(dev), Some(false));
+    }
+
+    #[test]
+    fn profile_without_hdr_leaves_it_alone_and_sdr_turns_it_off() {
+        let dev = r"\\.\TEST-HDR-OLD";
+        let mut display = card(dev);
+        let mut settings = crate::config::Settings::default();
+        display::set_hdr(dev, true).unwrap();
+        // Профиль до 2.0: другой режим, HDR не записан — HDR не трогается ни при применении, ни при откате.
+        let mut old = profile_of(dev, None);
+        old.monitors[0].hz = 60;
+        settings.profiles.push(old);
+        toasts_of(dev, &mut settings, |cx| display.command(&Command::ApplyProfile(0), cx));
+        assert!(display.busy());
+        assert_eq!(hdr_is_on(dev), Some(true));
+        display.revert();
+        assert_eq!(hdr_is_on(dev), Some(true));
+        // `sdr` выключает HDR.
+        settings.profiles.clear();
+        settings.profiles.push(profile_of(dev, Some(false)));
+        toasts_of(dev, &mut settings, |cx| display.command(&Command::ApplyProfile(0), cx));
+        assert_eq!(hdr_is_on(dev), Some(false));
+        display.revert();
+        assert_eq!(hdr_is_on(dev), Some(true), "и откат включает его обратно");
+    }
+
+    #[test]
+    fn profile_hdr_that_windows_forbids_or_the_monitor_lacks_is_skipped() {
+        let (dev, no_hdr) = (r"\\.\TEST-HDR-FORBIDS", r"\\.\TEST-HDR-NONE");
+        let mut settings = crate::config::Settings::default();
+        // Windows не даёт включить: предупреждение с причиной, HDR не тронут, «уже стоит» не говорим.
+        let mut display = card(dev);
+        display::fake_hdr(dev, display::Hdr { supported: true, enabled: false, force_disabled: true });
+        settings.profiles.push(profile_of(dev, Some(true)));
+        let toasts = toasts_of(dev, &mut settings, |cx| display.command(&Command::ApplyProfile(0), cx));
+        assert_eq!(toasts.len(), 1, "{toasts:?}");
+        assert_eq!((toasts[0].0.as_str(), &toasts[0].1), (texts::tr(Lang::En).hdr_blocked, &Tone::Warning));
+        assert!(!display.busy());
+        assert_eq!(hdr_is_on(dev), Some(false));
+        // У монитора нет HDR: профиль ничего не меняет, а чип выделен — гнаться не за чем.
+        let mut display = card(no_hdr);
+        display::fake_hdr(no_hdr, display::Hdr { supported: false, enabled: false, force_disabled: false });
+        display.refresh(no_hdr);
+        settings.profiles.clear();
+        settings.profiles.push(profile_of(no_hdr, Some(true)));
+        assert_eq!(display.active_profile(&settings.profiles), Some(0));
+        let toasts = toasts_of(no_hdr, &mut settings, |cx| display.command(&Command::ApplyProfile(0), cx));
+        assert!(matches!(toasts.as_slice(), [(_, Tone::Neutral)]) && !display.busy());
+        // «+» у такого монитора HDR не пишет.
+        toasts_of(no_hdr, &mut settings, |cx| display.command(&Command::SaveProfile("Plain".into()), cx));
+        assert_eq!(settings.profiles.last().map(|p| p.monitors[0].hdr), Some(None));
     }
 
     #[test]
