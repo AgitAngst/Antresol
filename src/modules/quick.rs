@@ -2,6 +2,8 @@
 // «Не спать», «Тёмная тема», «Тишина», «Wi‑Fi», — план питания и VPN Windows. Плитка — состояние, прочитанное
 // при показе панели, и щелчок — поменять. Не узнали состояние — плитка «Недоступно» и не нажимается. Wi‑Fi и VPN
 // отвечают медленно — их читает и меняет поток модуля. Ночной свет — выключателем в карточке «Яркость».
+// Сцены ставят отсюда «Тишину», «Не спать», тёмную тему, Wi‑Fi и план питания: перед сменой модуль помнит, что было
+// (`before`), и второй щелчок по стоящей сцене возвращает это; Wi‑Fi помнит и возвращает поток модуля.
 
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -10,7 +12,8 @@ use anvil_ui::widgets::{self as w, Kind};
 use anvil_ui::{Icon, Palette, Tone};
 use eframe::egui::{self, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 
-use super::{Ctx, Module, chips};
+use super::{Command, Ctx, Module, chips};
+use crate::config::{Profile, SceneRow};
 use crate::sys::net::{self, Vpn, Wifi};
 use crate::sys::system;
 use crate::texts::Tr;
@@ -19,6 +22,13 @@ enum Job {
     Read,
     Wifi(bool),
     Vpn(String, bool),
+    /// Сцена: поставить Wi‑Fi, запомнив прежнее; `keep` — прежнее уже помним с первого раза этой же сцены.
+    SceneWifi {
+        on: bool,
+        keep: bool,
+    },
+    /// Вернуть Wi‑Fi, как был до сцены.
+    SceneWifiUndo,
 }
 
 #[derive(Default)]
@@ -28,6 +38,29 @@ struct Shared {
     vpns: Vec<Vpn>,
     /// Ошибка последнего действия — показать уведомлением.
     error: Option<String>,
+    /// Был ли включён Wi‑Fi до сцены: запоминает поток, когда ставит его по сцене.
+    wifi_before: Option<bool>,
+}
+
+/// Как было до сцены: что стояло в тех настройках, которые она поменяла (`None` — не меняла).
+struct SceneBefore {
+    scene: String,
+    awake: Option<bool>,
+    dark: Option<bool>,
+    quiet: Option<bool>,
+    plan: Option<windows::core::GUID>,
+    /// Wi‑Fi сцена трогала: прежнее лежит у потока (`Shared::wifi_before`).
+    wifi: bool,
+}
+
+impl SceneBefore {
+    fn new(scene: &str) -> SceneBefore {
+        SceneBefore { scene: scene.to_string(), awake: None, dark: None, quiet: None, plan: None, wifi: false }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.awake.is_none() && self.dark.is_none() && self.quiet.is_none() && self.plan.is_none() && !self.wifi
+    }
 }
 
 pub struct Quick {
@@ -37,6 +70,8 @@ pub struct Quick {
     quiet: Option<bool>,
     plans: Vec<system::Plan>,
     plan: Option<windows::core::GUID>,
+    /// Как было до сцены, что стоит сейчас, — на второй щелчок по ней.
+    before: Option<SceneBefore>,
     jobs: Sender<Job>,
     shared: Arc<Mutex<Shared>>,
 }
@@ -47,7 +82,7 @@ impl Default for Quick {
         let shared = Arc::new(Mutex::new(Shared::default()));
         let s = shared.clone();
         std::thread::spawn(move || worker(rx, s));
-        Quick { awake: false, dark: None, quiet: None, plans: Vec::new(), plan: None, jobs: tx, shared }
+        Quick { awake: false, dark: None, quiet: None, plans: Vec::new(), plan: None, before: None, jobs: tx, shared }
     }
 }
 
@@ -64,6 +99,26 @@ fn worker(rx: Receiver<Job>, shared: Arc<Mutex<Shared>>) {
                 Job::Read => Ok(()),
                 Job::Wifi(on) => net::set_wifi(on),
                 Job::Vpn(name, on) => net::set_vpn(&name, on),
+                Job::SceneWifi { on, keep } => match net::wifi() {
+                    Some(now) => {
+                        {
+                            let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
+                            if !(keep && s.wifi_before.is_some()) {
+                                s.wifi_before = Some(now.on);
+                            }
+                        }
+                        if now.on != on { net::set_wifi(on) } else { Ok(()) }
+                    }
+                    // Радио Wi‑Fi нет — сцене нечего ставить.
+                    None => Ok(()),
+                },
+                Job::SceneWifiUndo => {
+                    let before = shared.lock().unwrap_or_else(|e| e.into_inner()).wifi_before.take();
+                    match (before, net::wifi()) {
+                        (Some(want), Some(now)) if now.on != want => net::set_wifi(want),
+                        _ => Ok(()),
+                    }
+                }
             };
             if let Err(e) = r {
                 eprintln!("quick settings failed: {e}");
@@ -147,6 +202,68 @@ impl Module for Quick {
         let _ = self.jobs.send(Job::Read);
     }
 
+    fn command(&mut self, cmd: &Command, cx: &mut Ctx) {
+        match cmd {
+            Command::ApplyScene(i) => {
+                if let Some(scene) = cx.settings.profiles.get(*i).cloned() {
+                    self.apply_scene(&scene, cx);
+                }
+            }
+            Command::UndoScene(i) => {
+                if let Some(scene) = cx.settings.profiles.get(*i).cloned() {
+                    self.undo_scene(&scene, cx);
+                }
+            }
+            Command::SaveScene(i, rows) => {
+                if let Some(scene) = cx.settings.profiles.get_mut(*i) {
+                    self.save_scene(scene, rows);
+                }
+            }
+            Command::Dropped(_) | Command::Media(_) => {}
+        }
+    }
+
+    /// Совпадает ли то, что сцена отметила здесь, с тем, что стоит: «Не спать» — своё состояние, остальное — прочитанное при
+    /// показе панели; не прочиталось — не мешает. Ничего не отмечено или не прочитать — `None`.
+    fn scene_part(&self, scene: &Profile) -> Option<bool> {
+        let s = &scene.system;
+        let mut same: Vec<bool> = Vec::new();
+        if let Some(want) = s.awake {
+            same.push(self.awake == want);
+        }
+        if let (Some(want), Some(now)) = (s.dark, self.dark) {
+            same.push(want == now);
+        }
+        if let (Some(want), Some(now)) = (s.quiet, self.quiet) {
+            same.push(want == now);
+        }
+        if let (Some(want), Some(now)) = (&s.plan, self.plan) {
+            same.push(*want == system::guid_string(&now));
+        }
+        if let Some(want) = s.wifi
+            && let Some(Some(now)) = self.shared.lock().unwrap_or_else(|e| e.into_inner()).wifi.clone()
+        {
+            same.push(now.on == want);
+        }
+        (!same.is_empty()).then(|| same.into_iter().all(|ok| ok))
+    }
+
+    fn scene_can_undo(&self, scene: &Profile) -> bool {
+        self.before.as_ref().is_some_and(|b| b.scene == scene.name)
+    }
+
+    /// Строки быстрых настроек: «Не спать» всегда можно; остальное — если прочиталось (Wi‑Fi — есть радио).
+    fn scene_rows(&self) -> Vec<(SceneRow, bool)> {
+        let wifi = self.shared.lock().unwrap_or_else(|e| e.into_inner()).wifi.clone().flatten().is_some();
+        vec![
+            (SceneRow::Quiet, self.quiet.is_some()),
+            (SceneRow::Awake, true),
+            (SceneRow::Dark, self.dark.is_some()),
+            (SceneRow::Wifi, wifi),
+            (SceneRow::Plan, !self.plans.is_empty()),
+        ]
+    }
+
     fn ui(&mut self, ui: &mut Ui, cx: &mut Ctx) {
         let t = cx.t;
         let (wifi, vpns, error) = {
@@ -223,7 +340,136 @@ impl Module for Quick {
     }
 }
 
+/// Сбой части сцены: в журнал по-английски, пользователю — «Не получилось: …».
+fn scene_failed(cx: &mut Ctx, what: &str, e: String) {
+    eprintln!("scene {what} failed: {e}");
+    cx.toasts.push((format!("{}: {e}", cx.t.failed), Tone::Danger));
+}
+
 impl Quick {
+    /// Поставить то, что сцена отметила у быстрых настроек. Перед сменой — запомнить, что было. Возврат прежней сцены
+    /// пропадает; та же сцена ещё раз продолжает прежний «сеанс»: что уже помним, то и остаётся.
+    fn apply_scene(&mut self, scene: &Profile, cx: &mut Ctx) {
+        let s = &scene.system;
+        let mut before = match self.before.take() {
+            Some(b) if b.scene == scene.name => b,
+            _ => SceneBefore::new(&scene.name),
+        };
+        if let Some(want) = s.dark
+            && let Some(now) = system::dark_theme()
+        {
+            before.dark = before.dark.or(Some(now));
+            if now != want {
+                match system::set_dark_theme(want) {
+                    Ok(()) => self.dark = Some(want),
+                    Err(e) => scene_failed(cx, "dark theme", e),
+                }
+            }
+        }
+        if let Some(want) = s.quiet
+            && let Some(now) = system::notifications_off()
+        {
+            before.quiet = before.quiet.or(Some(now));
+            if now != want {
+                match system::set_notifications_off(want) {
+                    Ok(()) => self.quiet = Some(want),
+                    Err(e) => scene_failed(cx, "quiet", e),
+                }
+            }
+        }
+        if let Some(want) = s.awake {
+            before.awake = before.awake.or(Some(self.awake));
+            if want != self.awake {
+                if system::keep_awake(want) {
+                    self.awake = want;
+                } else {
+                    scene_failed(cx, "keep awake", "SetThreadExecutionState failed".to_string());
+                }
+            }
+        }
+        if let Some(want) = s.plan.as_deref().and_then(system::guid_from) {
+            let (plans, active) = system::plans();
+            if plans.iter().any(|p| p.guid == want) {
+                before.plan = before.plan.or(active);
+                if active != Some(want) {
+                    match system::set_plan(&want) {
+                        Ok(()) => self.plan = Some(want),
+                        Err(e) => scene_failed(cx, "power plan", e),
+                    }
+                }
+            } else {
+                cx.toasts.push((cx.t.scene_plan_missing.to_string(), Tone::Warning));
+            }
+        }
+        if let Some(want) = s.wifi {
+            let _ = self.jobs.send(Job::SceneWifi { on: want, keep: before.wifi });
+            before.wifi = true;
+        }
+        self.before = (!before.is_empty()).then_some(before);
+    }
+
+    /// Вернуть то, что сцена поменяла, как было до неё. Одноразово.
+    fn undo_scene(&mut self, scene: &Profile, cx: &mut Ctx) {
+        if !self.scene_can_undo(scene) {
+            return;
+        }
+        let Some(before) = self.before.take() else { return };
+        if let Some(dark) = before.dark
+            && system::dark_theme().is_some_and(|now| now != dark)
+        {
+            match system::set_dark_theme(dark) {
+                Ok(()) => self.dark = Some(dark),
+                Err(e) => scene_failed(cx, "dark theme", e),
+            }
+        }
+        if let Some(quiet) = before.quiet
+            && system::notifications_off().is_some_and(|now| now != quiet)
+        {
+            match system::set_notifications_off(quiet) {
+                Ok(()) => self.quiet = Some(quiet),
+                Err(e) => scene_failed(cx, "quiet", e),
+            }
+        }
+        if let Some(awake) = before.awake
+            && awake != self.awake
+        {
+            if system::keep_awake(awake) {
+                self.awake = awake;
+            } else {
+                scene_failed(cx, "keep awake", "SetThreadExecutionState failed".to_string());
+            }
+        }
+        if let Some(plan) = before.plan
+            && system::plans().1 != Some(plan)
+        {
+            match system::set_plan(&plan) {
+                Ok(()) => self.plan = Some(plan),
+                Err(e) => scene_failed(cx, "power plan", e),
+            }
+        }
+        if before.wifi {
+            let _ = self.jobs.send(Job::SceneWifiUndo);
+        }
+    }
+
+    /// Взять текущие значения этих строк в сцену: что можно прочитать прямо сейчас; что не прочиталось — как было.
+    fn save_scene(&mut self, scene: &mut Profile, rows: &[SceneRow]) {
+        let s = &mut scene.system;
+        for row in rows {
+            match row {
+                SceneRow::Quiet => s.quiet = system::notifications_off().or(s.quiet),
+                SceneRow::Awake => s.awake = Some(self.awake),
+                SceneRow::Dark => s.dark = system::dark_theme().or(s.dark),
+                SceneRow::Plan => s.plan = system::plans().1.map(|g| system::guid_string(&g)).or(s.plan.take()),
+                SceneRow::Wifi => {
+                    let now = self.shared.lock().unwrap_or_else(|e| e.into_inner()).wifi.clone().flatten();
+                    s.wifi = now.map(|w| w.on).or(s.wifi);
+                }
+                SceneRow::Screen | SceneRow::Bright | SceneRow::Night => {}
+            }
+        }
+    }
+
     /// Щелчок по плитке с номером `i` (порядок — как в `ui`).
     fn toggle(&mut self, i: usize, wifi: Option<&Wifi>, cx: &mut Ctx) {
         let t = cx.t;
@@ -249,5 +495,223 @@ impl Quick {
             eprintln!("quick settings failed: {e}");
             cx.toasts.push((format!("{}: {e}", t.failed), Tone::Danger));
         }
+    }
+}
+
+// ─── Сцены без окна ─────────────────────────────────────────────────────────
+//
+// Выдуманная система (`sys::fake_reads`): тема, уведомления, план питания и Wi‑Fi помнят, что в них записали. Мир один на
+// все тесты — каждый берёт `WORLD_TEST` и начинает с исходного.
+
+#[cfg(test)]
+mod tests {
+    use std::sync::MutexGuard;
+    use std::time::{Duration, Instant};
+
+    use anvil_ui::Lang;
+    use windows::core::GUID;
+
+    use super::*;
+    use crate::config::{SceneSystem, Settings};
+    use crate::{sys, texts};
+
+    /// Мир под замком, как вначале.
+    fn world() -> MutexGuard<'static, ()> {
+        let guard = sys::WORLD_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        sys::reset_fake_world();
+        guard
+    }
+
+    fn scene(name: &str, system: SceneSystem) -> Profile {
+        Profile { system, ..Profile::new(name) }
+    }
+
+    /// Планы выдуманного мира: «Balanced» (1) стоит вначале, «High performance» (2), «Power saver» (3).
+    fn plan(n: u128) -> String {
+        system::guid_string(&GUID::from_u128(n))
+    }
+
+    /// Команда модулю; ответ — что он сказал уведомлениями.
+    fn run(q: &mut Quick, settings: &mut Settings, cmd: Command) -> Vec<(String, Tone)> {
+        let mut toasts = Vec::new();
+        let mut cx =
+            Ctx { t: texts::tr(Lang::En), lang: Lang::En, monitor: r"\\.\TEST-QUICK", toasts: &mut toasts, settings };
+        q.command(&cmd, &mut cx);
+        toasts
+    }
+
+    /// Ждёт, пока поток модуля сделает своё (Wi‑Fi идёт через него): условие или 3 секунды.
+    fn wait(what: &str, mut ok: impl FnMut() -> bool) {
+        let start = Instant::now();
+        while !ok() {
+            assert!(start.elapsed() < Duration::from_secs(3), "не дождались: {what}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn scene_sets_what_it_checks_and_the_second_click_returns_it() {
+        let _world = world();
+        let mut q = Quick::default();
+        q.refresh("");
+        let mut settings = Settings::default();
+        let checked = SceneSystem {
+            dark: Some(false),
+            quiet: Some(true),
+            awake: Some(true),
+            plan: Some(plan(2)),
+            ..Default::default()
+        };
+        settings.profiles.push(scene("Movie", checked));
+        let movie = settings.profiles[0].clone();
+        // Вначале: тема тёмная, уведомления включены, план «Balanced», «Не спать» выключено.
+        assert_eq!(q.scene_part(&movie), Some(false));
+        assert!(!q.scene_can_undo(&movie));
+        let toasts = run(&mut q, &mut settings, Command::ApplyScene(0));
+        assert!(toasts.is_empty(), "{toasts:?}");
+        assert_eq!((system::dark_theme(), system::notifications_off()), (Some(false), Some(true)));
+        assert_eq!(system::plans().1, Some(GUID::from_u128(2)));
+        assert!(q.awake);
+        assert_eq!(q.scene_part(&movie), Some(true), "сцена стоит");
+        assert!(q.scene_can_undo(&movie));
+        // Не отмеченное не тронуто: Wi‑Fi как был.
+        assert_eq!(net::wifi().map(|w| w.on), Some(true));
+        // Второй щелчок: всё как было.
+        let toasts = run(&mut q, &mut settings, Command::UndoScene(0));
+        assert!(toasts.is_empty(), "{toasts:?}");
+        assert_eq!((system::dark_theme(), system::notifications_off()), (Some(true), Some(false)));
+        assert_eq!(system::plans().1, Some(GUID::from_u128(1)));
+        assert!(!q.awake);
+        assert_eq!(q.scene_part(&movie), Some(false));
+        // Возврат одноразовый: поменяли руками — второй «возврат» этого не трогает.
+        assert!(!q.scene_can_undo(&movie));
+        system::set_notifications_off(true).unwrap();
+        run(&mut q, &mut settings, Command::UndoScene(0));
+        assert_eq!(system::notifications_off(), Some(true));
+    }
+
+    #[test]
+    fn wifi_goes_through_the_worker_and_comes_back() {
+        let _world = world();
+        let mut q = Quick::default();
+        let mut settings = Settings::default();
+        settings.profiles.push(scene("Plane", SceneSystem { wifi: Some(false), ..Default::default() }));
+        let plane = settings.profiles[0].clone();
+        q.refresh("");
+        wait("Wi‑Fi прочитан", || q.scene_part(&plane).is_some());
+        assert_eq!(q.scene_part(&plane), Some(false), "Wi‑Fi включён — сцена не стоит");
+        run(&mut q, &mut settings, Command::ApplyScene(0));
+        wait("Wi‑Fi выключен", || net::wifi().is_some_and(|w| !w.on));
+        wait("карточка это видит", || q.scene_part(&plane) == Some(true));
+        assert!(q.scene_can_undo(&plane));
+        run(&mut q, &mut settings, Command::UndoScene(0));
+        wait("Wi‑Fi вернулся", || net::wifi().is_some_and(|w| w.on));
+        wait("карточка это видит", || q.scene_part(&plane) == Some(false));
+        // Включённый до сцены Wi‑Fi сцена «выключить» ставит и возвращает; уже выключенный — оставляет выключенным.
+        net::set_wifi(false).unwrap();
+        run(&mut q, &mut settings, Command::ApplyScene(0));
+        run(&mut q, &mut settings, Command::UndoScene(0));
+        q.refresh("");
+        wait("прежнее состояние: выключен", || net::wifi().is_some_and(|w| !w.on));
+        assert_eq!(net::wifi().map(|w| w.on), Some(false), "выключенный и остался");
+    }
+
+    #[test]
+    fn another_scene_replaces_the_return() {
+        let _world = world();
+        let mut q = Quick::default();
+        q.refresh("");
+        let mut settings = Settings::default();
+        settings.profiles.push(scene("A", SceneSystem { quiet: Some(true), ..Default::default() }));
+        settings.profiles.push(scene("B", SceneSystem { quiet: Some(true), dark: Some(false), ..Default::default() }));
+        let (a, b) = (settings.profiles[0].clone(), settings.profiles[1].clone());
+        run(&mut q, &mut settings, Command::ApplyScene(0));
+        assert!(q.scene_can_undo(&a));
+        // Другая сцена: возврат прежней пропадает.
+        run(&mut q, &mut settings, Command::ApplyScene(1));
+        assert!(!q.scene_can_undo(&a) && q.scene_can_undo(&b));
+        run(&mut q, &mut settings, Command::UndoScene(0));
+        assert_eq!(system::notifications_off(), Some(true), "чужой возврат ничего не меняет");
+        assert_eq!(system::dark_theme(), Some(false));
+        // «Б» возвращает то, что было до неё: «Тишина» уже была включена «А», тема была тёмной.
+        run(&mut q, &mut settings, Command::UndoScene(1));
+        assert_eq!((system::notifications_off(), system::dark_theme()), (Some(true), Some(true)));
+    }
+
+    #[test]
+    fn the_same_scene_again_returns_to_what_was_before_the_first_time() {
+        let _world = world();
+        let mut q = Quick::default();
+        q.refresh("");
+        let mut settings = Settings::default();
+        settings.profiles.push(scene("C", SceneSystem { quiet: Some(true), dark: Some(false), ..Default::default() }));
+        // До сцены: «Тишина» выключена, тема тёмная.
+        run(&mut q, &mut settings, Command::ApplyScene(0));
+        assert_eq!((system::notifications_off(), system::dark_theme()), (Some(true), Some(false)));
+        // Тема ушла от сцены сама, и сцену ставят снова: «Тишина» к этому моменту уже включена сценой.
+        system::set_dark_theme(true).unwrap();
+        q.refresh("");
+        assert_eq!(q.scene_part(&settings.profiles[0]), Some(false), "сцена не стоит");
+        run(&mut q, &mut settings, Command::ApplyScene(0));
+        assert_eq!(q.scene_part(&settings.profiles[0]), Some(true));
+        // Возврат — к тому, что было до сцены, а не до её второго раза: «Тишина» снова выключена.
+        run(&mut q, &mut settings, Command::UndoScene(0));
+        assert_eq!((system::notifications_off(), system::dark_theme()), (Some(false), Some(true)));
+    }
+
+    #[test]
+    fn a_plan_that_is_gone_is_skipped_with_a_warning() {
+        let _world = world();
+        let mut q = Quick::default();
+        q.refresh("");
+        let mut settings = Settings::default();
+        settings.profiles.push(scene("P", SceneSystem { plan: Some(plan(0xFF)), ..Default::default() }));
+        let toasts = run(&mut q, &mut settings, Command::ApplyScene(0));
+        assert_eq!(toasts, vec![(texts::tr(Lang::En).scene_plan_missing.to_string(), Tone::Warning)]);
+        assert_eq!(system::plans().1, Some(GUID::from_u128(1)), "план не тронут");
+        assert!(!q.scene_can_undo(&settings.profiles[0]), "менять было нечего — вернуть тоже");
+    }
+
+    #[test]
+    fn save_scene_takes_the_asked_rows_from_what_stands_now() {
+        let _world = world();
+        let mut q = Quick::default();
+        let mut settings = Settings::default();
+        settings.profiles.push(Profile::new("N"));
+        settings.profiles.push(Profile::new("M"));
+        system::set_dark_theme(false).unwrap();
+        system::set_notifications_off(true).unwrap();
+        system::set_plan(&GUID::from_u128(3)).unwrap();
+        q.refresh("");
+        wait("строка Wi‑Fi стала доступна", || q.scene_rows().contains(&(SceneRow::Wifi, true)));
+        let all = vec![SceneRow::Quiet, SceneRow::Awake, SceneRow::Dark, SceneRow::Wifi, SceneRow::Plan];
+        run(&mut q, &mut settings, Command::SaveScene(0, all));
+        let s = &settings.profiles[0].system;
+        assert_eq!((s.quiet, s.awake, s.dark, s.wifi), (Some(true), Some(false), Some(false), Some(true)));
+        assert_eq!(s.plan, Some(plan(3)));
+        assert!(s.night.is_none() && s.bright.is_none(), "чужие строки — не здесь");
+        // Только то, что просили; экран и яркость — не дело быстрых настроек.
+        run(&mut q, &mut settings, Command::SaveScene(1, vec![SceneRow::Dark, SceneRow::Screen, SceneRow::Bright]));
+        let m = &settings.profiles[1].system;
+        assert_eq!((m.dark, m.quiet, m.awake, m.wifi, m.plan.clone()), (Some(false), None, None, None, None));
+    }
+
+    #[test]
+    fn rows_and_parts_of_this_card() {
+        let _world = world();
+        let mut q = Quick::default();
+        // До первого чтения: «Не спать» можно всегда, остальное — когда прочиталось.
+        let rows = q.scene_rows();
+        assert!(rows.contains(&(SceneRow::Awake, true)) && rows.contains(&(SceneRow::Quiet, false)));
+        q.refresh("");
+        let rows = q.scene_rows();
+        for row in [SceneRow::Quiet, SceneRow::Awake, SceneRow::Dark, SceneRow::Plan] {
+            assert!(rows.contains(&(row, true)), "{row:?}");
+        }
+        assert!(!rows.iter().any(|(r, _)| matches!(r, SceneRow::Screen | SceneRow::Bright | SceneRow::Night)));
+        // В сцене нет частей этой карточки — ей нечего проверять.
+        let screen_only = Profile::new("S");
+        assert_eq!(q.scene_part(&screen_only), None);
+        assert!(!q.scene_can_undo(&screen_only));
     }
 }

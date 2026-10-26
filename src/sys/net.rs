@@ -1,8 +1,12 @@
 // Сеть: Wi‑Fi (радио Windows.Devices.Radios, имя сети — Windows.Networking.Connectivity) и VPN
 // Windows (RAS: подключения «Параметры → Сеть → VPN»; вкл/выкл — `rasdial` с сохранёнными данными).
 // WinRT отвечает асинхронно — звать из потока модуля (после `media::init_thread`), не из окна.
+//
+// В демо и в тестах (`sys::fake_reads`) Wi‑Fi выдуманный: включён, сеть «Demo-Net», помнит, что в него записали (писатель
+// за заслоном); VPN — одно подключение «Demo Office».
 
 use std::os::windows::process::CommandExt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use windows::Devices::Radios::{Radio, RadioAccessStatus, RadioKind, RadioState};
@@ -30,6 +34,15 @@ macro_rules! wait {
             }
         }
     }};
+}
+
+/// Выдуманный Wi‑Fi: включено ли радио. Читается и пишется из потока модуля — отсюда `AtomicBool`.
+static FAKE_WIFI: AtomicBool = AtomicBool::new(true);
+
+/// Выдуманный Wi‑Fi включён, как вначале (для тестов).
+#[cfg(test)]
+pub fn fake_reset() {
+    FAKE_WIFI.store(true, Ordering::Relaxed);
 }
 
 /// Wi‑Fi: включено ли радио и к какой сети подключены (пусто — ни к какой).
@@ -63,8 +76,9 @@ fn wifi_network() -> String {
 
 /// Wi‑Fi сейчас; радио Wi‑Fi нет или Windows не ответила — `None`.
 pub fn wifi() -> Option<Wifi> {
-    if super::demo() {
-        return Some(Wifi { on: true, network: "Demo-Net".into() });
+    if super::fake_reads() {
+        let on = FAKE_WIFI.load(Ordering::Relaxed);
+        return Some(Wifi { on, network: if on { "Demo-Net".into() } else { String::new() } });
     }
     let r = wifi_radio().ok()??;
     let on = r.State().ok()? == RadioState::On;
@@ -73,6 +87,7 @@ pub fn wifi() -> Option<Wifi> {
 
 pub fn set_wifi(on: bool) -> std::result::Result<(), String> {
     if super::blocked(&format!("set_wifi {on}")) {
+        FAKE_WIFI.store(on, Ordering::Relaxed);
         return Ok(());
     }
     super::real_write("Radio::SetStateAsync");
@@ -105,7 +120,7 @@ fn utf16(s: &[u16]) -> String {
 
 /// Подключения из телефонной книги пользователя и какие из них сейчас подключены.
 pub fn vpns() -> Vec<Vpn> {
-    if super::demo() {
+    if super::fake_reads() {
         return vec![Vpn { name: "Demo Office".into(), connected: false }];
     }
     // Буфер мал (603) — Windows называет нужный размер: второй заход с ним.
@@ -195,6 +210,8 @@ mod tests {
     #[test]
     #[ignore]
     fn reads_live_state() {
+        // Живое чтение: тема, уведомления, план питания, Wi‑Fi и VPN — настоящие, а не выдуманные.
+        crate::sys::LIVE_READS.store(true, Ordering::Relaxed);
         crate::sys::media::init_thread();
         let w = wifi();
         let v = vpns();

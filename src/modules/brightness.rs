@@ -2,6 +2,8 @@
 // все запросы — в своём потоке: окно шлёт ему «перечитай» и «поставь», а читает готовое из общего
 // списка. Ползунок под рукой показывает своё значение, пока монитор не подтвердит новое.
 // Внизу карточки — «Ночной свет» выключателем: он от монитора не зависит и работает, даже если DDC/CI молчит.
+// Сцены ставят отсюда яркость всех мониторов, что отвечают по DDC/CI, и «Ночной свет»: перед сменой модуль помнит, что
+// было (`before`), и второй щелчок по стоящей сцене возвращает это; прежнюю яркость помнит и возвращает поток модуля.
 
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -12,8 +14,9 @@ use anvil_ui::widgets::{self as w, Kind};
 use anvil_ui::{Icon, Palette, Tone};
 use eframe::egui::{self, Pos2, Rect, Sense, Stroke, Ui, UiBuilder, Vec2};
 
-use super::{Ctx, Module, chips};
-use crate::sys::ddc::{self, BRIGHTNESS, CONTRAST, INPUT, Physical};
+use super::{Command, Ctx, Module, chips};
+use crate::config::{Profile, SceneRow};
+use crate::sys::ddc::{self, BRIGHTNESS, CONTRAST, Feature, INPUT, Physical};
 use crate::sys::{self, display, monitor, nightlight};
 use crate::texts::{self, Tr};
 
@@ -33,6 +36,15 @@ enum Job {
         code: u8,
         value: u32,
     },
+    /// Сцена: поставить яркость в процентах всем мониторам, что отвечают, запомнив прежнюю; `keep` — прежнюю уже помним с
+    /// первого раза этой же сцены (у кого помним, остаётся).
+    SceneBright {
+        monitors: Vec<(String, usize)>,
+        percent: u8,
+        keep: bool,
+    },
+    /// Вернуть яркость, как была до сцены.
+    SceneBrightUndo,
 }
 
 /// Ключ значения: монитор, физический номер, код VCP.
@@ -44,6 +56,21 @@ struct Shared {
     /// Прочитали хотя бы раз — до этого карточка показывает «опрашиваю».
     loaded: bool,
     errors: Vec<String>,
+    /// Яркость до сцены: монитор, физический номер, «ручка» и значение, как его отдал монитор.
+    bright_before: Vec<(String, usize, usize, u32)>,
+}
+
+/// Как было до сцены: что стояло в тех настройках, которые она поменяла (`None` / `false` — не меняла).
+struct SceneBefore {
+    scene: String,
+    night: Option<bool>,
+    /// Яркость сцена трогала: прежняя лежит у потока (`Shared::bright_before`).
+    bright: bool,
+}
+
+/// Яркость монитора в процентах.
+fn percent(f: Feature) -> u8 {
+    (f.current * 100 + f.max / 2).checked_div(f.max).map_or(0, |p| p.min(100) as u8)
 }
 
 pub struct Brightness {
@@ -59,6 +86,8 @@ pub struct Brightness {
     confirm_input: Option<(String, usize, usize, u32)>,
     /// Ночной свет Windows: включён ли; `None` — не узнать.
     night: Option<bool>,
+    /// Как было до сцены, что стоит сейчас, — на второй щелчок по ней.
+    before: Option<SceneBefore>,
 }
 
 impl Default for Brightness {
@@ -75,6 +104,7 @@ impl Default for Brightness {
             caps_tries: 0,
             confirm_input: None,
             night: None,
+            before: None,
         }
     }
 }
@@ -98,14 +128,22 @@ fn worker(rx: Receiver<Job>, shared: Arc<Mutex<Shared>>) {
                     let caps = caps || read.as_ref().is_some_and(|r| r.1);
                     read = Some((monitors, caps));
                 }
+                // Сцена идёт по порядку: что накопилось раньше (ползунки) — ставим сперва; после неё — перечитать.
+                Job::SceneBright { monitors, percent, keep } => {
+                    flush(&mut sets, &shared);
+                    scene_bright(&shared, &monitors, percent, keep);
+                    let caps = read.as_ref().is_some_and(|r| r.1);
+                    read = Some((monitors, caps));
+                }
+                Job::SceneBrightUndo => {
+                    flush(&mut sets, &shared);
+                    let monitors = scene_bright_undo(&shared);
+                    let caps = read.as_ref().is_some_and(|r| r.1);
+                    read = Some((monitors, caps));
+                }
             }
         }
-        for (handle, index, code, value) in sets {
-            if let Err(e) = ddc::set(handle, index, code, value) {
-                eprintln!("ddc set failed: {e}");
-                shared.lock().unwrap_or_else(|e| e.into_inner()).errors.push(e);
-            }
-        }
+        flush(&mut sets, &shared);
         if let Some((monitors, caps)) = read {
             let list: Vec<Physical> = monitors.iter().flat_map(|(d, h)| ddc::read(d, *h, caps)).collect();
             if std::env::var_os("ANTRESOL_TRACE").is_some() {
@@ -118,13 +156,80 @@ fn worker(rx: Receiver<Job>, shared: Arc<Mutex<Shared>>) {
     }
 }
 
+/// Поставить накопленные значения ползунков.
+fn flush(sets: &mut Vec<(usize, usize, u8, u32)>, shared: &Arc<Mutex<Shared>>) {
+    for (handle, index, code, value) in std::mem::take(sets) {
+        if let Err(e) = ddc::set(handle, index, code, value) {
+            eprintln!("ddc set failed: {e}");
+            shared.lock().unwrap_or_else(|e| e.into_inner()).errors.push(e);
+        }
+    }
+}
+
+/// Сцена: запомнить яркость каждого отвечающего монитора и поставить `percent` %. Прежнее запоминается один раз за «сеанс»
+/// сцены: при `keep` у монитора, что уже помним, остаётся то, что было до первой постановки.
+fn scene_bright(shared: &Arc<Mutex<Shared>>, monitors: &[(String, usize)], percent: u8, keep: bool) {
+    let mut was: Vec<(String, usize, usize, u32)> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    for (device, handle) in monitors {
+        for p in ddc::read(device, *handle, false) {
+            let Some(b) = p.brightness else { continue };
+            was.push((device.clone(), p.index, *handle, b.current));
+            let want = (u32::from(percent) * b.max + 50) / 100;
+            if want != b.current
+                && let Err(e) = ddc::set(*handle, p.index, BRIGHTNESS, want)
+            {
+                eprintln!("ddc scene set failed: {e}");
+                errors.push(e);
+            }
+        }
+    }
+    let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
+    let mut before = if keep { std::mem::take(&mut s.bright_before) } else { Vec::new() };
+    for w in was {
+        if !before.iter().any(|b| b.0 == w.0 && b.1 == w.1) {
+            before.push(w);
+        }
+    }
+    s.bright_before = before;
+    s.errors.extend(errors);
+}
+
+/// Сцена: вернуть яркость, как была. Ответ — мониторы, что трогали (их перечитать).
+fn scene_bright_undo(shared: &Arc<Mutex<Shared>>) -> Vec<(String, usize)> {
+    let before = std::mem::take(&mut shared.lock().unwrap_or_else(|e| e.into_inner()).bright_before);
+    let mut monitors: Vec<(String, usize)> = Vec::new();
+    for (device, index, handle, old) in before {
+        if let Err(e) = ddc::set(handle, index, BRIGHTNESS, old) {
+            eprintln!("ddc scene undo failed: {e}");
+            shared.lock().unwrap_or_else(|e| e.into_inner()).errors.push(e);
+        }
+        if !monitors.iter().any(|m| m.0 == device) {
+            monitors.push((device, handle));
+        }
+    }
+    monitors
+}
+
 impl Brightness {
     fn handle_of(device: &str) -> Option<usize> {
-        // Демо и тесты: у выдуманного монитора ручки нет, а писатель `ddc::set` всё равно остановит заслон.
+        // Демо и тесты: у выдуманного монитора своя «ручка» (по ней `ddc::set` знает, чью яркость запомнить); писатель всё
+        // равно остановит заслон.
         if sys::isolated() {
-            return Some(0);
+            return Some(ddc::fake_handle(device));
         }
         monitor::monitors().into_iter().find(|m| m.device == device).map(|m| m.handle)
+    }
+
+    /// Мониторы панели с «ручками» для потока: настоящие или (демо, тесты) выдуманные.
+    fn ddc_monitors(panel: &str) -> Vec<(String, usize)> {
+        display::monitors(panel)
+            .into_iter()
+            .map(|m| {
+                let handle = if sys::isolated() { ddc::fake_handle(&m.device) } else { m.handle };
+                (m.device, handle)
+            })
+            .collect()
     }
 
     fn send_set(&mut self, p: &Physical, code: u8, value: u32) {
@@ -171,6 +276,74 @@ impl Brightness {
 }
 
 impl Brightness {
+    /// Поставить то, что сцена отметила здесь: «Ночной свет» и яркость. Перед сменой — запомнить, что было. Возврат прежней
+    /// сцены пропадает; та же сцена ещё раз продолжает прежний «сеанс»: что уже помним, то и остаётся.
+    fn apply_scene(&mut self, scene: &Profile, cx: &mut Ctx) {
+        let s = &scene.system;
+        let mut before = match self.before.take() {
+            Some(b) if b.scene == scene.name => b,
+            _ => SceneBefore { scene: scene.name.clone(), night: None, bright: false },
+        };
+        if let Some(want) = s.night
+            && let Some(now) = nightlight::state()
+        {
+            before.night = before.night.or(Some(now));
+            if now != want {
+                match nightlight::set(want) {
+                    Ok(()) => self.night = Some(want),
+                    Err(e) => {
+                        eprintln!("scene night light failed: {e}");
+                        cx.toasts.push((format!("{}: {e}", cx.t.failed), Tone::Danger));
+                    }
+                }
+            }
+        }
+        if let Some(percent) = s.bright {
+            let monitors = Self::ddc_monitors(cx.monitor);
+            let _ = self.jobs.send(Job::SceneBright { monitors, percent, keep: before.bright });
+            before.bright = true;
+        }
+        self.before = (before.night.is_some() || before.bright).then_some(before);
+    }
+
+    /// Вернуть то, что сцена поменяла, как было до неё. Одноразово.
+    fn undo_scene(&mut self, scene: &Profile, cx: &mut Ctx) {
+        if !self.scene_can_undo(scene) {
+            return;
+        }
+        let Some(before) = self.before.take() else { return };
+        if let Some(night) = before.night
+            && nightlight::state().is_some_and(|now| now != night)
+        {
+            match nightlight::set(night) {
+                Ok(()) => self.night = Some(night),
+                Err(e) => {
+                    eprintln!("scene night light undo failed: {e}");
+                    cx.toasts.push((format!("{}: {e}", cx.t.failed), Tone::Danger));
+                }
+            }
+        }
+        if before.bright {
+            let _ = self.jobs.send(Job::SceneBrightUndo);
+        }
+    }
+
+    /// Взять текущие значения этих строк в сцену: «Ночной свет» — как стоит, яркость — первого монитора, что отвечает; что не
+    /// прочиталось — как было в сцене.
+    fn save_scene(&mut self, scene: &mut Profile, rows: &[SceneRow]) {
+        for row in rows {
+            match row {
+                SceneRow::Night => scene.system.night = nightlight::state().or(scene.system.night),
+                SceneRow::Bright => {
+                    let list = self.shared.lock().unwrap_or_else(|e| e.into_inner()).list.clone();
+                    let first = list.iter().find_map(|p| p.brightness).map(percent);
+                    scene.system.bright = first.or(scene.system.bright);
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Подтверждение смены входа: экран может погаснуть — вернуть можно только кнопками монитора. `false` — смены входа
     /// никто не просил, рисовать нечего.
     fn confirm_input_ui(&mut self, ui: &mut Ui, cx: &mut Ctx, list: &[Physical]) -> bool {
@@ -279,8 +452,7 @@ impl Module for Brightness {
     }
 
     fn refresh(&mut self, panel: &str) {
-        let monitors: Vec<(String, usize)> =
-            display::monitors(panel).into_iter().map(|m| (m.device, m.handle)).collect();
+        let monitors = Self::ddc_monitors(panel);
         // Входы — пока не ответили, до трёх раз: строка возможностей отвечает до секунды на монитор.
         let caps = self.inputs.is_empty() && self.caps_tries < 3;
         if caps {
@@ -292,6 +464,56 @@ impl Module for Brightness {
 
     fn busy(&self) -> bool {
         self.confirm_input.is_some()
+    }
+
+    fn command(&mut self, cmd: &Command, cx: &mut Ctx) {
+        match cmd {
+            Command::ApplyScene(i) => {
+                if let Some(scene) = cx.settings.profiles.get(*i).cloned() {
+                    self.apply_scene(&scene, cx);
+                }
+            }
+            Command::UndoScene(i) => {
+                if let Some(scene) = cx.settings.profiles.get(*i).cloned() {
+                    self.undo_scene(&scene, cx);
+                }
+            }
+            Command::SaveScene(i, rows) => {
+                if let Some(scene) = cx.settings.profiles.get_mut(*i) {
+                    self.save_scene(scene, rows);
+                }
+            }
+            Command::Dropped(_) | Command::Media(_) => {}
+        }
+    }
+
+    /// Совпадает ли то, что сцена отметила здесь, с тем, что стоит: «Ночной свет» и яркость всех отвечающих мониторов (±2 %
+    /// от заданной). Не прочиталось — не мешает; ничего не отмечено или не прочитать — `None`.
+    fn scene_part(&self, scene: &Profile) -> Option<bool> {
+        let s = &scene.system;
+        let mut same: Vec<bool> = Vec::new();
+        if let (Some(want), Some(now)) = (s.night, self.night) {
+            same.push(want == now);
+        }
+        if let Some(want) = s.bright {
+            let list = self.shared.lock().unwrap_or_else(|e| e.into_inner()).list.clone();
+            let now: Vec<u8> = list.iter().filter_map(|p| p.brightness).map(percent).collect();
+            if !now.is_empty() {
+                same.push(now.iter().all(|p| p.abs_diff(want) <= 2));
+            }
+        }
+        (!same.is_empty()).then(|| same.into_iter().all(|ok| ok))
+    }
+
+    fn scene_can_undo(&self, scene: &Profile) -> bool {
+        self.before.as_ref().is_some_and(|b| b.scene == scene.name)
+    }
+
+    /// «Яркость» — если хоть один монитор отвечает по DDC/CI; «Ночной свет» — если прочитался.
+    fn scene_rows(&self) -> Vec<(SceneRow, bool)> {
+        let answering =
+            self.shared.lock().unwrap_or_else(|e| e.into_inner()).list.iter().any(|p| p.brightness.is_some());
+        vec![(SceneRow::Bright, answering), (SceneRow::Night, self.night.is_some())]
     }
 
     fn ui(&mut self, ui: &mut Ui, cx: &mut Ctx) {
@@ -379,5 +601,181 @@ mod tests {
         let shown = frame(&mut card);
         assert!(shown.contains("Night light"), "пока висит подтверждение входа, «Ночной свет» виден: {shown}");
         assert!(shown.contains(texts::tr(anvil_ui::Lang::En).input_title), "и само подтверждение тоже: {shown}");
+    }
+}
+
+// ─── Сцены без окна ─────────────────────────────────────────────────────────
+//
+// Выдуманный монитор DDC/CI помнит яркость (у каждого теста свой — по имени устройства), выдуманный «Ночной свет» один на
+// все тесты (под `WORLD_TEST`). Яркость идёт через поток модуля — тесты ждут его.
+
+#[cfg(test)]
+mod scene_tests {
+    use std::sync::MutexGuard;
+    use std::time::{Duration, Instant};
+
+    use anvil_ui::Lang;
+
+    use super::*;
+    use crate::config::{SceneSystem, Settings};
+
+    /// Мир под замком, как вначале.
+    fn world() -> MutexGuard<'static, ()> {
+        let guard = sys::WORLD_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        sys::reset_fake_world();
+        guard
+    }
+
+    fn scene(name: &str, system: SceneSystem) -> Profile {
+        Profile { system, ..Profile::new(name) }
+    }
+
+    /// Команда модулю на мониторе `dev`; ответ — уведомления.
+    fn run(card: &mut Brightness, settings: &mut Settings, dev: &str, cmd: Command) -> Vec<(String, Tone)> {
+        let mut toasts = Vec::new();
+        let mut cx = Ctx { t: texts::tr(Lang::En), lang: Lang::En, monitor: dev, toasts: &mut toasts, settings };
+        card.command(&cmd, &mut cx);
+        toasts
+    }
+
+    fn wait(what: &str, mut ok: impl FnMut() -> bool) {
+        let start = Instant::now();
+        while !ok() {
+            assert!(start.elapsed() < Duration::from_secs(3), "не дождались: {what}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Яркость выдуманного монитора `dev`, %.
+    fn world_bright(dev: &str) -> u32 {
+        ddc::read(dev, 0, false)[0].brightness.unwrap().current
+    }
+
+    /// Карточка на выдуманном мониторе: опрошена, как при показе панели, и ответила.
+    fn card(dev: &str) -> Brightness {
+        let mut card = Brightness::default();
+        card.refresh(dev);
+        wait("монитор ответил", || card.scene_rows().contains(&(SceneRow::Bright, true)));
+        card
+    }
+
+    #[test]
+    fn scene_sets_brightness_and_night_light_and_the_second_click_returns_them() {
+        let _world = world();
+        let dev = r"\\.\TEST-BRIGHT-SCENE";
+        let mut card = card(dev);
+        let mut settings = Settings::default();
+        settings
+            .profiles
+            .push(scene("Movie", SceneSystem { bright: Some(30), night: Some(true), ..Default::default() }));
+        let movie = settings.profiles[0].clone();
+        assert_eq!(world_bright(dev), 70, "выдуманный монитор вначале — 70 %");
+        assert_eq!(card.scene_part(&movie), Some(false));
+        let toasts = run(&mut card, &mut settings, dev, Command::ApplyScene(0));
+        assert!(toasts.is_empty(), "{toasts:?}");
+        wait("яркость поставлена", || world_bright(dev) == 30);
+        assert_eq!(nightlight::state(), Some(true));
+        wait("карточка видит сцену стоящей", || card.scene_part(&movie) == Some(true));
+        assert!(card.scene_can_undo(&movie));
+        // Второй щелчок.
+        run(&mut card, &mut settings, dev, Command::UndoScene(0));
+        wait("яркость вернулась", || world_bright(dev) == 70);
+        assert_eq!(nightlight::state(), Some(false));
+        wait("карточка видит, что сцены нет", || card.scene_part(&movie) == Some(false));
+        // Возврат одноразовый.
+        assert!(!card.scene_can_undo(&movie));
+        ddc::set(ddc::fake_handle(dev), 0, BRIGHTNESS, 55).unwrap();
+        run(&mut card, &mut settings, dev, Command::UndoScene(0));
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(world_bright(dev), 55);
+    }
+
+    #[test]
+    fn brightness_matches_within_two_percent_and_not_beyond() {
+        let _world = world();
+        let dev = r"\\.\TEST-BRIGHT-TOLERANCE";
+        let card = card(dev);
+        let want = |b| scene("S", SceneSystem { bright: Some(b), ..Default::default() });
+        // Монитор на 70 %.
+        for (asked, stands) in [(70, true), (68, true), (72, true), (67, false), (73, false), (0, false), (100, false)]
+        {
+            assert_eq!(card.scene_part(&want(asked)), Some(stands), "{asked} %");
+        }
+        // Не отмечено — нечего проверять.
+        assert_eq!(card.scene_part(&Profile::new("N")), None);
+    }
+
+    #[test]
+    fn the_same_scene_again_returns_to_what_was_before_the_first_time() {
+        let _world = world();
+        let dev = r"\\.\TEST-BRIGHT-AGAIN";
+        let mut card = card(dev);
+        let mut settings = Settings::default();
+        settings.profiles.push(scene("Dim", SceneSystem { bright: Some(30), ..Default::default() }));
+        run(&mut card, &mut settings, dev, Command::ApplyScene(0));
+        wait("яркость поставлена", || world_bright(dev) == 30);
+        // Яркость ушла от сцены сама, и сцену ставят снова.
+        ddc::set(ddc::fake_handle(dev), 0, BRIGHTNESS, 50).unwrap();
+        run(&mut card, &mut settings, dev, Command::ApplyScene(0));
+        wait("яркость поставлена снова", || world_bright(dev) == 30);
+        run(&mut card, &mut settings, dev, Command::UndoScene(0));
+        wait("вернулась к тому, что было до первого раза", || {
+            world_bright(dev) == 70
+        });
+    }
+
+    #[test]
+    fn another_scene_replaces_the_return() {
+        let _world = world();
+        let dev = r"\\.\TEST-BRIGHT-OTHER";
+        let mut card = card(dev);
+        let mut settings = Settings::default();
+        settings.profiles.push(scene("Dim", SceneSystem { bright: Some(30), ..Default::default() }));
+        settings.profiles.push(scene("Night", SceneSystem { night: Some(true), ..Default::default() }));
+        let (dim, night) = (settings.profiles[0].clone(), settings.profiles[1].clone());
+        run(&mut card, &mut settings, dev, Command::ApplyScene(0));
+        wait("яркость поставлена", || world_bright(dev) == 30);
+        assert!(card.scene_can_undo(&dim));
+        run(&mut card, &mut settings, dev, Command::ApplyScene(1));
+        assert!(!card.scene_can_undo(&dim) && card.scene_can_undo(&night));
+        run(&mut card, &mut settings, dev, Command::UndoScene(0));
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(world_bright(dev), 30, "чужой возврат яркость не трогает");
+        // «Ночной свет» до сцены «Night» был выключен.
+        run(&mut card, &mut settings, dev, Command::UndoScene(1));
+        assert_eq!(nightlight::state(), Some(false));
+        assert_eq!(world_bright(dev), 30, "яркость сцены «Night» не меняла");
+    }
+
+    #[test]
+    fn save_scene_takes_brightness_of_the_first_monitor_and_night_light() {
+        let _world = world();
+        let dev = r"\\.\TEST-BRIGHT-SAVE";
+        ddc::set(ddc::fake_handle(dev), 0, BRIGHTNESS, 40).unwrap();
+        let mut card = card(dev);
+        let mut settings = Settings::default();
+        settings.profiles.push(Profile::new("N"));
+        nightlight::set(true).unwrap();
+        run(
+            &mut card,
+            &mut settings,
+            dev,
+            Command::SaveScene(0, vec![SceneRow::Bright, SceneRow::Night, SceneRow::Quiet]),
+        );
+        let s = &settings.profiles[0].system;
+        assert_eq!((s.bright, s.night, s.quiet), (Some(40), Some(true), None), "чужие строки — не здесь");
+        // Не просили — не трогаем.
+        run(&mut card, &mut settings, dev, Command::SaveScene(0, vec![SceneRow::Night]));
+        assert_eq!(settings.profiles[0].system.bright, Some(40));
+    }
+
+    #[test]
+    fn rows_wait_for_the_first_reading() {
+        let _world = world();
+        let dev = r"\\.\TEST-BRIGHT-ROWS";
+        let mut card = Brightness::default();
+        assert_eq!(card.scene_rows(), vec![(SceneRow::Bright, false), (SceneRow::Night, false)]);
+        card.refresh(dev);
+        wait("прочитано", || card.scene_rows() == vec![(SceneRow::Bright, true), (SceneRow::Night, true)]);
     }
 }

@@ -12,6 +12,8 @@ pub const MAX_HEIGHT: f32 = 520.0;
 pub const MAX_FAVORITES: usize = 3;
 /// `monitor=*` — панель у того монитора, к краю которого подошла мышь.
 pub const ALL_MONITORS: &str = "*";
+/// Длиннее имя сцены в поле правки не бывает, в символах (иначе чип не влезет в шапку); из файла читается любое.
+pub const MAX_SCENE_NAME: usize = 24;
 
 /// Разрешение конкретного монитора: `\\.\DISPLAYn`, ширина, высота.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -124,7 +126,7 @@ pub struct Settings {
     pub favorites: Vec<Res>,
     /// Какая частота была у разрешения в последний раз — её и ставим, когда на него переходят.
     pub rates: Vec<(Res, u32)>,
-    /// Профили экрана: имя, клавиша и режим каждого монитора.
+    /// Сцены (в файле — строки `profile=`): имя, клавиша, экран, система и возврат.
     pub profiles: Vec<Profile>,
     /// Цвет программы: имя готового (`lime`, `violet`…) или свой `#rrggbb` — см. `look`.
     pub accent: String,
@@ -173,7 +175,7 @@ pub struct Clock {
 /// Сколько часов держим.
 pub const MAX_CLOCKS: usize = 8;
 
-// ─── Профили экрана ─────────────────────────────────────────────────────────
+// ─── Сцены (бывшие профили экрана) ──────────────────────────────────────────────
 
 /// Сочетание клавиш: модификаторы и одна клавиша по имени — «A», «1», «F5», «Space».
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
@@ -222,7 +224,7 @@ impl std::fmt::Display for Hotkey {
     }
 }
 
-/// Режим одного монитора в профиле. Масштаб и HDR `None` — не трогать (HDR не записан у профилей, сохранённых до 2.0,
+/// Режим одного монитора в сцене. Масштаб и HDR `None` — не трогать (HDR не записан у профилей, сохранённых до 2.0,
 /// и у мониторов без HDR).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ProfileMonitor {
@@ -235,21 +237,191 @@ pub struct ProfileMonitor {
     pub hdr: Option<bool>,
 }
 
+/// Что сцена меняет в системе, кроме экрана; `None` — не трогать. В файле — четвёртая часть строки `profile=`:
+/// `night=0; quiet=1; awake=1; dark=1; wifi=1; bright=80; plan={GUID}` (вкл / выкл — `1` / `0`).
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct SceneSystem {
+    /// «Ночной свет» Windows.
+    pub night: Option<bool>,
+    /// «Тишина» — уведомления Windows выключены.
+    pub quiet: Option<bool>,
+    /// «Не спать».
+    pub awake: Option<bool>,
+    /// Тёмная тема Windows.
+    pub dark: Option<bool>,
+    pub wifi: Option<bool>,
+    /// План питания: GUID вида `{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}` ([`normalize_guid`]).
+    pub plan: Option<String>,
+    /// Яркость, 0–100, — у всех мониторов, что отвечают по DDC/CI.
+    pub bright: Option<u8>,
+}
+
+/// GUID плана питания в одном виде — `{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}` заглавными; на скобки и регистр в файле
+/// не смотрим. Не GUID — `None`.
+pub fn normalize_guid(s: &str) -> Option<String> {
+    let s = s.trim();
+    let s = s.strip_prefix('{').and_then(|r| r.strip_suffix('}')).unwrap_or(s);
+    let groups: Vec<&str> = s.split('-').collect();
+    let sizes = [8, 4, 4, 4, 12];
+    let good = groups.len() == sizes.len()
+        && groups.iter().zip(sizes).all(|(g, n)| g.len() == n && g.bytes().all(|b| b.is_ascii_hexdigit()));
+    good.then(|| format!("{{{}}}", s.to_ascii_uppercase()))
+}
+
+impl SceneSystem {
+    /// Ничего не отмечено.
+    pub fn is_empty(&self) -> bool {
+        *self == SceneSystem::default()
+    }
+
+    /// Одно `ключ=значение` из файла: знакомый ключ с годным значением ставится, остальное пропускается (прежнее
+    /// значение при этом не трогается). Ответ — принято ли.
+    fn set(&mut self, key: &str, value: &str) -> bool {
+        let flag = match value {
+            "1" => Some(true),
+            "0" => Some(false),
+            _ => None,
+        };
+        match key {
+            "night" if flag.is_some() => self.night = flag,
+            "quiet" if flag.is_some() => self.quiet = flag,
+            "awake" if flag.is_some() => self.awake = flag,
+            "dark" if flag.is_some() => self.dark = flag,
+            "wifi" if flag.is_some() => self.wifi = flag,
+            "plan" if normalize_guid(value).is_some() => self.plan = normalize_guid(value),
+            "bright" if value.parse::<u8>().is_ok_and(|b| b <= 100) => self.bright = value.parse().ok(),
+            _ => return false,
+        }
+        true
+    }
+}
+
+impl std::fmt::Display for SceneSystem {
+    /// Ключи в одном порядке: `night; quiet; awake; dark; wifi; bright; plan`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let flag = |on: bool| if on { 1 } else { 0 };
+        let mut items: Vec<String> = Vec::new();
+        for (key, value) in [
+            ("night", self.night),
+            ("quiet", self.quiet),
+            ("awake", self.awake),
+            ("dark", self.dark),
+            ("wifi", self.wifi),
+        ] {
+            if let Some(on) = value {
+                items.push(format!("{key}={}", flag(on)));
+            }
+        }
+        if let Some(b) = self.bright {
+            items.push(format!("bright={b}"));
+        }
+        if let Some(p) = &self.plan {
+            items.push(format!("plan={p}"));
+        }
+        f.write_str(&items.join("; "))
+    }
+}
+
+/// Строка сцены в редакторе: что в ней можно отметить.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SceneRow {
+    /// Режим, масштаб и HDR мониторов.
+    Screen,
+    Bright,
+    Night,
+    Quiet,
+    Awake,
+    Dark,
+    Wifi,
+    Plan,
+}
+
+impl SceneRow {
+    /// Все строки по порядку на экране правки: две колонки по четыре, сверху вниз.
+    pub const ALL: [SceneRow; 8] = [
+        SceneRow::Screen,
+        SceneRow::Bright,
+        SceneRow::Night,
+        SceneRow::Quiet,
+        SceneRow::Awake,
+        SceneRow::Dark,
+        SceneRow::Wifi,
+        SceneRow::Plan,
+    ];
+}
+
+/// Сцена — экран и системные настройки, что ставятся одним щелчком или клавишей и (по желанию) возвращаются вторым
+/// щелчком. В файле — строка `profile=`, имя в коде осталось от профилей экрана: профиль до 2.1 — это сцена, которая
+/// меняет только экран.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Profile {
     pub name: String,
     pub hotkey: Option<Hotkey>,
+    /// Экран: режим, масштаб и HDR мониторов; пусто — экран сцена не меняет.
     pub monitors: Vec<ProfileMonitor>,
+    pub system: SceneSystem,
+    /// Щелчок по стоящей сцене или её клавиша возвращает всё, что она поменяла (по умолчанию — да).
+    pub undo: bool,
 }
 
 impl Profile {
+    /// Сцена без частей: потом в неё отмечают, что менять.
+    pub fn new(name: &str) -> Profile {
+        Profile {
+            name: name.to_string(),
+            hotkey: None,
+            monitors: Vec::new(),
+            system: SceneSystem::default(),
+            undo: true,
+        }
+    }
+
     /// Имя без знаков, которыми размечена строка файла.
     pub fn clean_name(name: &str) -> String {
         name.replace(['|', ';', '\n', '\r'], " ").trim().to_string()
     }
 
-    /// `Игры | Ctrl+Alt+1 | \\.\DISPLAY1 1920x1080@144 100% hdr ; \\.\DISPLAY2 2560x1440@60`. После режима — по
-    /// желанию масштаб (`100%`) и `hdr` или `sdr`, в любом порядке; незнакомое слово или повтор — строка негодная.
+    /// Отмечена ли строка.
+    pub fn has(&self, row: SceneRow) -> bool {
+        let s = &self.system;
+        match row {
+            SceneRow::Screen => !self.monitors.is_empty(),
+            SceneRow::Bright => s.bright.is_some(),
+            SceneRow::Night => s.night.is_some(),
+            SceneRow::Quiet => s.quiet.is_some(),
+            SceneRow::Awake => s.awake.is_some(),
+            SceneRow::Dark => s.dark.is_some(),
+            SceneRow::Wifi => s.wifi.is_some(),
+            SceneRow::Plan => s.plan.is_some(),
+        }
+    }
+
+    /// Снять отметку со строки: сцена её больше не трогает.
+    pub fn clear(&mut self, row: SceneRow) {
+        let s = &mut self.system;
+        match row {
+            SceneRow::Screen => self.monitors.clear(),
+            SceneRow::Bright => s.bright = None,
+            SceneRow::Night => s.night = None,
+            SceneRow::Quiet => s.quiet = None,
+            SceneRow::Awake => s.awake = None,
+            SceneRow::Dark => s.dark = None,
+            SceneRow::Wifi => s.wifi = None,
+            SceneRow::Plan => s.plan = None,
+        }
+    }
+
+    /// Ничего не отмечено — ставить нечего: такая сцена не сохраняется.
+    pub fn is_empty(&self) -> bool {
+        self.monitors.is_empty() && self.system.is_empty()
+    }
+
+    /// `Кино | Ctrl+Alt+3 | \\.\DISPLAY1 3840x2160@60 150% hdr ; … | quiet=1; awake=1; bright=80 | undo=0`.
+    /// Имя, клавиша и экран — как у профиля: мониторы через `;`, после режима по желанию масштаб (`100%`) и `hdr` или
+    /// `sdr`, в любом порядке, незнакомое слово или повтор — строка негодная; экрана может не быть (пустая часть). Четвёртая
+    /// часть — система (`ключ=значение` через `;`; незнакомый ключ и кривое значение пропускаются, сцена остаётся),
+    /// пятая — `undo=0`, если возврат выключен. Старая строка из трёх частей — сцена, что меняет только экран. Сцена,
+    /// в которой нечего ставить, негодная.
     fn parse(value: &str) -> Option<Profile> {
         let mut parts = value.split('|').map(str::trim);
         let name = Profile::clean_name(parts.next()?);
@@ -279,7 +451,23 @@ impl Profile {
                 hdr,
             });
         }
-        (!name.is_empty() && !monitors.is_empty()).then_some(Profile { name, hotkey, monitors })
+        // Четвёртая часть — система, пятая — `undo=0`; `undo` читается и в четвёртой (руками пишут по-всякому).
+        let (mut system, mut undo) = (SceneSystem::default(), true);
+        for part in parts.take(2) {
+            for pair in part.split(';') {
+                let Some((key, value)) = pair.split_once('=') else { continue };
+                let (key, value) = (key.trim(), value.trim());
+                match (key, value) {
+                    ("undo", "0") => undo = false,
+                    ("undo", "1") => undo = true,
+                    _ => {
+                        system.set(key, value);
+                    }
+                }
+            }
+        }
+        let scene = Profile { name, hotkey, monitors, system, undo };
+        (!scene.name.is_empty() && !scene.is_empty()).then_some(scene)
     }
 }
 
@@ -295,7 +483,16 @@ impl std::fmt::Display for Profile {
                 format!("{} {}x{}@{}{scale}{hdr}", m.device, m.width, m.height, m.hz)
             })
             .collect();
-        write!(f, "{} | {key} | {}", self.name, monitors.join(" ; "))
+        write!(f, "{} | {key} | {}", self.name, monitors.join(" ; "))?;
+        // Системная и пятая части — только если есть что писать: старая строка остаётся как была.
+        let system = self.system.to_string();
+        if !system.is_empty() || !self.undo {
+            write!(f, " | {system}")?;
+        }
+        if !self.undo {
+            f.write_str(" | undo=0")?;
+        }
+        Ok(())
     }
 }
 
@@ -670,7 +867,8 @@ pub fn format(s: &Settings) -> String {
     for (r, hz) in &s.rates {
         out.push_str(&format!("rate={r} {hz}\n"));
     }
-    for p in &s.profiles {
+    // Сцена, в которой нечего ставить (новая, пока в неё ничего не отметили), в файл не идёт: прочесть её нельзя.
+    for p in s.profiles.iter().filter(|p| !p.is_empty()) {
         out.push_str(&format!("profile={p}\n"));
     }
     out
@@ -893,6 +1091,8 @@ mod tests {
                     hdr: Some(false),
                 },
             ],
+            system: SceneSystem::default(),
+            undo: true,
         };
         let line = p.to_string();
         assert_eq!(
@@ -909,6 +1109,156 @@ mod tests {
         let names: Vec<String> = parse(bad).profiles.into_iter().map(|p| p.name).collect();
         assert_eq!(names, vec!["Z".to_string()]);
         assert_eq!(Profile::clean_name(" a|b;c "), "a b c");
+    }
+
+    /// Сцена: экран и система в строке `profile=`.
+    fn scene() -> Profile {
+        let monitor = ProfileMonitor {
+            device: r"\\.\DISPLAY1".into(),
+            width: 3840,
+            height: 2160,
+            hz: 60,
+            scale: Some(150),
+            hdr: Some(true),
+        };
+        Profile {
+            name: "Кино".into(),
+            hotkey: Hotkey::parse("Ctrl+Alt+3"),
+            monitors: vec![monitor],
+            system: SceneSystem {
+                night: Some(false),
+                quiet: Some(true),
+                awake: Some(true),
+                dark: Some(true),
+                wifi: Some(false),
+                plan: Some("{381B4222-F694-41F0-9685-FF5BB260DF2E}".into()),
+                bright: Some(80),
+            },
+            undo: true,
+        }
+    }
+
+    #[test]
+    fn scene_line_has_screen_system_and_undo() {
+        let p = scene();
+        // Система в одном порядке; возврат включён — слова `undo` нет.
+        let line = p.to_string();
+        assert_eq!(
+            line,
+            r"Кино | Ctrl+Alt+3 | \\.\DISPLAY1 3840x2160@60 150% hdr | night=0; quiet=1; awake=1; dark=1; wifi=0; bright=80; plan={381B4222-F694-41F0-9685-FF5BB260DF2E}"
+        );
+        assert_eq!(Profile::parse(&line), Some(p.clone()));
+        // Возврат выключен — пятая часть `undo=0`.
+        let off = Profile { undo: false, ..p.clone() };
+        assert!(off.to_string().ends_with(" | undo=0"), "{off}");
+        assert_eq!(Profile::parse(&off.to_string()), Some(off.clone()));
+        // Вся строка файла туда и обратно, вместе с экраном без системы и системой без экрана.
+        let only_screen = Profile { name: "Экран".into(), system: SceneSystem::default(), ..p.clone() };
+        let only_system = Profile { name: "Тишина".into(), hotkey: None, monitors: Vec::new(), ..p.clone() };
+        let off = Profile { name: "Без возврата".into(), ..off };
+        let s = Settings { profiles: vec![p, off, only_screen, only_system], ..Default::default() };
+        s.profiles.iter().for_each(|p| assert!(!p.is_empty()));
+        let text = format(&s);
+        assert_eq!(text.lines().filter(|l| l.starts_with("profile=")).count(), 4);
+        assert_eq!(parse(&text), s);
+    }
+
+    /// Строка до 2.1 — три части — читается как сцена, что меняет только экран; при записи остаётся такой же.
+    #[test]
+    fn old_profile_line_is_a_screen_only_scene() {
+        let d = r"\\.\DISPLAY1";
+        let old = format!("Игры | Ctrl+Alt+1 | {d} 1920x1080@144 100% hdr");
+        let p = Profile::parse(&old).expect("старая строка читается");
+        assert!(p.system.is_empty() && p.undo, "системы нет, возврат включён");
+        assert!(p.has(SceneRow::Screen) && !p.has(SceneRow::Quiet));
+        assert_eq!(p.to_string(), old, "при записи старая строка не меняется");
+        // Версии до 2.1 читают только три первые части: у новой строки они те же, что у старой.
+        let new = Profile { system: SceneSystem { quiet: Some(true), ..Default::default() }, undo: false, ..p };
+        let line = new.to_string();
+        let first_three: Vec<&str> = line.split('|').take(3).map(str::trim).collect();
+        assert_eq!(first_three, old.split('|').map(str::trim).collect::<Vec<_>>());
+    }
+
+    /// Незнакомые ключи пропускаются, кривые значения — тоже, а сцена остаётся.
+    #[test]
+    fn scene_system_skips_unknown_keys_and_bad_values() {
+        let d = r"\\.\DISPLAY1";
+        let line = |system: &str| format!("S | | {d} 1x1@60 | {system}");
+        let read = |system: &str| Profile::parse(&line(system)).expect("сцена остаётся").system;
+        let good = SceneSystem { quiet: Some(true), bright: Some(50), ..Default::default() };
+        assert_eq!(read("quiet=1; sound=1; bright=50; vol=3; =; nonsense"), good, "незнакомые ключи");
+        let bad = "quiet=1; awake=2; dark=; wifi=yes; night=on; bright=101; bright=-5; bright=x; plan=zzz; bright=50";
+        assert_eq!(read(bad), good, "кривые значения");
+        assert_eq!(read(" quiet = 1 ;; bright = 50 ; "), good, "пробелы и пустые части");
+        // Повтор ключа — побеждает последний годный; негодный повтор прежнего не стирает.
+        assert_eq!(read("quiet=1; quiet=0").quiet, Some(false));
+        assert_eq!(read("quiet=1; quiet=bad").quiet, Some(true));
+        // План — GUID со скобками или без, любым регистром; пишется всегда одинаково.
+        let plan = |v: &str| read(&format!("quiet=1; plan={v}")).plan;
+        let guid = Some("{381B4222-F694-41F0-9685-FF5BB260DF2E}".to_string());
+        assert_eq!(plan("{381b4222-f694-41f0-9685-ff5bb260df2e}"), guid);
+        assert_eq!(plan("381B4222-F694-41F0-9685-FF5BB260DF2E"), guid);
+        assert_eq!(plan("{381B4222-F694-41F0-9685}"), None);
+        assert_eq!(plan("{381B4222-F694-41F0-9685-FF5BB260DF2G}"), None);
+        // Ни одной годной части системы, а экран есть: сцена остаётся экранной.
+        let screen_only = Profile::parse(&line("nonsense=1")).expect("экран есть");
+        assert!(screen_only.system.is_empty());
+        // `undo` читается и в четвёртой части (руками пишут по-всякому); не 0 и не 1 — как не писали.
+        assert!(!Profile::parse(&line("undo=0")).unwrap().undo);
+        assert!(!Profile::parse(&format!("{} | undo=0", line("quiet=1"))).unwrap().undo);
+        assert!(Profile::parse(&format!("{} | undo=1", line("quiet=1"))).unwrap().undo);
+        assert!(Profile::parse(&format!("{} | undo=maybe", line("quiet=1"))).unwrap().undo);
+    }
+
+    /// Сцена без экрана (третья часть пуста) читается и пишется; без экрана и без системы — нет.
+    #[test]
+    fn scene_without_screen_and_scene_without_anything() {
+        let only_system = Profile::parse("Тишина | Ctrl+Alt+2 |  | quiet=1; awake=1").expect("без экрана");
+        assert!(only_system.monitors.is_empty());
+        assert_eq!(only_system.system.quiet, Some(true));
+        assert_eq!(only_system.to_string(), "Тишина | Ctrl+Alt+2 |  | quiet=1; awake=1");
+        // Возврат выключен, системы нет: четвёртая часть пуста, пятая есть.
+        let screen_off = Profile::parse("A | | X 1x1@60 | | undo=0").unwrap();
+        assert!(!screen_off.undo && screen_off.system.is_empty());
+        assert_eq!(screen_off.to_string(), "A |  | X 1x1@60 |  | undo=0");
+        // Нечего ставить: ни экрана, ни годной системы.
+        for bad in ["A | | ", "A | |  | ", "A | |  | nonsense=1", "A | |  | quiet=2; bright=300", "A | |  |  | undo=0"]
+        {
+            assert_eq!(Profile::parse(bad), None, "{bad:?}");
+        }
+        // В файл такая сцена тоже не идёт — иначе при следующем чтении она пропала бы вместе с именем.
+        let mut s = Settings::default();
+        s.profiles.push(Profile::new("Пока пусто"));
+        s.profiles.push(Profile::parse("B | | X 1x1@60").unwrap());
+        let text = format(&s);
+        assert!(!text.contains("Пока пусто") && text.contains("profile=B |  | X 1x1@60"), "{text}");
+        assert_eq!(parse(&text).profiles.len(), 1);
+    }
+
+    /// Строки сцены: отметить, снять, проверить; `is_empty` — когда не отмечено ничего.
+    #[test]
+    fn scene_rows_are_checked_and_cleared() {
+        let mut p = scene();
+        for row in SceneRow::ALL {
+            assert!(p.has(row), "{row:?} отмечена");
+        }
+        assert_eq!(SceneRow::ALL.len(), 8);
+        for row in SceneRow::ALL {
+            p.clear(row);
+            assert!(!p.has(row), "{row:?} снята");
+        }
+        assert!(p.is_empty() && p.system.is_empty() && p.monitors.is_empty());
+        assert!(Profile::new("N").is_empty() && Profile::new("N").undo && Profile::new("N").hotkey.is_none());
+    }
+
+    #[test]
+    fn guid_is_written_one_way() {
+        let canon = Some("{381B4222-F694-41F0-9685-FF5BB260DF2E}".to_string());
+        assert_eq!(normalize_guid("381b4222-f694-41f0-9685-ff5bb260df2e"), canon);
+        assert_eq!(normalize_guid(" {381B4222-F694-41F0-9685-FF5BB260DF2E} "), canon);
+        for bad in ["", "{}", "{381B4222F69441F09685FF5BB260DF2E}", "{381B4222-F694-41F0-9685-FF5BB260DF2E", "x"] {
+            assert_eq!(normalize_guid(bad), None, "{bad:?}");
+        }
     }
 
     /// `hdr` / `sdr` после режима монитора в `profile=`: порядок слов не важен, старые строки читаются как раньше.

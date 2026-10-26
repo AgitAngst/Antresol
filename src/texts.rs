@@ -10,20 +10,13 @@ pub struct Tr {
     pub favorites_full: &'static str,
     pub star_add: &'static str,
     pub star_remove: &'static str,
-    pub profile_save: &'static str,
-    pub profile_name: &'static str,
-    pub profile_already: &'static str,
-    pub save: &'static str,
     pub cancel: &'static str,
-    pub profiles_settings: &'static str,
-    pub profiles_none: &'static str,
     pub change: &'static str,
     pub press_keys: &'static str,
     pub key_busy: &'static str,
     pub key_free: &'static str,
     pub no_key: &'static str,
     pub remove_key: &'static str,
-    pub delete: &'static str,
     pub key_is_panel: &'static str,
     pub brightness: &'static str,
     pub brightness_short: &'static str,
@@ -117,7 +110,6 @@ pub struct Tr {
     pub refresh_hz: &'static str,
     pub scale_pct: &'static str,
     pub hide: &'static str,
-    pub profile: &'static str,
     pub color: &'static str,
     pub custom_color: &'static str,
     pub hue: &'static str,
@@ -208,6 +200,32 @@ pub struct Tr {
     pub hdr: &'static str,
     pub hdr_hint: &'static str,
     pub hdr_blocked: &'static str,
+    // Сцены вместо профилей экрана (2.1.0): один блок.
+    pub scene: &'static str,
+    pub scenes: &'static str,
+    pub scene_new: &'static str,
+    pub scene_what: &'static str,
+    pub scene_untouched: &'static str,
+    pub scene_take: &'static str,
+    pub scene_name_key: &'static str,
+    pub scene_name: &'static str,
+    pub scene_name_empty: &'static str,
+    pub scene_name_taken: &'static str,
+    pub scene_key: &'static str,
+    pub scene_exit: &'static str,
+    pub scene_undo: &'static str,
+    pub scene_undo_note: &'static str,
+    pub scene_confirm_note: &'static str,
+    pub scene_delete: &'static str,
+    pub scene_delete_yes: &'static str,
+    pub scene_undone: &'static str,
+    pub scene_nothing_undo: &'static str,
+    pub scene_already: &'static str,
+    pub scene_edit: &'static str,
+    pub scene_rows_none: &'static str,
+    pub scene_plan_missing: &'static str,
+    pub scenes_none: &'static str,
+    pub wifi: &'static str,
     pub accents: [&'static str; 5],
 }
 
@@ -219,20 +237,13 @@ const RU: Tr = Tr {
     favorites_full: "Не больше трёх избранных — снимите звёздочку с другого",
     star_add: "В избранное",
     star_remove: "Убрать из избранного",
-    profile_save: "Сохранить текущий экран профилем",
-    profile_name: "Имя профиля",
-    profile_already: "Этот профиль уже стоит",
-    save: "Сохранить",
     cancel: "Отмена",
-    profiles_settings: "Профили экрана",
-    profiles_none: "Профилей пока нет — «+» в карточке «Экран» сохраняет текущий экран.",
     change: "Изменить…",
     press_keys: "Нажмите сочетание: Ctrl или Alt и клавишу; Esc — отмена",
     key_busy: "Занято другой программой",
     key_free: "Работает",
     no_key: "Без клавиши",
     remove_key: "Убрать клавишу",
-    delete: "Удалить профиль",
     key_is_panel: "Это сочетание показа панели — выберите другое",
     brightness: "Яркость",
     brightness_short: "Яркость",
@@ -298,7 +309,7 @@ const RU: Tr = Tr {
     github_add: "Добавить",
     github_remove: "Убрать репозиторий",
     answer_first: "Сначала ответьте на «Оставить этот режим?»",
-    mode_unavailable: "Режима из профиля у монитора нет — он пропущен",
+    mode_unavailable: "Режима из сцены у монитора нет — он пропущен",
     keep_title: "Оставить этот режим?",
     keep: "Оставить",
     revert: "Вернуть",
@@ -326,7 +337,6 @@ const RU: Tr = Tr {
     refresh_hz: "Частота, Гц",
     scale_pct: "Масштаб, %",
     hide: "Спрятать (Esc)",
-    profile: "Профиль",
     color: "Цвет",
     custom_color: "Свой цвет…",
     hue: "Оттенок",
@@ -415,6 +425,31 @@ const RU: Tr = Tr {
     hdr: "HDR",
     hdr_hint: "HDR этого монитора. Win+Alt+B переключает все мониторы сразу",
     hdr_blocked: "Windows сейчас не даёт включить HDR на этом мониторе",
+    scene: "Сцена",
+    scenes: "Сцены",
+    scene_new: "Новая сцена из текущих настроек",
+    scene_what: "Что меняет сцена",
+    scene_untouched: "не трогать",
+    scene_take: "Запомнить текущие",
+    scene_name_key: "Имя и клавиша",
+    scene_name: "Имя",
+    scene_name_empty: "Нужно имя",
+    scene_name_taken: "Такая сцена уже есть",
+    scene_key: "Клавиша",
+    scene_exit: "Выход из сцены",
+    scene_undo: "Повторный щелчок — вернуть как было",
+    scene_undo_note: "Вернётся всё, что сцена поменяла",
+    scene_confirm_note: "Режим экрана, как и сейчас, спросит «Оставить?» и сам вернётся через 15 с.",
+    scene_delete: "Удалить сцену",
+    scene_delete_yes: "Удалить",
+    scene_undone: "Вернул как было",
+    scene_nothing_undo: "Возвращать нечего",
+    scene_already: "Эта сцена уже стоит",
+    scene_edit: "Изменить сцену",
+    scene_rows_none: "Отметьте, что менять",
+    scene_plan_missing: "Плана питания из сцены нет — он пропущен",
+    scenes_none: "Сцен пока нет — «+» в шапке создаёт сцену из текущих настроек.",
+    wifi: "Wi‑Fi",
     accents: ["Лайм", "Фиолетовый", "Индиго", "Фуксия", "Лазурь"],
 };
 
@@ -426,20 +461,13 @@ const EN: Tr = Tr {
     favorites_full: "Up to three favorites — unstar another one first",
     star_add: "Add to favorites",
     star_remove: "Remove from favorites",
-    profile_save: "Save the current display as a profile",
-    profile_name: "Profile name",
-    profile_already: "This profile is already on",
-    save: "Save",
     cancel: "Cancel",
-    profiles_settings: "Display profiles",
-    profiles_none: "No profiles yet — “+” on the Display card saves the current display.",
     change: "Change…",
     press_keys: "Press a shortcut: Ctrl or Alt and a key; Esc to cancel",
     key_busy: "Taken by another app",
     key_free: "Works",
     no_key: "No shortcut",
     remove_key: "Remove shortcut",
-    delete: "Delete profile",
     key_is_panel: "This is the panel shortcut — pick another one",
     brightness: "Brightness",
     brightness_short: "Brightness",
@@ -533,7 +561,6 @@ const EN: Tr = Tr {
     refresh_hz: "Refresh, Hz",
     scale_pct: "Scale, %",
     hide: "Hide (Esc)",
-    profile: "Profile",
     color: "Color",
     custom_color: "Custom color…",
     hue: "Hue",
@@ -622,6 +649,31 @@ const EN: Tr = Tr {
     hdr: "HDR",
     hdr_hint: "HDR for this monitor. Win+Alt+B toggles all monitors at once",
     hdr_blocked: "Windows won't turn HDR on for this monitor right now",
+    scene: "Scene",
+    scenes: "Scenes",
+    scene_new: "New scene from current settings",
+    scene_what: "What the scene changes",
+    scene_untouched: "leave as is",
+    scene_take: "Use current values",
+    scene_name_key: "Name and shortcut",
+    scene_name: "Name",
+    scene_name_empty: "A name is needed",
+    scene_name_taken: "There is already a scene with this name",
+    scene_key: "Shortcut",
+    scene_exit: "Leaving the scene",
+    scene_undo: "Click again to undo",
+    scene_undo_note: "Everything the scene changed comes back",
+    scene_confirm_note: "As now, a display mode change asks “Keep?” and reverts by itself after 15 s.",
+    scene_delete: "Delete scene",
+    scene_delete_yes: "Delete",
+    scene_undone: "Undone",
+    scene_nothing_undo: "Nothing to undo",
+    scene_already: "This scene is already on",
+    scene_edit: "Edit scene",
+    scene_rows_none: "Check what to change",
+    scene_plan_missing: "The power plan from the scene is gone — skipped",
+    scenes_none: "No scenes yet — “+” in the header makes one from the current settings.",
+    wifi: "Wi‑Fi",
     accents: ["Lime", "Violet", "Indigo", "Fuchsia", "Sky"],
 };
 
@@ -754,19 +806,97 @@ pub fn revert_in(lang: Lang, secs: u64) -> String {
     }
 }
 
-/// Имя нового профиля, если его не ввели: «Профиль 2».
-pub fn profile_default(lang: Lang, n: usize) -> String {
+/// Имя новой сцены: «Сцена 2» (первый свободный номер).
+pub fn scene_n(lang: Lang, n: usize) -> String {
     match lang {
-        Lang::Ru => format!("Профиль {n}"),
-        Lang::En => format!("Profile {n}"),
+        Lang::Ru => format!("Сцена {n}"),
+        Lang::En => format!("Scene {n}"),
     }
 }
 
-/// Сколько мониторов профиля сейчас нет.
+/// Уведомление, когда сцену поставили: «Сцена «Кино»».
+pub fn scene_set(lang: Lang, name: &str) -> String {
+    match lang {
+        Lang::Ru => format!("Сцена «{name}»"),
+        Lang::En => format!("Scene “{name}”"),
+    }
+}
+
+/// Вопрос перед удалением: «Удалить сцену «Кино»?».
+pub fn scene_delete_q(lang: Lang, name: &str) -> String {
+    match lang {
+        Lang::Ru => format!("Удалить сцену «{name}»?"),
+        Lang::En => format!("Delete scene “{name}”?"),
+    }
+}
+
+/// Имя в кавычках языка — заголовок экрана правки сцены: «Кино», “Movie”.
+pub fn scene_quoted(lang: Lang, name: &str) -> String {
+    match lang {
+        Lang::Ru => format!("«{name}»"),
+        Lang::En => format!("“{name}”"),
+    }
+}
+
+/// Подсказка чипа сцены: клавиша (если есть), что делает щелчок и — если возврат включён — второй, и правый щелчок.
+/// «Ctrl+Alt+3 · щелчок — включить, ещё щелчок — вернуть; правый щелчок — изменить»; без клавиши — с большой буквы.
+pub fn scene_tip(lang: Lang, hotkey: Option<&str>, undo: bool) -> String {
+    let (click, again, right) = match lang {
+        Lang::Ru => ("щелчок — включить", ", ещё щелчок — вернуть", "; правый щелчок — изменить"),
+        Lang::En => ("click to switch on", ", click again to undo", "; right-click to edit"),
+    };
+    let tip = format!("{click}{}{right}", if undo { again } else { "" });
+    match hotkey {
+        Some(key) => format!("{key} · {tip}"),
+        None => {
+            let mut chars = tip.chars();
+            chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default()
+        }
+    }
+}
+
+/// Режим одного монитора сцены: «3840 × 2160 · 60 Гц · 150 % · HDR»; `sdr` в файле — «· SDR».
+pub fn scene_mode(lang: Lang, width: u32, height: u32, hz: u32, scale: Option<u32>, hdr: Option<bool>) -> String {
+    let mut s = format!("{width} × {height} · ");
+    s += &match lang {
+        Lang::Ru => format!("{hz} Гц"),
+        Lang::En => format!("{hz} Hz"),
+    };
+    if let Some(sc) = scale {
+        s += &match lang {
+            Lang::Ru => format!(" · {sc} %"),
+            Lang::En => format!(" · {sc}%"),
+        };
+    }
+    match hdr {
+        Some(true) => s += " · HDR",
+        Some(false) => s += " · SDR",
+        None => {}
+    }
+    s
+}
+
+/// Экран сцены на нескольких мониторах — коротко, полное — в подсказке: «Мониторов: 2».
+pub fn scene_monitors(lang: Lang, n: usize) -> String {
+    match lang {
+        Lang::Ru => format!("Мониторов: {n}"),
+        Lang::En => format!("{n} monitors"),
+    }
+}
+
+/// Процент у строки «Яркость»: «80 %» / «80%».
+pub fn scene_percent(lang: Lang, n: u8) -> String {
+    match lang {
+        Lang::Ru => format!("{n} %"),
+        Lang::En => format!("{n}%"),
+    }
+}
+
+/// Сколько мониторов сцены сейчас нет.
 pub fn monitors_missing(lang: Lang, n: usize) -> String {
     match lang {
-        Lang::Ru => format!("Мониторов из профиля нет: {n} — пропущены"),
-        Lang::En => format!("Monitors from the profile not found: {n} — skipped"),
+        Lang::Ru => format!("Мониторов из сцены нет: {n} — пропущены"),
+        Lang::En => format!("Monitors from the scene not found: {n} — skipped"),
     }
 }
 
@@ -790,11 +920,11 @@ pub fn exclude_add(lang: Lang, exe: &str) -> String {
     }
 }
 
-/// Сочетание уже у профиля.
-pub fn key_is_profile(lang: Lang, name: &str) -> String {
+/// Сочетание уже у сцены.
+pub fn key_is_scene(lang: Lang, name: &str) -> String {
     match lang {
-        Lang::Ru => format!("Это сочетание у профиля «{name}» — выберите другое"),
-        Lang::En => format!("This shortcut belongs to the profile “{name}” — pick another one"),
+        Lang::Ru => format!("Это сочетание у сцены «{name}» — выберите другое"),
+        Lang::En => format!("This shortcut belongs to the scene “{name}” — pick another one"),
     }
 }
 

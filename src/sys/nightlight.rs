@@ -4,6 +4,10 @@
 // блока, вложенный блок `43 42 01 00` [`02 01` — включён] `c6 14` …. Включить — вставить `02 01` и
 // длину +2; выключить — наоборот; время — сейчас, иначе Windows не заметит. Незнакомое устройство
 // значения — не трогаем (`None`).
+//
+// В демо и в тестах (`sys::fake_reads`) ночной свет выдуманный: выключен, помнит, что в него записали (писатель за заслоном).
+
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_BINARY, RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
@@ -12,6 +16,15 @@ use windows::Win32::System::Registry::{
 use windows::core::PCWSTR;
 
 use super::wide;
+
+/// Выдуманный ночной свет: включён ли.
+static FAKE_ON: AtomicBool = AtomicBool::new(false);
+
+/// Выдуманный ночной свет выключен, как вначале (для тестов).
+#[cfg(test)]
+pub fn fake_reset() {
+    FAKE_ON.store(false, Ordering::Relaxed);
+}
 
 const KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\CloudStore\Store\DefaultAccount\Current\default$windows.data.bluelightreduction.bluelightreductionstate\windows.data.bluelightreduction.bluelightreductionstate";
 
@@ -93,14 +106,15 @@ fn read() -> Option<Vec<u8>> {
 
 /// Включён ли ночной свет сейчас; не узнать — `None` (плитка «недоступно»).
 pub fn state() -> Option<bool> {
-    if super::demo() {
-        return Some(false);
+    if super::fake_reads() {
+        return Some(FAKE_ON.load(Ordering::Relaxed));
     }
     read().and_then(|d| parse(&d))
 }
 
 pub fn set(on: bool) -> Result<(), String> {
     if super::blocked(&format!("nightlight::set {on}")) {
+        FAKE_ON.store(on, Ordering::Relaxed);
         return Ok(());
     }
     let data = read().ok_or("night light state not found")?;

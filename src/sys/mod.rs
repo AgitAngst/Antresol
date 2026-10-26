@@ -50,6 +50,35 @@ pub fn isolated() -> bool {
     cfg!(test) || demo()
 }
 
+/// Читать выдуманное, а не настоящую Windows: тему, уведомления, план питания, ночной свет, Wi‑Fi и яркость монитора
+/// в демо и в тестах. Выдуманный мир помнит, что в него записали (писатель за заслоном), — так сцены проверяются без
+/// окна и Windows. Живой тест (`cargo test -- --ignored`) просит настоящее чтение — [`LIVE_READS`].
+pub fn fake_reads() -> bool {
+    #[cfg(test)]
+    if LIVE_READS.load(Ordering::Relaxed) {
+        return false;
+    }
+    isolated()
+}
+
+/// Живой тест читает настоящую Windows (только читает): `fake_reads` отвечает «нет».
+#[cfg(test)]
+pub static LIVE_READS: AtomicBool = AtomicBool::new(false);
+
+/// Тесты, что ставят и читают выдуманную тему, уведомления, план питания, ночной свет и Wi‑Fi (один на все тесты мир), и
+/// тест заслона идут по одному. Берут первым, до `KEYS_TEST`, чтобы замки не ждали друг друга по кругу.
+#[cfg(test)]
+pub static WORLD_TEST: Mutex<()> = Mutex::new(());
+
+/// Выдуманная система как вначале: тема тёмная, уведомления включены, план «Balanced», ночной свет выключен, Wi‑Fi
+/// включён. Звать под `WORLD_TEST`.
+#[cfg(test)]
+pub fn reset_fake_world() {
+    system::fake_reset();
+    nightlight::fake_reset();
+    net::fake_reset();
+}
+
 /// Что заслон не пропустил в тестах: по строке на каждую остановленную запись (для проверки заслона).
 #[cfg(test)]
 pub static BLOCKED: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -493,6 +522,8 @@ mod tests {
     /// запись — `real_write` уронил бы тест раньше, чем что-то поменялось бы на этом ПК.
     #[test]
     fn every_writer_stops_at_the_guard() {
+        // Писатели меняют выдуманную систему (она одна на все тесты): держим её и возвращаем как была.
+        let _world = WORLD_TEST.lock().unwrap_or_else(|e| e.into_inner());
         let dev = r"\\.\GUARD-TEST";
         let mode = display::Mode { width: 1920, height: 1080, hz: 144, bits: 32 };
         assert!(isolated(), "в тестах мир выдуманный");
@@ -535,6 +566,44 @@ mod tests {
         ] {
             assert!(was_blocked(what), "{what}");
         }
+        reset_fake_world();
+    }
+
+    /// Выдуманный мир помнит, что в него записали (за заслоном), а читается то же, что записали: тема, уведомления, план
+    /// питания, ночной свет, Wi‑Fi и яркость монитора (у каждого выдуманного монитора своя). Вначале — как в демо.
+    #[test]
+    fn the_fake_world_remembers_what_was_written() {
+        let _world = WORLD_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        reset_fake_world();
+        assert!(fake_reads(), "в тестах читаем выдуманное");
+        let guid = windows::core::GUID::from_u128;
+        assert_eq!(system::dark_theme(), Some(true));
+        assert_eq!(system::notifications_off(), Some(false));
+        assert_eq!(system::plans().1, Some(guid(1)));
+        assert_eq!(nightlight::state(), Some(false));
+        assert_eq!(net::wifi().map(|w| (w.on, w.network)), Some((true, "Demo-Net".into())));
+        system::set_dark_theme(false).unwrap();
+        system::set_notifications_off(true).unwrap();
+        system::set_plan(&guid(3)).unwrap();
+        nightlight::set(true).unwrap();
+        net::set_wifi(false).unwrap();
+        assert_eq!(system::dark_theme(), Some(false));
+        assert_eq!(system::notifications_off(), Some(true));
+        assert_eq!(system::plans().1, Some(guid(3)));
+        assert_eq!(nightlight::state(), Some(true));
+        assert_eq!(net::wifi().map(|w| (w.on, w.network)), Some((false, String::new())), "нет радио — нет и сети");
+        // Монитор запоминает яркость; другой выдуманный монитор — свою; чужая «ручка» никого не трогает.
+        let (a, b) = (r"\\.\FAKE-WORLD-A", r"\\.\FAKE-WORLD-B");
+        let bright = |d: &str| ddc::read(d, 0, false)[0].brightness.unwrap().current;
+        assert_eq!((bright(a), bright(b)), (70, 70));
+        ddc::set(ddc::fake_handle(a), 0, ddc::BRIGHTNESS, 25).unwrap();
+        ddc::set(ddc::fake_handle(a), 0, ddc::CONTRAST, 99).unwrap();
+        ddc::set(987_654, 0, ddc::BRIGHTNESS, 1).unwrap();
+        assert_eq!((bright(a), bright(b)), (25, 70));
+        assert_ne!(ddc::fake_handle(a), ddc::fake_handle(b), "у каждого выдуманного монитора своя «ручка»");
+        assert_eq!(ddc::fake_handle(a), ddc::fake_handle(&a.to_lowercase()), "имя устройства — без учёта регистра");
+        reset_fake_world();
+        assert_eq!((system::dark_theme(), system::plans().1), (Some(true), Some(guid(1))));
     }
 
     /// В выдуманном мире ни одно сочетание не занимается (потока клавиш нет), а какие заняты на этом ПК —

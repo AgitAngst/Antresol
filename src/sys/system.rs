@@ -7,6 +7,11 @@
 // - Уведомления — `ToastEnabled` в `HKCU\…\PushNotifications` (общий выключатель уведомлений «Параметров»).
 // - План питания — powrprof: `PowerEnumerate`, `PowerReadFriendlyName`, `PowerGetActiveScheme`,
 //   `PowerSetActiveScheme`.
+//
+// В демо и в тестах (`sys::fake_reads`) тема, уведомления и план питания — выдуманные: мир помнит, что в него записали
+// (писатель за заслоном), чтобы сцены проверялись без Windows. Вначале: тема тёмная, уведомления включены, план «Balanced».
+
+use std::sync::Mutex;
 
 use windows::Win32::Foundation::{LPARAM, WPARAM};
 use windows::Win32::System::Power::{
@@ -23,6 +28,41 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{GUID, PCWSTR};
 
 use super::wide;
+
+/// Выдуманная система: что «стоит» сейчас.
+struct World {
+    dark: bool,
+    quiet: bool,
+    /// План питания — GUID числом.
+    plan: u128,
+}
+
+const WORLD_START: World = World { dark: true, quiet: false, plan: 1 };
+
+static WORLD: Mutex<World> = Mutex::new(WORLD_START);
+
+fn world<R>(f: impl FnOnce(&mut World) -> R) -> R {
+    f(&mut WORLD.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
+/// Выдуманная система как вначале (для тестов).
+#[cfg(test)]
+pub fn fake_reset() {
+    world(|w| *w = WORLD_START);
+}
+
+/// GUID плана питания строкой, как он лежит в `config.txt`: `{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}`.
+pub fn guid_string(guid: &GUID) -> String {
+    let h = format!("{:032X}", guid.to_u128());
+    format!("{{{}-{}-{}-{}-{}}}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..])
+}
+
+/// GUID из строки `config.txt` (скобки и регистр не важны); не GUID — `None`.
+pub fn guid_from(s: &str) -> Option<GUID> {
+    let canon = crate::config::normalize_guid(s)?;
+    let hex: String = canon.chars().filter(char::is_ascii_hexdigit).collect();
+    u128::from_str_radix(&hex, 16).ok().map(GUID::from_u128)
+}
 
 /// Не давать уснуть компьютеру и гаснуть экрану (`true`) или снова как обычно. Ответ — получилось ли
 /// (ноль от Windows — ошибка; прежнее состояние с `ES_CONTINUOUS` нулём не бывает).
@@ -72,8 +112,8 @@ const PUSH: &str = r"Software\Microsoft\Windows\CurrentVersion\PushNotifications
 
 /// Тёмная ли тема Windows (программы); не узнать — `None`.
 pub fn dark_theme() -> Option<bool> {
-    if super::demo() {
-        return Some(true);
+    if super::fake_reads() {
+        return Some(world(|w| w.dark));
     }
     read_dword(THEME, "AppsUseLightTheme").map(|v| v == 0)
 }
@@ -81,6 +121,7 @@ pub fn dark_theme() -> Option<bool> {
 /// Тёмная или светлая тема Windows — и для программ, и для панели задач.
 pub fn set_dark_theme(dark: bool) -> Result<(), String> {
     if super::blocked(&format!("set_dark_theme {dark}")) {
+        world(|w| w.dark = dark);
         return Ok(());
     }
     let light = if dark { 0 } else { 1 };
@@ -107,14 +148,15 @@ pub fn set_dark_theme(dark: bool) -> Result<(), String> {
 
 /// Выключены ли уведомления Windows (`ToastEnabled` = 0); нет значения — включены.
 pub fn notifications_off() -> Option<bool> {
-    if super::demo() {
-        return Some(false);
+    if super::fake_reads() {
+        return Some(world(|w| w.quiet));
     }
     Some(read_dword(PUSH, "ToastEnabled").is_some_and(|v| v == 0))
 }
 
 pub fn set_notifications_off(off: bool) -> Result<(), String> {
     if super::blocked(&format!("set_notifications_off {off}")) {
+        world(|w| w.quiet = off);
         return Ok(());
     }
     write_dword(PUSH, "ToastEnabled", if off { 0 } else { 1 })
@@ -129,9 +171,10 @@ pub struct Plan {
 
 /// Все планы питания и какой стоит.
 pub fn plans() -> (Vec<Plan>, Option<GUID>) {
-    if super::demo() {
+    if super::fake_reads() {
         let p = |n: u128, name: &str| Plan { guid: GUID::from_u128(n), name: name.into() };
-        return (vec![p(1, "Balanced"), p(2, "High performance"), p(3, "Power saver")], Some(GUID::from_u128(1)));
+        let list = vec![p(1, "Balanced"), p(2, "High performance"), p(3, "Power saver")];
+        return (list, Some(GUID::from_u128(world(|w| w.plan))));
     }
     let mut out = Vec::new();
     for i in 0.. {
@@ -181,6 +224,7 @@ pub fn plans() -> (Vec<Plan>, Option<GUID>) {
 
 pub fn set_plan(guid: &GUID) -> Result<(), String> {
     if super::blocked(&format!("set_plan {guid:?}")) {
+        world(|w| w.plan = guid.to_u128());
         return Ok(());
     }
     super::real_write("PowerSetActiveScheme");

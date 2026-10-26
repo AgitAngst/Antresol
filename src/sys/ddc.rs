@@ -3,6 +3,11 @@
 // Каждый запрос к монитору идёт по шине монитора и занимает десятки миллисекунд, строка
 // возможностей — до секунды, поэтому всё это зовётся только из потока модуля, не из окна.
 // Встроенный экран ноутбука DDC/CI не отвечает — для него здесь ничего нет.
+//
+// В демо и в тестах (`sys::isolated`) монитор выдуманный, шина не трогается: яркость каждого выдуманного монитора
+// помнится — её ставит `set` (за заслоном), читает `read`; так сцены проверяются без монитора.
+
+use std::sync::Mutex;
 
 use windows::Win32::Devices::Display::{
     CapabilitiesRequestAndCapabilitiesReply, DestroyPhysicalMonitors, GetCapabilitiesStringLength,
@@ -72,14 +77,43 @@ fn capabilities(m: &PHYSICAL_MONITOR) -> Option<String> {
     }
 }
 
-/// Выдуманный монитор для снимков и тестов: значения и входы не настоящие, шина DDC/CI не трогается.
+/// Яркость выдуманного монитора вначале, %.
+const FAKE_BRIGHTNESS: u32 = 70;
+
+/// Выдуманные мониторы по именам устройств: яркость каждого. Нужный заводится при первом обращении.
+static FAKE: Mutex<Vec<(String, u32)>> = Mutex::new(Vec::new());
+
+/// Место выдуманного монитора в [`FAKE`]; нет — заводится.
+fn fake_index(list: &mut Vec<(String, u32)>, device: &str) -> usize {
+    match list.iter().position(|(d, _)| d.eq_ignore_ascii_case(device)) {
+        Some(i) => i,
+        None => {
+            list.push((device.to_string(), FAKE_BRIGHTNESS));
+            list.len() - 1
+        }
+    }
+}
+
+/// «Ручка» выдуманного монитора вместо `HMONITOR`: его номер в списке выдуманных (с единицы, у каждого свой), чтобы `set`
+/// знал, чью яркость менять.
+pub fn fake_handle(device: &str) -> usize {
+    fake_index(&mut FAKE.lock().unwrap_or_else(|e| e.into_inner()), device) + 1
+}
+
+/// Выдуманный монитор для снимков и тестов: значения и входы не настоящие, шина DDC/CI не трогается. Яркость — та, что
+/// в него записали.
 fn fake(device: &str, with_caps: bool) -> Physical {
     let f = |current| Some(Feature { current, max: 100 });
+    let brightness = {
+        let mut list = FAKE.lock().unwrap_or_else(|e| e.into_inner());
+        let i = fake_index(&mut list, device);
+        list[i].1
+    };
     Physical {
         device: device.to_string(),
         index: 0,
         name: "Monitor 27".to_string(),
-        brightness: f(70),
+        brightness: f(brightness),
         contrast: f(50),
         input: Some(0x11),
         inputs: if with_caps { vec![0x11, 0x0F] } else { Vec::new() },
@@ -122,6 +156,13 @@ pub fn read(device: &str, handle: usize, with_caps: bool) -> Vec<Physical> {
 /// Поставить значение VCP физическому монитору `index` логического `handle`.
 pub fn set(handle: usize, index: usize, code: u8, value: u32) -> Result<(), String> {
     if super::blocked(&format!("ddc::set {handle} {index} 0x{code:02X} {value}")) {
+        // Выдуманный монитор запоминает яркость; чужой «ручки» (не из `fake_handle`) в выдуманном мире нет — ничего.
+        if code == BRIGHTNESS {
+            let mut list = FAKE.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(entry) = handle.checked_sub(1).and_then(|i| list.get_mut(i)) {
+                entry.1 = value;
+            }
+        }
         return Ok(());
     }
     with_physical(handle, |list| {

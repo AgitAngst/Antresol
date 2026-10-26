@@ -3,8 +3,10 @@
 // Избранное — до трёх разрешений на монитор чипами сверху. Частота запоминается для каждого
 // разрешения (то, что сейчас стоит и не ждёт «Оставить»), и при переходе на него ставится она.
 // HDR — кнопка в плашке режима: переключает только этот монитор, без «Оставить?» (тот же щелчок вернёт).
-// Профили — режим, масштаб и HDR всех мониторов разом: сохраняются из текущего, ставятся щелчком или
-// клавишей (из app.rs через `Command`), откат — тот же «Оставить?» для всех изменённых мониторов.
+// Сцены — экран (режим, масштаб и HDR всех мониторов разом) и системные настройки: экранную часть ставит эта карточка
+// (из app.rs через `Command`), откат — тот же «Оставить?» для всех изменённых мониторов. Перед сменой карточка помнит,
+// что было (`before`): второй щелчок по стоящей сцене возвращает это сразу, в реестр и без «Оставить?» — прежний режим
+// был рабочим.
 // Режим до «Оставить» стоит только на время (`display::apply` без записи в реестр) и в реестр попадает после ответа
 // (`display::commit`): не ответили, закрыли программу (`shutdown`), она упала — настоящий режим остаётся прежним.
 
@@ -15,7 +17,7 @@ use anvil_ui::{Palette, Tone};
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 
 use super::{Command, Ctx, Module, chip_grid, row};
-use crate::config::{Profile, ProfileMonitor};
+use crate::config::{Profile, ProfileMonitor, SceneRow};
 use crate::sys::display::{self, Mode, Scale};
 use crate::sys::monitor;
 use crate::texts::{self, Tr};
@@ -42,6 +44,7 @@ pub fn min_width_for(monitors: usize, hdr: bool) -> f32 {
 }
 
 /// Что вернуть при откате: прежний режим, масштаб и (или) HDR монитора.
+#[derive(Clone)]
 struct Change {
     device: String,
     /// Режим до смены — его вернёт откат.
@@ -59,6 +62,15 @@ struct Change {
 struct Pending {
     changes: Vec<Change>,
     at: Instant,
+    /// Имя сцены, что поставила этот режим (щелчок по чипу, клавиша); `None` — режим меняли в самой карточке.
+    scene: Option<String>,
+}
+
+/// Как было до сцены (экран): монитор — режим, масштаб и HDR, что стояли. Живёт, пока не вернули, не поставили другую
+/// сцену или не отказались от режима («Вернуть», 15 секунд); перезапуск программы его забывает.
+struct SceneBefore {
+    scene: String,
+    changes: Vec<Change>,
 }
 
 /// Что сейчас на мониторе — для «какой профиль стоит» без опроса Windows каждый кадр.
@@ -87,12 +99,14 @@ pub struct Display {
     /// Режимы, масштаб и HDR всех мониторов на момент последнего чтения.
     states: Vec<State>,
     pending: Option<Pending>,
+    /// Как было до сцены, что стоит сейчас, — на второй щелчок по ней.
+    before: Option<SceneBefore>,
     /// Показан полный список разрешений, а не избранное.
     all_res: bool,
 }
 
-/// Стоит ли профиль сейчас: у всех его мониторов тот же режим и (если заданы) масштаб и HDR. HDR сверяется там, где
-/// монитор его умеет: чего поставить нельзя, за тем профиль не гонится. Монитора нет — профиль не стоит.
+/// Стоит ли экранная часть сцены сейчас: у всех её мониторов тот же режим и (если заданы) масштаб и HDR. HDR сверяется там,
+/// где монитор его умеет: чего поставить нельзя, за тем сцена не гонится. Монитора нет — не стоит.
 fn profile_active(p: &Profile, states: &[State]) -> bool {
     p.monitors.iter().all(|pm| {
         states.iter().any(|s| {
@@ -109,7 +123,7 @@ fn hdr_usable(hdr: display::Hdr) -> bool {
     hdr.enabled || !hdr.force_disabled
 }
 
-/// HDR монитора для профилей: `Some(включён)`, если монитор его умеет.
+/// HDR монитора для сцен: `Some(включён)`, если монитор его умеет.
 fn hdr_state(device: &str) -> Option<bool> {
     display::hdr(device).filter(|h| h.supported).map(|h| h.enabled)
 }
@@ -250,7 +264,7 @@ impl Display {
                     hdr: None,
                     primary: None,
                 };
-                self.pending = Some(Pending { changes: vec![change], at: Instant::now() });
+                self.pending = Some(Pending { changes: vec![change], at: Instant::now(), scene: None });
                 self.current = Some(mode);
             }
             Err(e) => {
@@ -272,11 +286,10 @@ impl Display {
         self.read_states();
     }
 
-    /// Профиль из того, что стоит сейчас на всех мониторах (HDR — у тех, что его умеют).
-    fn snapshot(&mut self, name: String) -> Profile {
+    /// Что стоит сейчас на всех мониторах — экранная часть сцены (HDR — у тех, что его умеют).
+    fn current_monitors(&mut self) -> Vec<ProfileMonitor> {
         self.read_states();
-        let monitors = self
-            .states
+        self.states
             .iter()
             .map(|s| ProfileMonitor {
                 device: s.device.clone(),
@@ -286,24 +299,46 @@ impl Display {
                 scale: s.scale,
                 hdr: s.hdr,
             })
-            .collect();
-        Profile { name, hotkey: None, monitors }
+            .collect()
     }
 
-    /// Поставить профиль на все его мониторы; изменённое — в откат.
-    fn apply_profile(&mut self, profile: &Profile, cx: &mut Ctx) {
+    /// Запомнить, как было до сцены `scene`: что она только что поменяла. Та же сцена ещё раз (поставили, а потом
+    /// поставили снова) продолжает прежний «сеанс»: у монитора, что уже помним, остаётся то, что было до первой постановки;
+    /// возврат вернёт всё к тому, что было до сцены, а не до её второго раза.
+    fn remember(&mut self, scene: &str, changes: &[Change]) {
+        let mut kept = self.before.take().filter(|b| b.scene == scene).map(|b| b.changes).unwrap_or_default();
+        for c in changes {
+            match kept.iter_mut().find(|k| k.device.eq_ignore_ascii_case(&c.device)) {
+                Some(k) => {
+                    k.mode = k.mode.or(c.mode);
+                    k.scale = k.scale.or(c.scale);
+                    k.hdr = k.hdr.or(c.hdr);
+                }
+                None => kept.push(c.clone()),
+            }
+        }
+        self.before = (!kept.is_empty()).then(|| SceneBefore { scene: scene.to_string(), changes: kept });
+    }
+
+    /// Поставить экранную часть сцены на все её мониторы; изменённое — в откат и в `before`. Что поставить сцена не
+    /// отметила (экрана нет) — ничего, а возврат прежней сцены пропадает.
+    fn apply_scene(&mut self, scene: &Profile, cx: &mut Ctx) {
         let t = cx.t;
         if self.pending.is_some() {
             cx.toasts.push((t.answer_first.to_string(), Tone::Warning));
+            return;
+        }
+        if self.before.as_ref().is_some_and(|b| b.scene != scene.name) {
+            self.before = None;
+        }
+        if scene.monitors.is_empty() {
             return;
         }
         let present = display::monitors(&self.panel);
         let mut changes = Vec::new();
         let mut missing = 0;
         let mut unavailable = 0;
-        // HDR из профиля, который не поставился (Windows не даёт включить, сбой): профиль уже «не стоит».
-        let mut hdr_refused = false;
-        for pm in &profile.monitors {
+        for pm in &scene.monitors {
             let Some(m) = present.iter().find(|m| m.device.eq_ignore_ascii_case(&pm.device)) else {
                 missing += 1;
                 continue;
@@ -325,7 +360,7 @@ impl Display {
                         change.now = Some(want);
                     }
                     Err(e) => {
-                        eprintln!("profile mode change failed on {dev}: {e}");
+                        eprintln!("scene mode change failed on {dev}: {e}");
                         cx.toasts.push((format!("{}: {e}", t.failed), Tone::Danger));
                     }
                 }
@@ -336,12 +371,12 @@ impl Display {
                 match display::set_scale(&dev, want) {
                     Ok(()) => change.scale = Some(old),
                     Err(e) => {
-                        eprintln!("profile scale change failed on {dev}: {e}");
+                        eprintln!("scene scale change failed on {dev}: {e}");
                         cx.toasts.push((format!("{}: {e}", t.failed), Tone::Danger));
                     }
                 }
             }
-            // HDR — после режима и масштаба. У профилей до 2.0 и у мониторов без HDR его не трогаем.
+            // HDR — после режима и масштаба. У сцен (профилей) до 2.0 и у мониторов без HDR его не трогаем.
             if let Some(want) = pm.hdr
                 && let Some(now) = display::hdr(&dev).filter(|h| h.supported)
                 && want != now.enabled
@@ -349,8 +384,7 @@ impl Display {
                 match display::set_hdr(&dev, want) {
                     Ok(()) => change.hdr = Some(now.enabled),
                     Err(e) => {
-                        hdr_refused = true;
-                        eprintln!("profile HDR change failed on {dev}: {e}");
+                        eprintln!("scene HDR change failed on {dev}: {e}");
                         cx.toasts.push(hdr_toast(&e, t));
                     }
                 }
@@ -365,13 +399,55 @@ impl Display {
         if unavailable > 0 {
             cx.toasts.push((t.mode_unavailable.to_string(), Tone::Warning));
         }
+        // «Эта сцена уже стоит» говорит панель: стоит ли она вся, знает только она, а не одна карточка.
         if changes.is_empty() {
-            if missing == 0 && unavailable == 0 && !hdr_refused {
-                cx.toasts.push((t.profile_already.to_string(), Tone::Neutral));
-            }
             return;
         }
-        self.pending = Some(Pending { changes, at: Instant::now() });
+        self.remember(&scene.name, &changes);
+        self.pending = Some(Pending { changes, at: Instant::now(), scene: Some(scene.name.clone()) });
+        self.after_change();
+    }
+
+    /// Вернуть экран, как был до сцены: режим — сразу и в реестр (это прежний рабочий режим, «Оставить?» не нужен),
+    /// масштаб и HDR — как были. Висит «Оставить?» от этой же сцены — это тот же откат, что «Вернуть». Чужой вопрос висит —
+    /// сначала на него ответить, и возврат остаётся.
+    fn undo_scene(&mut self, scene: &Profile, cx: &mut Ctx) {
+        if !self.scene_can_undo(scene) {
+            return;
+        }
+        match &self.pending {
+            Some(p) if p.scene.as_deref() == Some(scene.name.as_str()) => {
+                self.revert();
+                return;
+            }
+            Some(_) => {
+                cx.toasts.push((cx.t.answer_first.to_string(), Tone::Warning));
+                return;
+            }
+            None => {}
+        }
+        let Some(before) = self.before.take() else { return };
+        for c in before.changes {
+            // Как в `revert`: HDR ставился последним — возвращается первым; дальше режим и масштаб.
+            if let Some(on) = c.hdr
+                && let Err(e) = display::set_hdr(&c.device, on)
+            {
+                eprintln!("HDR undo failed on {}: {e}", c.device);
+                cx.toasts.push(hdr_toast(&e, cx.t));
+            }
+            if let Some(m) = c.mode
+                && let Err(e) = display::apply(&c.device, m).and_then(|()| display::commit(&c.device, m))
+            {
+                eprintln!("display mode undo failed on {}: {e}", c.device);
+                cx.toasts.push((format!("{}: {e}", cx.t.failed), Tone::Danger));
+            }
+            if let Some(s) = c.scale
+                && let Err(e) = display::set_scale(&c.device, s)
+            {
+                eprintln!("scale undo failed on {}: {e}", c.device);
+                cx.toasts.push((format!("{}: {e}", cx.t.failed), Tone::Danger));
+            }
+        }
         self.after_change();
     }
 
@@ -401,6 +477,12 @@ impl Display {
 
     fn revert(&mut self) {
         let Some(pending) = self.pending.take() else { return };
+        // Отказались от режима, что поставила сцена: по экрану её уже нет, возвращать нечего.
+        if let Some(name) = &pending.scene
+            && self.before.as_ref().is_some_and(|b| &b.scene == name)
+        {
+            self.before = None;
+        }
         for c in pending.changes {
             // HDR ставился последним — возвращается первым; дальше режим и масштаб.
             if let Some(on) = c.hdr
@@ -445,7 +527,7 @@ impl Display {
                     hdr: None,
                     primary: Some(old),
                 };
-                self.pending = Some(Pending { changes: vec![change], at: Instant::now() });
+                self.pending = Some(Pending { changes: vec![change], at: Instant::now(), scene: None });
                 self.monitors = display::monitors(&self.panel);
                 self.after_change();
             }
@@ -473,24 +555,6 @@ impl Display {
                 self.revert();
             }
         });
-    }
-
-    /// Сохранить то, что стоит сейчас, профилем (шапка, «+»). Пустое имя — «Профиль N»;
-    /// то же имя — обновить режимы, клавишу оставить.
-    fn save_profile(&mut self, name: &str, cx: &mut Ctx) {
-        let mut clean = Profile::clean_name(name);
-        if clean.is_empty() {
-            let free = (1..).find(|n| {
-                let name = texts::profile_default(cx.lang, *n);
-                !cx.settings.profiles.iter().any(|p| p.name == name)
-            });
-            clean = texts::profile_default(cx.lang, free.unwrap_or(1));
-        }
-        let fresh = self.snapshot(clean.clone());
-        match cx.settings.profiles.iter_mut().find(|p| p.name == clean) {
-            Some(p) => p.monitors = fresh.monitors,
-            None => cx.settings.profiles.push(fresh),
-        }
     }
 
     /// Строка избранного во всю ширину: звезда и «2560 × 1440 · 144»; стоящее — подложка акцента.
@@ -677,8 +741,23 @@ impl Module for Display {
         if self.name.is_empty() { device.to_string() } else { format!("{} · {device}", self.name) }
     }
 
-    fn active_profile(&self, profiles: &[Profile]) -> Option<usize> {
-        profiles.iter().position(|p| profile_active(p, &self.states))
+    /// Экран сцены стоит: режим, масштаб и (где монитор его умеет) HDR всех её мониторов. Экрана в сцене нет — `None`.
+    fn scene_part(&self, scene: &Profile) -> Option<bool> {
+        (!scene.monitors.is_empty()).then(|| profile_active(scene, &self.states))
+    }
+
+    fn scene_can_undo(&self, scene: &Profile) -> bool {
+        self.before.as_ref().is_some_and(|b| b.scene == scene.name)
+    }
+
+    /// «Экран»: строка сцены есть, если хоть один монитор прочитан.
+    fn scene_rows(&self) -> Vec<(SceneRow, bool)> {
+        vec![(SceneRow::Screen, !self.states.is_empty())]
+    }
+
+    /// «Оставить этот режим?» ждёт ответа — новую сцену не ставят.
+    fn blocks_scene(&self) -> bool {
+        self.pending.is_some()
     }
 
     fn ticking(&self) -> bool {
@@ -705,12 +784,25 @@ impl Module for Display {
             self.panel = display::device_for(cx.monitor).to_string();
         }
         match cmd {
-            Command::ApplyProfile(i) => {
-                if let Some(profile) = cx.settings.profiles.get(*i).cloned() {
-                    self.apply_profile(&profile, cx);
+            Command::ApplyScene(i) => {
+                if let Some(scene) = cx.settings.profiles.get(*i).cloned() {
+                    self.apply_scene(&scene, cx);
                 }
             }
-            Command::SaveProfile(name) => self.save_profile(name, cx),
+            Command::UndoScene(i) => {
+                if let Some(scene) = cx.settings.profiles.get(*i).cloned() {
+                    self.undo_scene(&scene, cx);
+                }
+            }
+            Command::SaveScene(i, rows) => {
+                if rows.contains(&SceneRow::Screen) {
+                    let monitors = self.current_monitors();
+                    // Не прочиталось ничего — прежнее в сцене не стираем.
+                    if let Some(scene) = cx.settings.profiles.get_mut(*i).filter(|_| !monitors.is_empty()) {
+                        scene.monitors = monitors;
+                    }
+                }
+            }
             Command::Dropped(_) | Command::Media(_) => {}
         }
     }
@@ -949,11 +1041,11 @@ mod tests {
     fn unanswered_keep_prompt_reverts_without_drawing() {
         let mut display = Display::default();
         let settings = crate::config::Settings::default();
-        display.pending = Some(Pending { changes: Vec::new(), at: Instant::now() });
+        display.pending = Some(Pending { changes: Vec::new(), at: Instant::now(), scene: None });
         display.background(&settings);
         assert!(display.pending.is_some(), "15 с ещё не прошло");
         let late = Instant::now() - REVERT_AFTER - Duration::from_secs(1);
-        display.pending = Some(Pending { changes: Vec::new(), at: late });
+        display.pending = Some(Pending { changes: Vec::new(), at: late, scene: None });
         display.background(&settings);
         assert!(display.pending.is_none(), "без ответа 15 с — откат, хотя карточка не рисуется (другая полка)");
     }
@@ -1029,7 +1121,7 @@ mod profile_tests {
     }
 
     fn p(monitors: Vec<ProfileMonitor>) -> Profile {
-        Profile { name: "p".into(), hotkey: None, monitors }
+        Profile { monitors, ..Profile::new("p") }
     }
 
     #[test]
@@ -1203,8 +1295,8 @@ mod revert_tests {
         let mut settings = crate::config::Settings::default();
         let monitor =
             ProfileMonitor { device: dev.into(), width: 2560, height: 1440, hz: 144, scale: Some(200), hdr: None };
-        settings.profiles.push(Profile { name: "Test".into(), hotkey: None, monitors: vec![monitor] });
-        with_cx(dev, &mut settings, |cx| display.command(&Command::ApplyProfile(0), cx));
+        settings.profiles.push(Profile { monitors: vec![monitor], ..Profile::new("Test") });
+        with_cx(dev, &mut settings, |cx| display.command(&Command::ApplyScene(0), cx));
         assert!(display.busy());
         assert_eq!(display::current(dev), Some(mode(2560, 1440, 144)));
         assert_eq!(display::scale(dev).unwrap().current, 200);
@@ -1217,12 +1309,12 @@ mod revert_tests {
             "масштаб Windows помнит сама — вернуть надо вручную"
         );
         assert_eq!(display::saved(dev), start);
-        // Тот же профиль и «Оставить»: режим в реестре, масштаб остаётся.
-        with_cx(dev, &mut settings, |cx| display.command(&Command::ApplyProfile(0), cx));
+        // Та же сцена и «Оставить»: режим в реестре, масштаб остаётся.
+        with_cx(dev, &mut settings, |cx| display.command(&Command::ApplyScene(0), cx));
         display.keep();
         assert_eq!(display::saved(dev), mode(2560, 1440, 144));
         assert_eq!(display::scale(dev).unwrap().current, 200);
-        assert_eq!(display.active_profile(&settings.profiles), Some(0), "профиль стоит — его чип выделен");
+        assert_eq!(display.scene_part(&settings.profiles[0]), Some(true), "сцена по экрану стоит — её чип выделен");
     }
 
     /// Что карточка сказала бы уведомлениями, пока шло `f`.
@@ -1244,7 +1336,7 @@ mod revert_tests {
     fn profile_of(device: &str, hdr: Option<bool>) -> Profile {
         let (width, height, hz) = (3840, 2160, 120);
         let monitor = ProfileMonitor { device: device.into(), width, height, hz, scale: None, hdr };
-        Profile { name: "Movie".into(), hotkey: None, monitors: vec![monitor] }
+        Profile { monitors: vec![monitor], ..Profile::new("Movie") }
     }
 
     #[test]
@@ -1314,31 +1406,32 @@ mod revert_tests {
         let dev = r"\\.\TEST-HDR-PROFILE";
         let mut display = card(dev);
         let mut settings = crate::config::Settings::default();
-        // «+» при включённом HDR: профиль помнит его, и он стоит.
+        // «+» при включённом HDR: сцена помнит его, и он стоит.
         display::set_hdr(dev, true).unwrap();
-        toasts_of(dev, &mut settings, |cx| display.command(&Command::SaveProfile("Movie".into()), cx));
+        settings.profiles.push(Profile::new("Movie"));
+        toasts_of(dev, &mut settings, |cx| display.command(&Command::SaveScene(0, vec![SceneRow::Screen]), cx));
         assert_eq!(settings.profiles[0].monitors[0].hdr, Some(true));
-        assert_eq!(display.active_profile(&settings.profiles), Some(0));
-        // HDR выключили: профиль не стоит; щелчок по нему включает HDR (режим и масштаб те же) и спрашивает «Оставить?».
+        assert_eq!(display.scene_part(&settings.profiles[0]), Some(true));
+        // HDR выключили: сцена по экрану не стоит; щелчок по ней включает HDR (режим и масштаб те же) и спрашивает «Оставить?».
         display::set_hdr(dev, false).unwrap();
         display.refresh(dev);
-        assert_eq!(display.active_profile(&settings.profiles), None, "HDR другой — чип не выделен");
-        let toasts = toasts_of(dev, &mut settings, |cx| display.command(&Command::ApplyProfile(0), cx));
+        assert_eq!(display.scene_part(&settings.profiles[0]), Some(false), "HDR другой — чип не выделен");
+        let toasts = toasts_of(dev, &mut settings, |cx| display.command(&Command::ApplyScene(0), cx));
         assert!(toasts.is_empty() && display.busy(), "{toasts:?}");
         assert_eq!(hdr_is_on(dev), Some(true));
         // «Вернуть» возвращает и HDR.
         display.revert();
         assert_eq!(hdr_is_on(dev), Some(false));
-        // «Оставить» оставляет: HDR стоит, профиль стоит.
-        toasts_of(dev, &mut settings, |cx| display.command(&Command::ApplyProfile(0), cx));
+        // «Оставить» оставляет: HDR стоит, сцена стоит.
+        toasts_of(dev, &mut settings, |cx| display.command(&Command::ApplyScene(0), cx));
         display.keep();
-        assert_eq!((hdr_is_on(dev), display.active_profile(&settings.profiles)), (Some(true), Some(0)));
-        // Профиль уже стоит целиком — «Этот профиль уже стоит».
-        let again = toasts_of(dev, &mut settings, |cx| display.command(&Command::ApplyProfile(0), cx));
-        assert!(matches!(again.as_slice(), [(_, Tone::Neutral)]) && !display.busy());
+        assert_eq!((hdr_is_on(dev), display.scene_part(&settings.profiles[0])), (Some(true), Some(true)));
+        // Сцена уже стоит целиком — менять нечего: вопроса нет, лишних слов нет («уже стоит» говорит панель).
+        let again = toasts_of(dev, &mut settings, |cx| display.command(&Command::ApplyScene(0), cx));
+        assert!(again.is_empty() && !display.busy(), "{again:?}");
         // Закрыли программу, не ответив, — HDR вернулся вместе с остальным.
         display::set_hdr(dev, false).unwrap();
-        toasts_of(dev, &mut settings, |cx| display.command(&Command::ApplyProfile(0), cx));
+        toasts_of(dev, &mut settings, |cx| display.command(&Command::ApplyScene(0), cx));
         assert_eq!(hdr_is_on(dev), Some(true));
         display.shutdown();
         assert_eq!(hdr_is_on(dev), Some(false));
@@ -1354,7 +1447,7 @@ mod revert_tests {
         let mut old = profile_of(dev, None);
         old.monitors[0].hz = 60;
         settings.profiles.push(old);
-        toasts_of(dev, &mut settings, |cx| display.command(&Command::ApplyProfile(0), cx));
+        toasts_of(dev, &mut settings, |cx| display.command(&Command::ApplyScene(0), cx));
         assert!(display.busy());
         assert_eq!(hdr_is_on(dev), Some(true));
         display.revert();
@@ -1362,7 +1455,7 @@ mod revert_tests {
         // `sdr` выключает HDR.
         settings.profiles.clear();
         settings.profiles.push(profile_of(dev, Some(false)));
-        toasts_of(dev, &mut settings, |cx| display.command(&Command::ApplyProfile(0), cx));
+        toasts_of(dev, &mut settings, |cx| display.command(&Command::ApplyScene(0), cx));
         assert_eq!(hdr_is_on(dev), Some(false));
         display.revert();
         assert_eq!(hdr_is_on(dev), Some(true), "и откат включает его обратно");
@@ -1376,23 +1469,175 @@ mod revert_tests {
         let mut display = card(dev);
         display::fake_hdr(dev, display::Hdr { supported: true, enabled: false, force_disabled: true });
         settings.profiles.push(profile_of(dev, Some(true)));
-        let toasts = toasts_of(dev, &mut settings, |cx| display.command(&Command::ApplyProfile(0), cx));
+        let toasts = toasts_of(dev, &mut settings, |cx| display.command(&Command::ApplyScene(0), cx));
         assert_eq!(toasts.len(), 1, "{toasts:?}");
         assert_eq!((toasts[0].0.as_str(), &toasts[0].1), (texts::tr(Lang::En).hdr_blocked, &Tone::Warning));
         assert!(!display.busy());
         assert_eq!(hdr_is_on(dev), Some(false));
-        // У монитора нет HDR: профиль ничего не меняет, а чип выделен — гнаться не за чем.
+        // У монитора нет HDR: сцена ничего не меняет, а чип выделен — гнаться не за чем.
         let mut display = card(no_hdr);
         display::fake_hdr(no_hdr, display::Hdr { supported: false, enabled: false, force_disabled: false });
         display.refresh(no_hdr);
         settings.profiles.clear();
         settings.profiles.push(profile_of(no_hdr, Some(true)));
-        assert_eq!(display.active_profile(&settings.profiles), Some(0));
-        let toasts = toasts_of(no_hdr, &mut settings, |cx| display.command(&Command::ApplyProfile(0), cx));
-        assert!(matches!(toasts.as_slice(), [(_, Tone::Neutral)]) && !display.busy());
+        assert_eq!(display.scene_part(&settings.profiles[0]), Some(true));
+        let toasts = toasts_of(no_hdr, &mut settings, |cx| display.command(&Command::ApplyScene(0), cx));
+        assert!(toasts.is_empty() && !display.busy(), "{toasts:?}");
         // «+» у такого монитора HDR не пишет.
-        toasts_of(no_hdr, &mut settings, |cx| display.command(&Command::SaveProfile("Plain".into()), cx));
+        settings.profiles.push(Profile::new("Plain"));
+        toasts_of(no_hdr, &mut settings, |cx| display.command(&Command::SaveScene(1, vec![SceneRow::Screen]), cx));
         assert_eq!(settings.profiles.last().map(|p| p.monitors[0].hdr), Some(None));
+    }
+
+    // ─── Сцены: как было и возврат ──────────────────────────────────────────
+
+    /// Сцена с экраном: 2560 × 1440 · 144 Гц, масштаб 200 %, HDR включить.
+    fn movie(dev: &str) -> Profile {
+        let monitor = ProfileMonitor {
+            device: dev.into(),
+            width: 2560,
+            height: 1440,
+            hz: 144,
+            scale: Some(200),
+            hdr: Some(true),
+        };
+        Profile { monitors: vec![monitor], ..Profile::new("Movie") }
+    }
+
+    #[test]
+    fn scene_undo_returns_the_screen_after_keep_into_the_registry() {
+        let dev = r"\\.\TEST-SCENE-UNDO";
+        let mut display = card(dev);
+        let mut settings = crate::config::Settings::default();
+        settings.profiles.push(movie(dev));
+        let start = display::current(dev).unwrap();
+        let start_scale = display::scale(dev).unwrap().current;
+        assert!(!display.scene_can_undo(&settings.profiles[0]), "пока не ставили — вернуть нечего");
+        toasts_of(dev, &mut settings, |cx| display.command(&Command::ApplyScene(0), cx));
+        display.keep();
+        assert_eq!(display::saved(dev), mode(2560, 1440, 144));
+        assert!(display.scene_can_undo(&settings.profiles[0]), "«Оставить» возврат не стирает");
+        assert_eq!(display.scene_part(&settings.profiles[0]), Some(true));
+        // Второй щелчок: прежнее — сразу и в реестр, без «Оставить?».
+        let toasts = toasts_of(dev, &mut settings, |cx| display.command(&Command::UndoScene(0), cx));
+        assert!(toasts.is_empty() && !display.busy(), "{toasts:?}");
+        assert_eq!((display::current(dev), display::saved(dev)), (Some(start), start));
+        assert_eq!(display::scale(dev).unwrap().current, start_scale);
+        assert_eq!(hdr_is_on(dev), Some(false));
+        assert_eq!(display.scene_part(&settings.profiles[0]), Some(false), "сцена по экрану больше не стоит");
+        // Возврат одноразовый: второй раз экран не трогают.
+        assert!(!display.scene_can_undo(&settings.profiles[0]));
+        display::apply(dev, mode(1920, 1080, 60)).unwrap();
+        toasts_of(dev, &mut settings, |cx| display.command(&Command::UndoScene(0), cx));
+        assert_eq!(display::current(dev), Some(mode(1920, 1080, 60)));
+    }
+
+    #[test]
+    fn scene_undo_while_the_prompt_waits_is_the_same_as_revert() {
+        let dev = r"\\.\TEST-SCENE-UNDO-PROMPT";
+        let mut display = card(dev);
+        let mut settings = crate::config::Settings::default();
+        settings.profiles.push(movie(dev));
+        let start = display::current(dev).unwrap();
+        toasts_of(dev, &mut settings, |cx| display.command(&Command::ApplyScene(0), cx));
+        assert!(display.busy() && display.blocks_scene(), "до ответа новую сцену не ставят");
+        toasts_of(dev, &mut settings, |cx| display.command(&Command::UndoScene(0), cx));
+        assert!(!display.busy() && !display.blocks_scene());
+        assert_eq!((display::current(dev), display::saved(dev)), (Some(start), start));
+        assert_eq!(hdr_is_on(dev), Some(false));
+        assert!(!display.scene_can_undo(&settings.profiles[0]));
+    }
+
+    #[test]
+    fn declining_the_mode_forgets_the_return() {
+        let dev = r"\\.\TEST-SCENE-DECLINE";
+        let mut display = card(dev);
+        let mut settings = crate::config::Settings::default();
+        settings.profiles.push(movie(dev));
+        toasts_of(dev, &mut settings, |cx| display.command(&Command::ApplyScene(0), cx));
+        assert!(display.scene_can_undo(&settings.profiles[0]));
+        // «Вернуть» (и 15 секунд, и закрытие программы — тот же `revert`): по экрану сцены нет, возвращать нечего.
+        display.revert();
+        assert!(!display.scene_can_undo(&settings.profiles[0]));
+    }
+
+    #[test]
+    fn another_scene_replaces_the_return() {
+        let dev = r"\\.\TEST-SCENE-OTHER";
+        let mut display = card(dev);
+        let mut settings = crate::config::Settings::default();
+        settings.profiles.push(movie(dev));
+        settings.profiles.push(Profile {
+            system: crate::config::SceneSystem { quiet: Some(true), ..Default::default() },
+            ..Profile::new("Quiet")
+        });
+        toasts_of(dev, &mut settings, |cx| display.command(&Command::ApplyScene(0), cx));
+        display.keep();
+        assert!(display.scene_can_undo(&settings.profiles[0]));
+        // Другая сцена, даже без экрана: возврат прежней пропадает.
+        toasts_of(dev, &mut settings, |cx| display.command(&Command::ApplyScene(1), cx));
+        assert!(!display.scene_can_undo(&settings.profiles[0]) && !display.scene_can_undo(&settings.profiles[1]));
+        assert_eq!(display.scene_part(&settings.profiles[1]), None, "в сцене нет экрана — модулю нечего проверять");
+    }
+
+    #[test]
+    fn the_same_scene_again_returns_to_what_was_before_the_first_time() {
+        let dev = r"\\.\TEST-SCENE-AGAIN";
+        let mut display = card(dev);
+        let mut settings = crate::config::Settings::default();
+        settings.profiles.push(movie(dev));
+        let start = display::current(dev).unwrap();
+        toasts_of(dev, &mut settings, |cx| display.command(&Command::ApplyScene(0), cx));
+        display.keep();
+        // Режим ушёл от сцены сам (поменяли руками), и сцену ставят снова.
+        change(&mut display, dev, mode(1920, 1080, 60));
+        display.keep();
+        toasts_of(dev, &mut settings, |cx| display.command(&Command::ApplyScene(0), cx));
+        assert_eq!(display::current(dev), Some(mode(2560, 1440, 144)));
+        display.keep();
+        // Возврат — к тому, что было до сцены, а не до её второго раза.
+        toasts_of(dev, &mut settings, |cx| display.command(&Command::UndoScene(0), cx));
+        assert_eq!(display::current(dev), Some(start));
+    }
+
+    #[test]
+    fn scene_undo_waits_for_a_foreign_prompt() {
+        let dev = r"\\.\TEST-SCENE-FOREIGN";
+        let mut display = card(dev);
+        let mut settings = crate::config::Settings::default();
+        settings.profiles.push(movie(dev));
+        toasts_of(dev, &mut settings, |cx| display.command(&Command::ApplyScene(0), cx));
+        display.keep();
+        // Режим поменяли в самой карточке и ещё не ответили: чужой вопрос не трогаем, возврат остаётся.
+        change(&mut display, dev, mode(1920, 1080, 60));
+        let toasts = toasts_of(dev, &mut settings, |cx| display.command(&Command::UndoScene(0), cx));
+        assert_eq!(toasts, vec![(texts::tr(Lang::En).answer_first.to_string(), Tone::Warning)]);
+        assert!(display.busy() && display.scene_can_undo(&settings.profiles[0]));
+        assert_eq!(display::current(dev), Some(mode(1920, 1080, 60)));
+    }
+
+    #[test]
+    fn save_scene_takes_the_screen_that_stands_now() {
+        let dev = r"\\.\TEST-SCENE-SAVE";
+        let mut display = card(dev);
+        let mut settings = crate::config::Settings::default();
+        settings.profiles.push(Profile::new("New"));
+        change(&mut display, dev, mode(1920, 1080, 144));
+        display.keep();
+        display::set_hdr(dev, true).unwrap();
+        // Другие строки карточка не трогает: просят только систему — экран в сцене не появляется.
+        toasts_of(dev, &mut settings, |cx| display.command(&Command::SaveScene(0, vec![SceneRow::Quiet]), cx));
+        assert!(settings.profiles[0].monitors.is_empty());
+        toasts_of(dev, &mut settings, |cx| display.command(&Command::SaveScene(0, vec![SceneRow::Screen]), cx));
+        let m = &settings.profiles[0].monitors;
+        assert_eq!(m.len(), 1);
+        assert_eq!((m[0].width, m[0].height, m[0].hz, m[0].hdr), (1920, 1080, 144, Some(true)));
+        assert_eq!(m[0].scale, display::scale(dev).map(|s| s.current));
+        // Карточка видит сцену стоящей и говорит, что строка «Экран» ей по силам; номера, которого нет, не бывает.
+        assert_eq!(display.scene_part(&settings.profiles[0]), Some(true));
+        assert_eq!(display.scene_rows(), vec![(SceneRow::Screen, true)]);
+        toasts_of(dev, &mut settings, |cx| display.command(&Command::SaveScene(7, vec![SceneRow::Screen]), cx));
+        assert_eq!(settings.profiles.len(), 1);
     }
 
     #[test]
