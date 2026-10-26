@@ -90,6 +90,11 @@ fn profile_active(p: &Profile, states: &[State]) -> bool {
     })
 }
 
+/// Кнопку «HDR» можно нажать: выключить HDR можно всегда, а включить — пока Windows этого не запрещает.
+fn hdr_usable(hdr: display::Hdr) -> bool {
+    hdr.enabled || !hdr.force_disabled
+}
+
 /// HDR монитора для профилей: `Some(включён)`, если монитор его умеет.
 fn hdr_state(device: &str) -> Option<bool> {
     display::hdr(device).filter(|h| h.supported).map(|h| h.enabled)
@@ -529,7 +534,7 @@ impl Display {
     /// состояния (оно видно по заливке); не хватает и на это — `None`, кнопки нет. Щелчок — `clicked()` ответа.
     fn hdr_button(ui: &mut Ui, hdr: display::Hdr, t: &Tr) -> Option<egui::Response> {
         let p = Palette::of(ui);
-        let usable = !hdr.force_disabled;
+        let usable = hdr_usable(hdr);
         let (name_color, state_color) = match (hdr.enabled, usable) {
             (true, _) => (p.accent_text, p.accent_text),
             (false, true) => (p.text, p.weak),
@@ -920,6 +925,14 @@ mod tests {
         display.pending = Some(Pending { changes: Vec::new(), at: late });
         display.background(&settings);
         assert!(display.pending.is_none(), "без ответа 15 с — откат, хотя карточка не рисуется (другая полка)");
+    }
+
+    #[test]
+    fn hdr_button_is_off_limits_only_when_windows_forbids_turning_it_on() {
+        let hdr = |enabled, force_disabled| display::Hdr { supported: true, enabled, force_disabled };
+        assert!(hdr_usable(hdr(false, false)) && hdr_usable(hdr(true, false)));
+        assert!(!hdr_usable(hdr(false, true)), "Windows не даёт включить — кнопка недоступна");
+        assert!(hdr_usable(hdr(true, true)), "включённый HDR выключить можно всегда");
     }
 
     #[test]
