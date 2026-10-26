@@ -29,6 +29,10 @@ pub struct Edge {
     pub pinned: bool,
     /// Показана клавишей и мышь ещё не заходила на неё: прятать по уходу мыши рано.
     by_hotkey: bool,
+    /// Клавиатура у панели: её вызвали клавишей (показа или сцены) или в ней нажали мышью. Выдвинутая мышью у края (и
+    /// показ при запуске) клавиатуру у программы пользователя не забирает: окно остаётся неактивным, пока в нём не нажмут
+    /// мышью, — набранное в чужой программе в панель не попадает. Значима, пока панель показана.
+    keyboard: bool,
     edge_since: Option<Instant>,
     away_since: Option<Instant>,
     /// До этого момента не прятать: показ при запуске, вызов клавишей.
@@ -44,6 +48,7 @@ impl Edge {
     pub fn hide(&mut self) {
         self.shown = false;
         self.by_hotkey = false;
+        self.keyboard = false;
         self.edge_since = None;
         self.away_since = None;
         self.hold_until = None;
@@ -52,9 +57,22 @@ impl Edge {
     fn show(&mut self, by_hotkey: bool, now: Instant) {
         self.shown = true;
         self.by_hotkey = by_hotkey;
+        // Клавишу нажал сам пользователь — клавиатура у панели сразу; мышь у края этого не значит.
+        self.keyboard = by_hotkey;
         self.edge_since = None;
         self.away_since = None;
         self.hold_until = by_hotkey.then(|| now + HOTKEY_HOLD);
+    }
+
+    /// Есть ли у панели клавиатура (см. поле `keyboard`); пока она не показана, ответ не важен.
+    pub fn keyboard(&self) -> bool {
+        self.keyboard
+    }
+
+    /// Панели отдают клавиатуру: в ней нажали мышью (само нажатие работает как обычный щелчок) или её открыли щелчком по
+    /// плашке. Ответ — взяла только что, а не уже была: окну велят взять фокус один раз.
+    pub fn take_keyboard(&mut self) -> bool {
+        !std::mem::replace(&mut self.keyboard, true)
     }
 
     /// Показать, как по клавише панели: клавиша сцены, чтобы вопрос «Оставить?» был виден.
@@ -229,6 +247,59 @@ mod tests {
         e.step(Input::default(), at(t0, 5100), SHOW, HIDE);
         e.step(Input::default(), at(t0, 5600), SHOW, HIDE);
         assert!(!e.shown);
+    }
+
+    /// Кто дал клавиатуру: мышь у края — нет, клавиша показа и клавиша сцены — да, нажатие мышью внутри — да.
+    #[test]
+    fn a_panel_pulled_out_by_the_mouse_leaves_the_keyboard_to_the_user_until_a_press() {
+        let t0 = Instant::now();
+        let mut e = Edge::default();
+        let edge = Input { at_edge: true, ..Default::default() };
+        e.step(edge, t0, SHOW, HIDE);
+        assert!(e.step(edge, at(t0, 160), SHOW, HIDE) && e.shown, "выехала от края");
+        assert!(!e.keyboard(), "мышь у края клавиатуру не забирает");
+        // Мышь ходит по панели, уходит, потеря фокуса — клавиатура всё равно не появляется сама.
+        e.step(Input { over: true, ..Default::default() }, at(t0, 200), SHOW, HIDE);
+        assert!(!e.keyboard());
+        // Нажали мышью внутри: клавиатура у панели; взяла только что, второе нажатие ничего не меняет.
+        assert!(e.take_keyboard());
+        assert!(e.keyboard() && !e.take_keyboard());
+        // Спряталась — клавиатуры нет; следующий выезд мышью — снова без неё.
+        e.step(Input::default(), at(t0, 300), SHOW, HIDE);
+        e.step(Input::default(), at(t0, 800), SHOW, HIDE);
+        assert!(!e.shown && !e.keyboard());
+        e.step(edge, at(t0, 900), SHOW, HIDE);
+        e.step(edge, at(t0, 1100), SHOW, HIDE);
+        assert!(e.shown && !e.keyboard(), "каждый выезд мышью начинается без клавиатуры");
+    }
+
+    #[test]
+    fn a_panel_called_by_a_key_takes_the_keyboard_at_once() {
+        let t0 = Instant::now();
+        // Клавиша показа.
+        let mut e = Edge::default();
+        e.step(Input { hotkey: true, ..Default::default() }, t0, SHOW, HIDE);
+        assert!(e.shown && e.keyboard());
+        assert!(!e.take_keyboard(), "уже есть");
+        // Вторая клавиша прячет — и клавиатуры нет.
+        e.step(Input { hotkey: true, ..Default::default() }, at(t0, 10), SHOW, HIDE);
+        assert!(!e.shown && !e.keyboard());
+        // Клавиша сцены (`reveal`) при спрятанной панели — тоже сразу; при показанной ничего не меняется.
+        e.reveal(at(t0, 20));
+        assert!(e.shown && e.keyboard());
+        let mut by_mouse = Edge::default();
+        let edge = Input { at_edge: true, ..Default::default() };
+        by_mouse.step(edge, t0, SHOW, HIDE);
+        by_mouse.step(edge, at(t0, 200), SHOW, HIDE);
+        by_mouse.reveal(at(t0, 300));
+        assert!(
+            by_mouse.shown && !by_mouse.keyboard(),
+            "клавиша сцены у уже выдвинутой мышью панели клавиатуру не даёт"
+        );
+        // Показ при запуске — без клавиатуры: окно не должно забрать её у того, кто запустил.
+        let mut intro = Edge::default();
+        intro.intro(t0);
+        assert!(intro.shown && !intro.keyboard());
     }
 
     #[test]

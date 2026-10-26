@@ -497,13 +497,29 @@ impl App {
         }
     }
 
-    /// Дать окну фокус (панель выехала): сначала снять «не забирать фокус», иначе Windows не активирует окно.
+    /// Дать окну клавиатуру (панель вызвана клавишей, открыта щелчком по плашке, в ней нажали мышью): сначала снять «не
+    /// забирать фокус», иначе Windows не активирует окно.
     fn focus(&mut self, ctx: &egui::Context) {
+        self.edge.take_keyboard();
         self.set_no_activate(false);
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     }
 
-    /// Спрятанная панель — окно не забирает фокус при щелчке; выехала — забирает. Шлёт, только если поменялось.
+    /// Нажали мышью внутри панели, у которой клавиатуры нет (выдвинута мышью у края): окно становится активным и забирает
+    /// клавиатуру. Само нажатие работает как обычный щелчок — поля ввода, кнопки, вкладки.
+    fn take_keyboard_on_press(&mut self, ctx: &egui::Context) {
+        if self.edge.shown && !self.edge.keyboard() && ctx.input(|i| i.pointer.any_pressed()) {
+            self.focus(ctx);
+        }
+    }
+
+    /// Окно не должно активироваться при щелчке (`WS_EX_NOACTIVATE`): панель спрятана или выдвинута мышью у края и клавиатура
+    /// осталась у программы пользователя. Появилась клавиатура у панели — стиль снимается.
+    fn wants_no_activate(&self) -> bool {
+        !(self.edge.shown && self.edge.keyboard())
+    }
+
+    /// Окно не забирает фокус при щелчке, пока у панели нет клавиатуры (`wants_no_activate`). Шлёт, только если поменялось.
     fn set_no_activate(&mut self, on: bool) {
         if self.no_activate != Some(on) && sys::set_no_activate(on) {
             self.no_activate = Some(on);
@@ -903,9 +919,12 @@ impl App {
             self.sent_panel = Some(panel_key);
         }
         if changed && self.edge.shown {
-            // Только что выехала: свежие данные и фокус, чтобы клавиатура и Esc работали.
+            // Только что выехала: свежие данные. Клавиатуру (фокус) берёт, только если её вызвали клавишей: выдвинутая
+            // мышью у края оставляет её программе пользователя, пока в панели не нажмут мышью (`take_keyboard_on_press`).
             self.refreshed = None;
-            self.focus(ctx);
+            if self.edge.keyboard() {
+                self.focus(ctx);
+            }
         }
         if changed && !self.edge.shown {
             if self.view == View::Color {
@@ -948,7 +967,7 @@ impl App {
 
         let t = Motion::of(ctx).toggle(ctx, egui::Id::new("panel-shown"), self.edge.shown, motion::ENTER);
         self.drawn = t;
-        self.set_no_activate(!self.edge.shown);
+        self.set_no_activate(self.wants_no_activate());
         self.place(ctx, ppp, t);
 
         // Спрятана — смотрим на мышь 25 раз в секунду; открыта — чаще, ради отсчёта ухода.
@@ -2978,6 +2997,7 @@ impl App {
             }
             return;
         }
+        self.take_keyboard_on_press(&ctx);
         let p = Palette::of(ui);
         let panel = Rect::from_min_size(Pos2::ZERO, Vec2::new(self.settings.width, self.settings.height));
         let corner = CornerRadius { nw: 0, ne: 0, sw: CORNER, se: CORNER };
@@ -3690,9 +3710,12 @@ mod tests {
     impl App {
         /// Панель для тестов: как после `new`, но без окна, горячих клавиш и чтения системы.
         fn for_test(settings: Settings) -> App {
+            // В тестах у панели есть клавиатура (как у вызванной клавишей): печать и Ctrl+K открывают поиск.
+            let mut edge = Edge::default();
+            edge.take_keyboard();
             App {
                 settings,
-                edge: Edge::default(),
+                edge,
                 modules: modules::all(),
                 toasts: Toasts::default(),
                 view: View::Cards,
@@ -6466,6 +6489,77 @@ mod tests {
         }
         let (row, at) = on_row.expect("Tab довёл фокус до строки результата");
         assert!(rig.outlines(accent_text).contains(&at.expand(2.0)), "у строки {row} нет рамки фокуса");
+    }
+
+    // ─── Кто дал клавиатуру ─────────────────────────────────────────────────
+    //
+    // Панель, выдвинутая мышью у края, клавиатуру у программы пользователя не забирает (окно неактивно, `WS_EX_NOACTIVATE`),
+    // пока в ней не нажмут мышью; вызванная клавишей показа или клавишей сцены берёт её сразу. Печать открывает поиск только
+    // у панели с клавиатурой: набранное в чужой программе в панель не попадает, и случайный Enter ничего не выполнит.
+
+    /// Выдвинуть панель мышью у края, как это делает `tick`: мышь на верхней строке, прошла задержка показа.
+    fn pull_out_by_the_mouse(rig: &mut Rig) {
+        let (show, hide) = (Duration::from_millis(150), Duration::from_millis(450));
+        let (now, edge) = (Instant::now(), Input { at_edge: true, ..Input::default() });
+        rig.app.edge = Edge::default();
+        rig.app.edge.step(edge, now, show, hide);
+        rig.app.edge.step(edge, now + Duration::from_millis(200), show, hide);
+        assert!(rig.app.edge.shown, "выехала от края");
+    }
+
+    #[test]
+    fn a_panel_pulled_out_by_the_mouse_gets_the_keyboard_only_with_a_press_inside() {
+        let mut rig = Rig::new();
+        pull_out_by_the_mouse(&mut rig);
+        assert!(!rig.app.edge.keyboard(), "мышь у края клавиатуру не даёт");
+        assert!(rig.app.wants_no_activate(), "окно не активируется: клавиатура остаётся у программы пользователя");
+        // Набор, даже если бы дошёл до окна, поиск не открывает; Ctrl+K тоже.
+        rig.type_text("н");
+        rig.key(Key::K, CTRL);
+        assert!(rig.app.view == View::Cards, "без клавиатуры печать и Ctrl+K поиск не открывают");
+        assert!(!rig.app.edge.keyboard(), "ни наведение мыши, ни кадры клавиатуру не дают");
+        rig.move_to(Pos2::new(300.0, 200.0));
+        assert!(!rig.app.edge.keyboard(), "мышь над панелью — ещё не нажатие");
+        // Первое нажатие внутри: окно активно, клавиатура у панели, а само нажатие сработало как обычный щелчок.
+        rig.click(rig.tab(1).center());
+        assert!(rig.app.edge.keyboard() && !rig.app.wants_no_activate());
+        assert_eq!(rig.app.shelf, 1, "первое нажатие — обычный щелчок по вкладке");
+        rig.type_text("н");
+        assert!(rig.app.view == View::Search, "с клавиатурой печать открывает поиск");
+        // Нажатие в любом месте панели даёт клавиатуру (и по пустому месту карточки, и правой кнопкой).
+        for secondary in [false, true] {
+            let mut rig = Rig::new();
+            pull_out_by_the_mouse(&mut rig);
+            // Пустое место шапки между вкладками и кнопками: нажатие туда ничего не делает, кроме как даёт клавиатуру.
+            let at = Pos2::new(650.0, 24.0);
+            if secondary {
+                rig.right_click(at);
+            } else {
+                rig.click(at);
+            }
+            assert!(rig.app.edge.keyboard(), "нажатие (правой кнопкой: {secondary}) даёт клавиатуру");
+        }
+    }
+
+    #[test]
+    fn a_panel_called_by_a_key_has_the_keyboard_at_once_and_loses_it_when_hidden() {
+        let mut rig = Rig::new();
+        let (show, hide) = (Duration::from_millis(150), Duration::from_millis(450));
+        rig.app.edge = Edge::default();
+        rig.app.edge.step(Input { hotkey: true, ..Input::default() }, Instant::now(), show, hide);
+        assert!(rig.app.edge.shown && rig.app.edge.keyboard(), "клавиша показа дала клавиатуру сразу");
+        assert!(!rig.app.wants_no_activate());
+        rig.type_text("н");
+        assert!(rig.app.view == View::Search && rig.app.search.query == "н", "печать открыла поиск с этой буквой");
+        // Спрятали — клавиатуры нет, окно снова не активируется; выехала мышью — снова без неё.
+        rig.app.close_search();
+        rig.app.edge.hide();
+        assert!(!rig.app.edge.keyboard() && rig.app.wants_no_activate());
+        pull_out_by_the_mouse(&mut rig);
+        assert!(!rig.app.edge.keyboard() && rig.app.wants_no_activate());
+        // Спрятана совсем — окно не активируется, как у полоски.
+        rig.app.edge.hide();
+        assert!(rig.app.wants_no_activate());
     }
 
     #[test]
