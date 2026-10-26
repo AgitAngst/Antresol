@@ -149,3 +149,33 @@ VPN Windows. Не вошло: VPN-программы со своим клиен�
 | Состояние | ЦП, видеокарта, память, температура, место на E:, сеть, CI на GitHub |
 | Медиа и время | плеер, таймер, «помидор», часы других поясов |
 | Сама панель | значок программы, порядок и включение модулей в настройках, выбор горячей клавиши |
+
+## Кандидаты — по аналогам, второй круг (26.10.2026, не согласованы, порядок решит владелец)
+
+Сделанное и отложенное выше не повторяется. ★ — первыми, по мнению сессии. Сложность — по Windows API: просто (открытый
+вызов), средне (своя обвязка или сеть), сложно (недокументированное или тяжёлое).
+
+| | Кандидат | Что | Сложность | Аналоги |
+|---|---|---|---|---|
+| ★ | Сцены вместо профилей экрана | Профиль хранит не только режим экрана, но и «Тишину», план питания, «Не спать», яркость, вывод звука, HDR: «Игра», «Кино», «Презентация» одним щелчком или клавишей | средне | [One Switch](https://thesweetsetup.com/one-switch-is-the-menu-bar-app-for-quickly-toggling-tedious-settings/), [SoundSwitch](https://github.com/Belphemur/SoundSwitch) (профили устройств) |
+| ★ | Поиск действий | Панель открыта — начал печатать: «ночн» → «Ночной свет», «1080» → режим, «чай 5» → таймер, «2*3,5» → 7; Enter выполняет. Не надо помнить, на какой полке | средне | [Raycast](https://en.wikipedia.org/wiki/Raycast_(software)), [Command Palette Dock](https://pureinfotech.com/powertoys-command-palette-dock-windows-11/) |
+| ★ | Живые плашки у края | Короткое событие без выезда панели: наушники подключились (заряд), флешка вставлена («Извлечь»), сборка упала, загрузка готова, мышь разряжается. Механизм — как у плашки таймера | средне | [DynamicWin](https://github.com/FlorianButz/DynamicWin), [boring.notch](https://github.com/TheBoredTeam/boring.notch) |
+| ★ | Встречи | Ближайшая встреча из календаря по ссылке .ics (Google, Outlook — без учётной записи Windows) и «Подключиться» к Zoom, Meet, Teams; плашка за пару минут | средне | [MeetingBar](https://github.com/leits/meetingbar), [DynamicWin](https://github.com/FlorianButz/DynamicWin) |
+| ★ | Микрофон «без звука» | Для всех программ сразу, с клавишей и красной меткой у края, пока выключен; через Kamerton | средне | [SoundSwitch](https://github.com/Belphemur/SoundSwitch), [MicKey](https://www.ghacks.net/2021/04/27/mute-your-microphone-with-a-hotkey-using-mickey/), [Easymic](https://github.com/k1tbyte/easymic) |
+| ★ | HDR одним щелчком | На каждый монитор отдельно (Win+Alt+B переключает все сразу и бывает занят Game Bar); входит в сцены | просто | [HDRTray](https://www.warp2search.net/story/hdrtray-053/), [HDR Toggle](https://www.raycast.com/abdullah_shabib/hdr-toggle) |
+| ★ | Наушники одним щелчком | Подключить или отключить сопряжённое устройство из карточки «Bluetooth» (отложено в 0.9) | сложно | [ToothTray](https://github.com/m2jean/ToothTray) |
+| ★ | Буфер: картинки и фильтр | Картинки, ссылки, цвета пипетки в истории (отложено в 0.8); «Исправить раскладку» («ghbdtn» → «привет»), «Без форматирования» | средне | [Raycast](https://en.wikipedia.org/wiki/Raycast_(software)), [Notchify](https://www.windowscentral.com/software-apps/want-your-pc-to-be-a-bit-more-like-a-mac-the-dynamic-island-for-windows-just-got-a-big-update) |
+| | Вывод звука чипами | «Динамики / Наушники» в карточке «Звук» одним щелчком; через Kamerton | просто | [SoundSwitch](https://github.com/Belphemur/SoundSwitch), [boring.notch](https://newreleases.io/project/github/TheBoredTeam/boring.notch/release/v2.8-rc.0) |
+| | Зеркало | Превью веб-камеры перед созвоном по щелчку; закрыл карточку — камера выключена | средне | [NotchNook](https://www.macworld.com/article/2406934/notfhnook-macbook-dynamic-island-widgets-files-tray.html), [boring.notch](https://github.com/TheBoredTeam/boring.notch) |
+| | Яркость по времени суток | Днём 80 %, вечером 40 %; один ползунок на все мониторы (выравнивание отложено в 0.4) | средне | [Twinkle Tray](https://twinkletray.com/) |
+| | Проекция | «Расширить / Повторить / Только второй» чипами в «Экране» (как Win+P) | просто | быстрые настройки Windows («Проецировать») |
+| | Ещё плитки | «Значки на рабочем столе» (скрыть для снимка и показа), «Скрытые файлы», «Режим полёта», «Экономия энергии» | просто | [One Switch](https://www.imore.com/one-switch-makes-it-quicker-toggle-just-about-any-setting-your-mac), быстрые настройки Windows |
+| | Флешки | Съёмные диски с «Извлечь» и плашка при вставке | просто | — |
+| | Сон по таймеру | «Усыпить через 30 мин» в «Таймерах» — для кино | просто | — |
+| | Перерыв для глаз | Раз в 20 мин плашка «Посмотрите вдаль 20 секунд» (20-20-20) | просто | [Eye Break Timer](https://mwm.ai/apps/eye-break-timer-20-20-20/6751313982) |
+| | Заметка | Одно поле, сохраняется само | просто | [Raycast](https://en.wikipedia.org/wiki/Raycast_(software)) (Floating Notes) |
+| | Снимок области в лоток | Тот же «Выделить область», но файлом в «Лоток»; из лотка — тянуть в другие программы (отложено в 0.8) | средне | [NotchNook](https://www.macworld.com/article/2406934/notfhnook-macbook-dynamic-island-widgets-files-tray.html) (полка) |
+| | Лоток при перетаскивании к краю | Тянешь файл к верхнему краю — выезжает только зона лотка | средне | [NotchNook](https://setapp.com/apps/notchnook) |
+| | Колесо над полоской | Громкость колесом мыши над спрятанной полоской, с Ctrl — яркость; уровень — плашкой | просто | [boring.notch](https://github.com/TheBoredTeam/boring.notch) (замена HUD) |
+| | Контраст двух цветов | В «Пипетке»: два цвета — отношение контраста и «проходит 4,5:1» | просто | — |
+| | Погода | Сейчас и по часам; Open-Meteo без ключа, город в настройках | средне | [Notchify](https://www.windowscentral.com/software-apps/want-your-pc-to-be-a-bit-more-like-a-mac-the-dynamic-island-for-windows-just-got-a-big-update), [boring.notch](https://github.com/TheBoredTeam/boring.notch) |
