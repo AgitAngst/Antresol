@@ -47,6 +47,44 @@ impl std::fmt::Display for Res {
 #[derive(Debug, PartialEq)]
 pub struct FavoritesFull;
 
+/// Сколько полок можно завести: столько же сочетаний Ctrl + 1…9 и Alt + 1…9.
+pub const MAX_SHELVES: usize = 9;
+/// Длиннее имя полки не бывает, в символах (иначе вкладка не влезет в шапку).
+pub const MAX_SHELF_NAME: usize = 24;
+
+/// Полка — вкладка в шапке: имя и карточки по порядку (ключи модулей).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Shelf {
+    /// `@av`, `@sys`, `@hand` — имя по умолчанию (переводится при показе: смена языка файл не трогает);
+    /// иначе — своё имя как есть.
+    pub name: String,
+    pub cards: Vec<String>,
+}
+
+impl Shelf {
+    /// Имя без знаков, которыми размечена строка файла, не длиннее [`MAX_SHELF_NAME`]; пустое — не годится.
+    pub fn clean_name(name: &str) -> String {
+        let one = name.replace(['|', '\n', '\r', '\t'], " ");
+        one.trim().chars().take(MAX_SHELF_NAME).collect::<String>().trim().to_string()
+    }
+}
+
+/// Полки по умолчанию: «Экран и звук», «Система», «Под рукой».
+pub fn default_shelves() -> Vec<Shelf> {
+    crate::modules::DEFAULT_SHELVES
+        .iter()
+        .map(|(name, cards)| Shelf {
+            name: (*name).to_string(),
+            cards: cards.iter().map(|c| (*c).to_string()).collect(),
+        })
+        .collect()
+}
+
+/// Знакомый ли ключ карточки.
+fn known_card(key: &str) -> bool {
+    crate::modules::DEFAULT_SHELVES.iter().any(|(_, cards)| cards.contains(&key))
+}
+
 #[derive(Clone, PartialEq, Debug)]
 pub struct Settings {
     /// Тема и язык — как во всех программах семьи.
@@ -73,9 +111,10 @@ pub struct Settings {
     pub clipboard: bool,
     /// Лоток файлов: полные пути, новые сверху.
     pub tray: Vec<String>,
-    /// Порядок карточек (ключи модулей); незнакомые и забытые — по порядку программы, в конце.
-    pub order: Vec<String>,
-    /// Выключенные карточки (ключи модулей).
+    /// Полки с карточками по порядку (`shelf=`). Всегда хотя бы одна; каждая знакомая карточка стоит на одной полке
+    /// или убрана (`hidden`).
+    pub shelves: Vec<Shelf>,
+    /// Убранные карточки (ключи модулей): ни на какой полке не стоят, но работают в фоне.
     pub hidden: Vec<String>,
     /// Репозитории GitHub для карточки «GitHub»: `владелец/имя`.
     pub github: Vec<String>,
@@ -93,13 +132,13 @@ pub struct Settings {
     pub media_strip: bool,
     /// Где лежит `kamerton.exe` — для «Запустить Kamerton» в карточке «Звук»; пусто — не знаем.
     pub kamerton: String,
-    /// Заготовки текста (карточка «Заготовки»): щелчок кладёт в буфер обмена.
-    pub snippets: Vec<String>,
+    /// Закреплённые тексты «Буфера обмена» (`snippet=`, бывшие «Заготовки»): щелчок кладёт в буфер обмена.
+    pub pinned: Vec<String>,
     /// Часы других поясов (карточка «Часы»).
     pub clocks: Vec<Clock>,
 }
 
-/// Заготовка в одну строку файла: `\\` — обратная косая, `\n` — перевод строки.
+/// Закреплённый текст в одну строку файла: `\\` — обратная косая, `\n` — перевод строки.
 pub fn escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('\r', "").replace('\n', "\\n")
 }
@@ -121,8 +160,8 @@ pub fn unescape(s: &str) -> String {
     out
 }
 
-/// Сколько заготовок держим.
-pub const MAX_SNIPPETS: usize = 30;
+/// Сколько закреплённых текстов держим.
+pub const MAX_PINNED: usize = 30;
 
 /// Часы другого пояса: своё название и ключ пояса Windows («Tokyo Standard Time»).
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -292,6 +331,85 @@ impl Settings {
             }
         }
     }
+
+    // ─── Полки ──────────────────────────────────────────────────────────────
+
+    /// Номер полки, на которой стоит карточка; убранная — `None`.
+    pub fn shelf_of(&self, key: &str) -> Option<usize> {
+        self.shelves.iter().position(|s| s.cards.iter().any(|c| c == key))
+    }
+
+    /// Карточка убрана пользователем (она не на полке, но работает в фоне).
+    pub fn is_hidden(&self, key: &str) -> bool {
+        self.hidden.iter().any(|h| h == key)
+    }
+
+    /// Поставить карточку на полку `shelf` на место `at` (`None` — в конец) — откуда бы она ни была: с другой полки, с
+    /// этой же или из убранных. `at` считается в списке полки без самой карточки. Незнакомый ключ и нет такой
+    /// полки — ничего не делает. Ответ — сделано ли.
+    pub fn place_card(&mut self, key: &str, shelf: usize, at: Option<usize>) -> bool {
+        if shelf >= self.shelves.len() || !known_card(key) {
+            return false;
+        }
+        for s in &mut self.shelves {
+            s.cards.retain(|c| c != key);
+        }
+        self.hidden.retain(|h| h != key);
+        let cards = &mut self.shelves[shelf].cards;
+        let at = at.unwrap_or(cards.len()).min(cards.len());
+        cards.insert(at, key.to_string());
+        true
+    }
+
+    /// Убрать карточку с полки: она уходит в `hidden`.
+    pub fn hide_card(&mut self, key: &str) -> bool {
+        if !known_card(key) {
+            return false;
+        }
+        for s in &mut self.shelves {
+            s.cards.retain(|c| c != key);
+        }
+        if !self.is_hidden(key) {
+            self.hidden.push(key.to_string());
+        }
+        true
+    }
+
+    /// Новая полка в конце, «Полка N» с первым свободным N. Ответ — её номер; больше [`MAX_SHELVES`] не бывает.
+    pub fn add_shelf(&mut self, lang: Lang) -> Option<usize> {
+        if self.shelves.len() >= MAX_SHELVES {
+            return None;
+        }
+        let name =
+            (1usize..).map(|n| crate::texts::shelf_n(lang, n)).find(|n| !self.shelves.iter().any(|s| s.name == *n))?;
+        self.shelves.push(Shelf { name, cards: Vec::new() });
+        Some(self.shelves.len() - 1)
+    }
+
+    /// Убрать полку: её карточки уходят в `hidden`. Последнюю полку убрать нельзя.
+    pub fn remove_shelf(&mut self, i: usize) -> bool {
+        if self.shelves.len() <= 1 || i >= self.shelves.len() {
+            return false;
+        }
+        for c in self.shelves.remove(i).cards {
+            if !self.is_hidden(&c) {
+                self.hidden.push(c);
+            }
+        }
+        true
+    }
+
+    /// Переименовать полку. Пустое имя и то же самое — ничего не делают. Ответ — изменилось ли имя.
+    pub fn rename_shelf(&mut self, i: usize, name: &str) -> bool {
+        let name = Shelf::clean_name(name);
+        match self.shelves.get_mut(i) {
+            Some(s) if !name.is_empty() && s.name != name => {
+                s.name = name;
+                true
+            }
+            _ => false,
+        }
+    }
 }
 
 impl Default for Settings {
@@ -309,7 +427,7 @@ impl Default for Settings {
             panel_hotkey: None,
             clipboard: true,
             tray: Vec::new(),
-            order: Vec::new(),
+            shelves: default_shelves(),
             hidden: Vec::new(),
             github: Vec::new(),
             github_token: None,
@@ -319,7 +437,7 @@ impl Default for Settings {
             accent: crate::look::LIME.name.to_string(),
             media_strip: false,
             kamerton: String::new(),
-            snippets: Vec::new(),
+            pinned: Vec::new(),
             clocks: Vec::new(),
         }
     }
@@ -354,25 +472,54 @@ fn list(value: &str) -> Vec<String> {
     out
 }
 
-/// Порядок карточек: сначала из `order` (только знакомые ключи), остальные — как в программе.
-/// Возвращает номера в `keys` и включена ли карточка.
-pub fn arrange(keys: &[&str], order: &[String], hidden: &[String]) -> Vec<(usize, bool)> {
-    let mut out: Vec<usize> = Vec::new();
-    for i in order.iter().filter_map(|k| keys.iter().position(|x| x == k)) {
-        if !out.contains(&i) {
-            out.push(i);
+/// Раскладка из файла. `lines` — полки из `shelf=` (имя и ключи, как написаны), `legacy` — порядок из старого
+/// `modules=`. Незнакомые ключи и повторы отбрасываются (первая встреча побеждает); убранная карточка (`hidden`) на
+/// полке не стоит; знакомая карточка, которой нет ни на полке, ни среди убранных, встаёт в конец своей полки по
+/// умолчанию, а нет такой полки — в конец последней. Полок нет совсем (старый файл) — полки по умолчанию, порядок
+/// внутри них — по `legacy`: кто был раньше в ленте, тот раньше на полке.
+fn build_shelves(lines: Vec<(String, Vec<String>)>, hidden: &[String], legacy: &[String]) -> Vec<Shelf> {
+    let mut shelves: Vec<Shelf> = Vec::new();
+    for (name, cards) in lines {
+        let name = Shelf::clean_name(&name);
+        if name.is_empty() || shelves.len() >= MAX_SHELVES {
+            continue;
+        }
+        let mut kept: Vec<String> = Vec::new();
+        for c in cards {
+            let placed = shelves.iter().any(|s| s.cards.contains(&c));
+            if known_card(&c) && !hidden.contains(&c) && !placed && !kept.contains(&c) {
+                kept.push(c);
+            }
+        }
+        shelves.push(Shelf { name, cards: kept });
+    }
+    if shelves.is_empty() {
+        shelves = default_shelves();
+        for sh in &mut shelves {
+            sh.cards.retain(|c| !hidden.contains(c));
+            // Сортировка стабильная: кого в `modules=` нет, тот остаётся после названных, в прежнем порядке.
+            sh.cards.sort_by_key(|c| legacy.iter().position(|l| l == c).unwrap_or(usize::MAX));
         }
     }
-    for i in 0..keys.len() {
-        if !out.contains(&i) {
-            out.push(i);
+    for (home, cards) in crate::modules::DEFAULT_SHELVES {
+        for key in cards {
+            if hidden.iter().any(|h| h == key) || shelves.iter().any(|s| s.cards.iter().any(|c| c == key)) {
+                continue;
+            }
+            let at = shelves.iter().position(|s| s.name == home).unwrap_or(shelves.len() - 1);
+            shelves[at].cards.push((*key).to_string());
         }
     }
-    out.into_iter().map(|i| (i, !hidden.iter().any(|h| h == keys[i]))).collect()
+    shelves
 }
 
 pub fn parse(text: &str) -> Settings {
     let mut s = Settings::default();
+    // Полки и порядок старого `modules=` собираем на выходе: от порядка строк в файле раскладка не зависит.
+    let mut shelf_lines: Vec<(String, Vec<String>)> = Vec::new();
+    let mut legacy: Vec<String> = Vec::new();
+    // Старый файл: убрана ли была карточка «Заготовки» (`snippets`) — теперь это закреплённое в «Буфере обмена».
+    let mut snippets_hidden = false;
     for line in text.lines() {
         let Some((key, value)) = line.split_once('=') else { continue };
         let (key, value) = (key.trim(), value.trim());
@@ -401,7 +548,7 @@ pub fn parse(text: &str) -> Settings {
             "accent" if crate::look::valid(value) => s.accent = value.to_lowercase(),
             "media_strip" => s.media_strip = value == "true",
             "kamerton" => s.kamerton = value.to_string(),
-            "snippet" if !value.is_empty() && s.snippets.len() < MAX_SNIPPETS => s.snippets.push(unescape(value)),
+            "snippet" if !value.is_empty() && s.pinned.len() < MAX_PINNED => s.pinned.push(unescape(value)),
             "clock" if s.clocks.len() < MAX_CLOCKS => {
                 if let Some((name, zone)) = value.split_once('|') {
                     let (name, zone) = (name.trim(), zone.trim());
@@ -410,8 +557,18 @@ pub fn parse(text: &str) -> Settings {
                     }
                 }
             }
-            "modules" => s.order = list(value),
-            "hidden" => s.hidden = list(value),
+            // Полка: `имя|ключ,ключ`; имя `@av`, `@sys`, `@hand` — готовое. Пустой список — пустая полка.
+            "shelf" => {
+                let (name, cards) = value.split_once('|').unwrap_or((value, ""));
+                shelf_lines.push((name.to_string(), list(cards)));
+            }
+            // Порядок из версий до 1.9: нужен только для перехода на полки, обратно не пишется.
+            "modules" => legacy = list(value),
+            "hidden" => {
+                let raw = list(value);
+                snippets_hidden = raw.iter().any(|k| k == "snippets");
+                s.hidden = raw.into_iter().filter(|k| known_card(k)).collect();
+            }
             // Только похожее на «владелец/имя»: кривое из файла не идёт в адрес запроса.
             "github" => {
                 s.github = list(value).into_iter().filter(|r| crate::modules::github::valid_repo(r)).collect();
@@ -443,6 +600,12 @@ pub fn parse(text: &str) -> Settings {
             _ => {}
         }
     }
+    // Старый файл (полок нет): «Заготовки» были на виду, а «Буфер обмена» убран — теперь закреплённое лежит в нём, и
+    // убранным он остался бы невидимым. Возвращаем его: на ту полку, где он стоит по умолчанию.
+    if shelf_lines.is_empty() && !snippets_hidden {
+        s.hidden.retain(|k| k != "clipboard");
+    }
+    s.shelves = build_shelves(shelf_lines, &s.hidden, &legacy);
     s.width = s.width.max(MIN_WIDTH);
     s.height = s.height.clamp(MIN_HEIGHT, MAX_HEIGHT);
     s
@@ -469,18 +632,16 @@ pub fn format(s: &Settings) -> String {
     if !s.kamerton.is_empty() {
         out.push_str(&format!("kamerton={}\n", s.kamerton));
     }
-    for sn in &s.snippets {
+    for sn in &s.pinned {
         out.push_str(&format!("snippet={}\n", escape(sn)));
     }
     for c in &s.clocks {
         out.push_str(&format!("clock={} | {}\n", c.name.replace(['|', '\n'], " "), c.zone));
     }
-    out.push_str(&format!(
-        "modules={}\nhidden={}\ngithub={}\n",
-        s.order.join(","),
-        s.hidden.join(","),
-        s.github.join(",")
-    ));
+    for sh in &s.shelves {
+        out.push_str(&format!("shelf={}|{}\n", Shelf::clean_name(&sh.name), sh.cards.join(",")));
+    }
+    out.push_str(&format!("hidden={}\ngithub={}\n", s.hidden.join(","), s.github.join(",")));
     if let Some(t) = &s.github_token {
         out.push_str(&format!("github_token={t}\n"));
     }
@@ -503,10 +664,16 @@ pub fn format(s: &Settings) -> String {
 }
 
 pub fn save(s: &Settings) {
+    // Тесты гоняют панель целиком (см. `app::tests`), а демо-режим — выдуманный мир: файл настоящих настроек они трогать
+    // не должны (демо с настоящей папкой настроек иначе записал бы в неё выдуманные частоты).
+    if crate::sys::isolated() {
+        return;
+    }
     let Some(path) = settings_path() else { return };
     if let Some(d) = path.parent() {
         let _ = std::fs::create_dir_all(d);
     }
+    crate::sys::real_write("config.txt");
     if let Err(e) = std::fs::write(&path, format(s)) {
         eprintln!("cannot save settings: {e}");
     }
@@ -634,10 +801,14 @@ pub fn load_buttons() -> Vec<Button> {
     let text = match std::fs::read_to_string(&path) {
         Ok(t) => t,
         Err(_) => {
-            if let Some(d) = path.parent() {
-                let _ = std::fs::create_dir_all(d);
+            // Образец кладём на диск только настоящей программе: демо и тесты файлов не заводят.
+            if !crate::sys::isolated() {
+                if let Some(d) = path.parent() {
+                    let _ = std::fs::create_dir_all(d);
+                }
+                crate::sys::real_write("buttons.txt");
+                let _ = std::fs::write(&path, BUTTONS_TEMPLATE);
             }
-            let _ = std::fs::write(&path, BUTTONS_TEMPLATE);
             BUTTONS_TEMPLATE.to_string()
         }
     };
@@ -748,7 +919,7 @@ mod tests {
             accent: "#123456".into(),
             media_strip: true,
             kamerton: r"C:\Demo\kamerton.exe".into(),
-            snippets: vec!["Привет!\nСтрока 2".into(), r"C:\path\n".into(), "с пробелами внутри".into()],
+            pinned: vec!["Привет!\nСтрока 2".into(), r"C:\path\n".into(), "с пробелами внутри".into()],
             clocks: vec![Clock { name: "Токио".into(), zone: "Tokyo Standard Time".into() }],
             ..Default::default()
         };
@@ -763,20 +934,221 @@ mod tests {
     }
 
     #[test]
-    fn card_order() {
-        let keys = ["display", "media", "buttons"];
-        let order = vec!["buttons".to_string(), "nope".into(), "display".into()];
-        let hidden = vec!["media".to_string()];
-        assert_eq!(arrange(&keys, &order, &hidden), vec![(2, true), (0, true), (1, false)]);
-        assert_eq!(arrange(&keys, &[], &[]), vec![(0, true), (1, true), (2, true)]);
-        let twice = vec!["media".to_string(), "display".into(), "media".into()];
-        assert_eq!(arrange(&keys, &twice, &[]), vec![(1, true), (0, true), (2, true)], "повтор не через соседа");
+    fn github_and_token() {
         let g = parse("github=a/b, c/d\ngithub_token=\n");
         assert_eq!(g.github, ["a/b", "c/d"]);
         assert_eq!(g.github_token, None, "пустой токен — нет токена");
-        let s = parse("modules=a, b,a,,c\nhidden=b\n");
-        assert_eq!(s.order, ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn pinned_limit() {
+        let text: String = (0..40).map(|i| format!("snippet=text {i}\n")).collect();
+        assert_eq!(parse(&text).pinned.len(), MAX_PINNED);
+    }
+
+    // ─── Полки ──────────────────────────────────────────────────────────────
+
+    /// Имена полок по порядку.
+    fn names(s: &Settings) -> Vec<&str> {
+        s.shelves.iter().map(|sh| sh.name.as_str()).collect()
+    }
+
+    /// Каждая знакомая карточка стоит ровно на одной полке или убрана; лишнего нет.
+    fn assert_whole(s: &Settings) {
+        let mut all: Vec<String> = s.shelves.iter().flat_map(|sh| sh.cards.clone()).collect();
+        all.extend(s.hidden.clone());
+        all.sort();
+        let mut want: Vec<String> =
+            crate::modules::DEFAULT_SHELVES.iter().flat_map(|(_, cards)| cards.iter().map(|c| c.to_string())).collect();
+        want.sort();
+        assert_eq!(all, want, "карточки потерялись или задвоились");
+        assert!(!s.shelves.is_empty());
+    }
+
+    #[test]
+    fn default_shelves_round_trip() {
+        let s = Settings::default();
+        assert_eq!(names(&s), ["@av", "@sys", "@hand"]);
+        let text = format(&s);
+        assert!(text.contains("shelf=@av|display,brightness,sound,media\n"));
+        assert!(text.contains("shelf=@sys|quick,resources,bluetooth,github,clocks\n"));
+        assert!(text.contains("shelf=@hand|clipboard,tray,tools,timers,buttons\n"));
+        assert!(!text.contains("modules="), "старый порядок больше не пишется");
+        assert_eq!(parse(&text), s);
+        assert_eq!(parse("").shelves, default_shelves(), "пустой файл — полки по умолчанию");
+        assert_whole(&s);
+    }
+
+    #[test]
+    fn custom_shelves_round_trip() {
+        let mut s = Settings::default();
+        assert!(s.place_card("media", 1, None));
+        assert!(s.hide_card("tools"));
+        assert_eq!(s.add_shelf(Lang::Ru), Some(3));
+        assert!(s.rename_shelf(3, "Дом|Работа"));
+        assert_eq!(s.shelves[3], Shelf { name: "Дом Работа".into(), cards: Vec::new() });
+        let text = format(&s);
+        assert!(text.contains("shelf=Дом Работа|\n"), "пустая полка остаётся");
+        assert!(text.contains("hidden=tools\n"));
+        assert_eq!(parse(&text), s);
+        assert_whole(&s);
+    }
+
+    #[test]
+    fn old_file_moves_to_shelves() {
+        // Сценарий из спецификации: «Медиа» убрана, «Кнопки» стояли раньше «Буфера обмена».
+        let s = parse("modules=buttons,clipboard,timers,tray\nhidden=media,snippets\n");
+        assert_eq!(names(&s), ["@av", "@sys", "@hand"]);
+        assert_eq!(s.shelves[0].cards, ["display", "brightness", "sound"]);
+        assert_eq!(s.shelves[2].cards, ["buttons", "clipboard", "timers", "tray", "tools"]);
+        assert_eq!(s.hidden, ["media"], "«Заготовки» из старого файла пропущены");
+        assert_whole(&s);
+        let text = format(&s);
+        assert!(!text.contains("modules=") && !text.contains("snippets"));
+        assert_eq!(parse(&text), s, "после первого сохранения файл уже новый");
+        // Полный порядок 1.7: «Медиа» стояла раньше «Звука», «Заготовки» между «Буфером» и «Лотком».
+        let full = "modules=display,quick,brightness,media,sound,resources,clipboard,snippets,tray,tools,bluetooth,timers,clocks,github,buttons\n";
+        // Файл 1.7, где порядок никто не трогал: `modules=` и `hidden=` пустые — полки по умолчанию.
+        assert_eq!(parse("modules=\nhidden=\n").shelves, default_shelves());
+        let s = parse(full);
+        assert_eq!(s.shelves[0].cards, ["display", "brightness", "media", "sound"]);
+        assert_eq!(s.shelves[1].cards, ["quick", "resources", "bluetooth", "clocks", "github"]);
+        assert_eq!(s.shelves[2].cards, ["clipboard", "tray", "tools", "timers", "buttons"]);
+        assert!(s.hidden.is_empty());
+    }
+
+    #[test]
+    fn old_hidden_clipboard_with_visible_snippets_comes_back() {
+        // До 1.9 «Заготовки» — отдельная карточка. «Буфер обмена» убран, а «Заготовки» на виду: после перехода
+        // закреплённое лежит в «Буфере обмена», и он возвращается домой.
+        let s = parse("snippet=Спасибо\nhidden=clipboard\n");
+        assert!(s.hidden.is_empty());
+        assert_eq!(s.shelf_of("clipboard"), Some(2));
+        assert_eq!(s.pinned, ["Спасибо"]);
+        // Убраны обе — так и остаётся.
+        let s = parse("hidden=clipboard,snippets\n");
+        assert_eq!(s.hidden, ["clipboard"]);
+        assert_eq!(s.shelf_of("clipboard"), None);
+        // Файл 1.9 с полками: убранный «Буфер обмена» — выбор владельца, его не трогаем.
+        let s = parse("shelf=@hand|tray\nhidden=clipboard\n");
+        assert_eq!(s.hidden, ["clipboard"]);
+        assert_eq!(s.shelf_of("clipboard"), None);
+        // Убрана не она — ничего не меняется.
+        assert_eq!(parse("hidden=media\n").hidden, ["media"]);
+    }
+
+    #[test]
+    fn shelf_lines_are_cleaned() {
+        let text =
+            "shelf=A|display,display,nope,media\nshelf=B|media,quick, bluetooth\nshelf=|tray\nhidden=github,nope\n";
+        let s = parse(text);
+        assert_eq!(names(&s), ["A", "B"], "полка без имени пропущена");
+        assert_eq!(s.shelves[0].cards, ["display", "media"], "повтор и незнакомый ключ отброшены");
+        assert_eq!(s.hidden, ["github"], "незнакомый ключ среди убранных отброшен");
+        // Не названные нигде карточки встают в конец последней полки (родных `@…` здесь нет), в порядке программы.
+        assert_eq!(
+            s.shelves[1].cards,
+            [
+                "quick",
+                "bluetooth",
+                "brightness",
+                "sound",
+                "resources",
+                "clocks",
+                "clipboard",
+                "tray",
+                "tools",
+                "timers",
+                "buttons"
+            ]
+        );
+        assert_whole(&s);
+        // Убранная и поставленная на полку одновременно — убрана.
+        let s = parse("shelf=A|display,media\nhidden=media\n");
+        assert!(s.is_hidden("media") && s.shelf_of("media").is_none());
+        assert_whole(&s);
+        // Полок больше девяти не бывает.
+        let many: String = (0..12).map(|i| format!("shelf=P{i}|\n")).collect();
+        assert_eq!(parse(&many).shelves.len(), MAX_SHELVES);
+    }
+
+    #[test]
+    fn new_card_goes_to_its_shelf() {
+        // «Часы», «Кнопки» и «Медиа» в этом файле нет (новые для него): «Часы» и «Кнопки» — домой, а у «Медиа» дома
+        // нет (первая полка названа по-своему) — в конец последней.
+        let text = "shelf=Моя|display,brightness,sound\nshelf=@sys|quick,resources,bluetooth,github\n\
+                    shelf=@hand|clipboard,tray,tools,timers\n";
+        let s = parse(text);
+        assert_eq!(s.shelves[0].cards, ["display", "brightness", "sound"]);
+        assert_eq!(s.shelves[1].cards, ["quick", "resources", "bluetooth", "github", "clocks"]);
+        assert_eq!(s.shelves[2].cards, ["clipboard", "tray", "tools", "timers", "media", "buttons"]);
+        assert_whole(&s);
+        // Убранная новой не считается и сама не возвращается.
+        let s = parse("shelf=@sys|quick\nhidden=clocks\n");
+        assert!(s.is_hidden("clocks") && s.shelf_of("clocks").is_none());
+    }
+
+    #[test]
+    fn move_and_hide_cards() {
+        let mut s = Settings::default();
+        // Тянут влево, на место «Экрана»: встаёт перед ним.
+        assert!(s.place_card("sound", 0, Some(0)));
+        assert_eq!(s.shelves[0].cards, ["sound", "display", "brightness", "media"]);
+        // Тянут вправо, на «Яркость» (место 2 до перестановки): встаёт после неё.
+        assert!(s.place_card("sound", 0, Some(2)));
+        assert_eq!(s.shelves[0].cards, ["display", "brightness", "sound", "media"]);
+        // На другую полку — в конец.
+        assert!(s.place_card("media", 1, None));
+        assert_eq!(s.shelves[0].cards, ["display", "brightness", "sound"]);
+        assert_eq!(s.shelf_of("media"), Some(1));
+        assert_eq!(s.shelves[1].cards.last().map(String::as_str), Some("media"));
+        // Убрать и вернуть на другую полку.
+        assert!(s.hide_card("brightness") && s.hide_card("brightness"));
+        assert_eq!((s.shelf_of("brightness"), s.hidden.as_slice()), (None, ["brightness".to_string()].as_slice()));
+        assert!(s.place_card("brightness", 2, None));
+        assert!(!s.is_hidden("brightness"));
+        assert_eq!(s.shelves[2].cards.last().map(String::as_str), Some("brightness"));
+        // Незнакомое и несуществующая полка — ничего.
+        let before = s.clone();
+        assert!(!s.place_card("nope", 0, None) && !s.place_card("tray", 9, None) && !s.hide_card("nope"));
+        assert_eq!(s, before);
+        assert_whole(&s);
         assert_eq!(parse(&format(&s)), s);
+    }
+
+    #[test]
+    fn add_rename_remove_shelves() {
+        let mut s = Settings::default();
+        assert_eq!(s.add_shelf(Lang::Ru), Some(3));
+        assert_eq!(s.add_shelf(Lang::Ru), Some(4));
+        assert_eq!((s.shelves[3].name.as_str(), s.shelves[4].name.as_str()), ("Полка 1", "Полка 2"));
+        // «Полка 1» освободилась — следующая берёт её номер.
+        assert!(s.rename_shelf(3, "Работа"));
+        assert_eq!(s.add_shelf(Lang::En), Some(5));
+        assert_eq!(s.shelves[5].name, "Shelf 1");
+        assert_eq!(s.add_shelf(Lang::Ru), Some(6));
+        assert_eq!(s.shelves[6].name, "Полка 1");
+        // Пустое имя и то же самое — ничего; больше 24 знаков — обрезается.
+        assert!(!s.rename_shelf(3, "  ") && !s.rename_shelf(3, "Работа") && !s.rename_shelf(9, "x"));
+        assert!(s.rename_shelf(4, &"я".repeat(40)));
+        assert_eq!(s.shelves[4].name.chars().count(), MAX_SHELF_NAME);
+        // Убрали полку — её карточки в убранных, остальные полки целы.
+        assert!(s.place_card("tray", 3, None) && s.place_card("tools", 3, None));
+        assert!(s.remove_shelf(3));
+        assert_eq!(s.hidden, ["tray", "tools"]);
+        assert_eq!(s.shelves.len(), 6);
+        assert_whole(&s);
+        // Больше девяти не заводится.
+        while s.add_shelf(Lang::En).is_some() {}
+        assert_eq!(s.shelves.len(), MAX_SHELVES);
+        assert_eq!(s.add_shelf(Lang::En), None);
+        // Последнюю полку убрать нельзя.
+        let mut one = parse("shelf=Одна|\n");
+        assert_eq!(one.shelves.len(), 1);
+        assert!(!one.remove_shelf(0));
+        assert_whole(&one);
+        assert_eq!(Shelf::clean_name(" a|b\tc "), "a b c");
+        assert_eq!(Shelf::clean_name(" | "), "");
     }
 
     #[test]

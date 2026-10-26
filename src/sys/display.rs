@@ -4,6 +4,10 @@
 // `\\.\DISPLAYn`. Масштаб — через DisplayConfig: у Windows нет открытого API для него, поэтому
 // берём недокументированные пакеты -3 (узнать) и -4 (поставить), которыми пользуется сама
 // «Параметры → Дисплей». Масштаб там задаётся шагом относительно рекомендованного.
+//
+// В демо-режиме и в тестах (`sys::isolated`) всё это — выдуманный экран из `static`: Windows не читается и не
+// пишется. У него два режима, как у настоящего: «сейчас» и «в реестре» — `apply` меняет только первый, `commit`
+// переносит его во второй (после «Оставить»), так что откат без окна проверяется тестами.
 
 use windows::Win32::Devices::Display::{
     DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
@@ -19,7 +23,10 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::core::PCWSTR;
 
-use super::wide;
+use std::sync::Mutex;
+
+use super::monitor::{self, Monitor, PxRect};
+use super::{blocked, isolated, real_write, wide};
 
 /// Режим экрана.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -52,13 +59,102 @@ fn read_mode(device: &[u16], index: ENUM_DISPLAY_SETTINGS_MODE) -> Option<Mode> 
     })
 }
 
+// ─── Выдуманный экран (демо-режим и тесты) ──────────────────────────────────
+
+/// Устройство выдуманного монитора в демо-режиме. Такого `DISPLAYn` у настоящей Windows нет — даже сорвавшийся
+/// заслон ничего бы не поменял.
+pub const FAKE_DEVICE: &str = r"\\.\DISPLAY9";
+
+/// Что «стоит» у выдуманного монитора.
+struct Fake {
+    /// Режим на экране сейчас.
+    now: Mode,
+    /// Режим «в реестре» — тот, что вернётся после перезагрузки: меняется только подтверждением ([`commit`]).
+    saved: Mode,
+    /// Масштаб, %.
+    scale: u32,
+}
+
+/// Выдуманные мониторы по именам устройств: нужный заводится при первом обращении.
+static FAKE: Mutex<Vec<(String, Fake)>> = Mutex::new(Vec::new());
+
+const fn fake_mode(width: u32, height: u32, hz: u32) -> Mode {
+    Mode { width, height, hz, bits: 32 }
+}
+
+/// Режим, с которого начинает выдуманный монитор: 4K, 120 Гц.
+const FAKE_START: Mode = fake_mode(3840, 2160, 120);
+/// Масштаб выдуманного монитора вначале и рекомендованный ему.
+const FAKE_SCALE: u32 = 150;
+const FAKE_RECOMMENDED: u32 = 175;
+
+/// Режимы выдуманного монитора.
+fn fake_modes() -> Vec<Mode> {
+    vec![
+        fake_mode(3840, 2160, 60),
+        fake_mode(3840, 2160, 120),
+        fake_mode(2560, 1440, 60),
+        fake_mode(2560, 1440, 120),
+        fake_mode(2560, 1440, 144),
+        fake_mode(1920, 1080, 60),
+        fake_mode(1920, 1080, 120),
+        fake_mode(1920, 1080, 144),
+        fake_mode(1600, 900, 60),
+        fake_mode(1280, 720, 60),
+    ]
+}
+
+/// Масштабы выдуманного монитора.
+fn fake_options() -> Vec<u32> {
+    vec![100, 125, 150, 175, 200, 225]
+}
+
+fn with_fake<R>(device: &str, f: impl FnOnce(&mut Fake) -> R) -> R {
+    let mut list = FAKE.lock().unwrap_or_else(|e| e.into_inner());
+    let i = match list.iter().position(|(d, _)| d.eq_ignore_ascii_case(device)) {
+        Some(i) => i,
+        None => {
+            list.push((device.to_string(), Fake { now: FAKE_START, saved: FAKE_START, scale: FAKE_SCALE }));
+            list.len() - 1
+        }
+    };
+    f(&mut list[i].1)
+}
+
+/// Имя устройства, под которым карточки видят монитор панели: настоящее; в демо-режиме — выдуманное
+/// ([`FAKE_DEVICE`]); в тестах — то, что дали (у каждого теста свой монитор, тесты друг другу не мешают).
+pub fn device_for(panel: &str) -> &str {
+    if super::demo() { FAKE_DEVICE } else { panel }
+}
+
+/// Мониторы для карточек: настоящие; в демо-режиме и в тестах — один выдуманный (4K, основной).
+pub fn monitors(panel: &str) -> Vec<Monitor> {
+    if isolated() {
+        let rect = PxRect { left: 0, top: 0, right: 3840, bottom: 2160 };
+        return vec![Monitor { device: device_for(panel).to_string(), rect, primary: true, handle: 0 }];
+    }
+    monitor::monitors()
+}
+
 /// Текущий режим устройства `\\.\DISPLAYn`.
 pub fn current(device: &str) -> Option<Mode> {
+    if isolated() {
+        return Some(with_fake(device, |f| f.now));
+    }
     read_mode(&wide(device), ENUM_CURRENT_SETTINGS)
+}
+
+/// Режим, который выдуманная Windows помнит в реестре (вернётся после перезагрузки) — для тестов отката.
+#[cfg(test)]
+pub fn saved(device: &str) -> Mode {
+    with_fake(device, |f| f.saved)
 }
 
 /// Все режимы устройства с той же глубиной цвета, что сейчас, без повторов.
 pub fn modes(device: &str) -> Vec<Mode> {
+    if isolated() {
+        return fake_modes();
+    }
     let name = wide(device);
     let bits = read_mode(&name, ENUM_CURRENT_SETTINGS).map(|m| m.bits);
     let mut out: Vec<Mode> = Vec::new();
@@ -72,10 +168,8 @@ pub fn modes(device: &str) -> Vec<Mode> {
     out
 }
 
-/// Поставить режим и запомнить его в реестре (как «Параметры»).
-pub fn apply(device: &str, mode: Mode) -> Result<(), String> {
-    let name = wide(device);
-    let dm = DEVMODEW {
+fn devmode(mode: Mode) -> DEVMODEW {
+    DEVMODEW {
         dmSize: size_of::<DEVMODEW>() as u16,
         dmFields: DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY | DM_BITSPERPEL,
         dmPelsWidth: mode.width,
@@ -83,13 +177,47 @@ pub fn apply(device: &str, mode: Mode) -> Result<(), String> {
         dmDisplayFrequency: mode.hz,
         dmBitsPerPel: mode.bits,
         ..Default::default()
-    };
-    let r = unsafe { ChangeDisplaySettingsExW(PCWSTR(name.as_ptr()), Some(&dm), None, CDS_UPDATEREGISTRY, None) };
+    }
+}
+
+fn change_result(r: windows::Win32::Graphics::Gdi::DISP_CHANGE) -> Result<(), String> {
     match r {
         DISP_CHANGE_SUCCESSFUL => Ok(()),
         DISP_CHANGE_RESTART => Err("restart required".into()),
         other => Err(format!("ChangeDisplaySettingsEx failed: {}", other.0)),
     }
+}
+
+/// Поставить режим на время — «динамически», без записи в реестр: пока «Оставить» не нажали (закрыли программу,
+/// она упала, перезагрузили Windows), настоящий режим остаётся прежним и после перезагрузки вернётся. Подтверждённый
+/// режим запоминает [`commit`].
+pub fn apply(device: &str, mode: Mode) -> Result<(), String> {
+    if blocked(&format!("display::apply {device} {}x{}@{}", mode.width, mode.height, mode.hz)) {
+        if !fake_modes().contains(&mode) {
+            return Err("mode is not supported".into());
+        }
+        with_fake(device, |f| f.now = mode);
+        return Ok(());
+    }
+    let name = wide(device);
+    let dm = devmode(mode);
+    real_write("ChangeDisplaySettingsExW");
+    change_result(unsafe { ChangeDisplaySettingsExW(PCWSTR(name.as_ptr()), Some(&dm), None, CDS_TYPE(0), None) })
+}
+
+/// Запомнить режим в реестре (после «Оставить»), как «Параметры»: он переживёт перезагрузку. На экране ничего не
+/// меняется (`CDS_NORESET`) — режим `mode` уже стоит.
+pub fn commit(device: &str, mode: Mode) -> Result<(), String> {
+    if blocked(&format!("display::commit {device} {}x{}@{}", mode.width, mode.height, mode.hz)) {
+        with_fake(device, |f| f.saved = mode);
+        return Ok(());
+    }
+    let name = wide(device);
+    let dm = devmode(mode);
+    real_write("ChangeDisplaySettingsExW");
+    change_result(unsafe {
+        ChangeDisplaySettingsExW(PCWSTR(name.as_ptr()), Some(&dm), None, CDS_UPDATEREGISTRY | CDS_NORESET, None)
+    })
 }
 
 // ─── Основной монитор ──────────────────────────────────────────────────────
@@ -115,6 +243,7 @@ fn write_position(device: &str, x: i32, y: i32, primary: bool) -> Result<(), Str
     if primary {
         flags |= CDS_SET_PRIMARY;
     }
+    real_write("ChangeDisplaySettingsExW");
     let r = unsafe { ChangeDisplaySettingsExW(PCWSTR(name.as_ptr()), Some(&dm), None, flags, None) };
     if r == DISP_CHANGE_SUCCESSFUL {
         Ok(())
@@ -128,6 +257,9 @@ fn write_position(device: &str, x: i32, y: i32, primary: bool) -> Result<(), Str
 /// уже записанное возвращается к прежнему (иначе его применил бы любой следующий вызов), без применения.
 pub fn set_primary(device: &str, places: &[(String, i32, i32)]) -> Result<(), String> {
     let moved = shifted(places, device).ok_or("monitor not found")?;
+    if blocked(&format!("display::set_primary {device}")) {
+        return Ok(());
+    }
     for (i, (d, x, y)) in moved.iter().enumerate() {
         if let Err(e) = write_position(d, *x, *y, d == device) {
             for (od, ox, oy) in &places[..i] {
@@ -137,6 +269,7 @@ pub fn set_primary(device: &str, places: &[(String, i32, i32)]) -> Result<(), St
         }
     }
     // Применить записанное разом.
+    real_write("ChangeDisplaySettingsExW");
     let r = unsafe { ChangeDisplaySettingsExW(PCWSTR::null(), None, None, CDS_TYPE(0), None) };
     match r {
         DISP_CHANGE_SUCCESSFUL => Ok(()),
@@ -223,7 +356,7 @@ fn source_of(device: &str) -> Option<Source> {
 
 /// Имя монитора, как его называет сам монитор («Monitor 27»); пусто — если не сказал.
 pub fn monitor_name(device: &str) -> String {
-    if super::demo() {
+    if isolated() {
         return "Monitor 27".to_string();
     }
     source_of(device).map(|s| s.monitor_name).unwrap_or_default()
@@ -240,6 +373,10 @@ fn scale_from(min_rel: i32, cur_rel: i32, max_rel: i32) -> Option<Scale> {
 
 /// Масштаб монитора `\\.\DISPLAYn`.
 pub fn scale(device: &str) -> Option<Scale> {
+    if isolated() {
+        let current = with_fake(device, |f| f.scale);
+        return Some(Scale { current, recommended: FAKE_RECOMMENDED, options: fake_options() });
+    }
     let src = source_of(device)?;
     let mut get = DpiGet {
         header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
@@ -260,6 +397,13 @@ pub fn scale(device: &str) -> Option<Scale> {
 
 /// Поставить масштаб в процентах; он должен быть среди `Scale::options`.
 pub fn set_scale(device: &str, percent: u32) -> Result<(), String> {
+    if blocked(&format!("display::set_scale {device} {percent}")) {
+        if !fake_options().contains(&percent) {
+            return Err("unknown scale".into());
+        }
+        with_fake(device, |f| f.scale = percent);
+        return Ok(());
+    }
     let now = scale(device).ok_or("scale is not available")?;
     let rec = SCALES.iter().position(|&s| s == now.recommended).ok_or("unknown recommended scale")? as i32;
     let want = SCALES.iter().position(|&s| s == percent).ok_or("unknown scale")? as i32;
@@ -273,6 +417,7 @@ pub fn set_scale(device: &str, percent: u32) -> Result<(), String> {
         },
         rel: want - rec,
     };
+    real_write("DisplayConfigSetDeviceInfo");
     match unsafe { DisplayConfigSetDeviceInfo(&set.header) } {
         0 => Ok(()),
         e => Err(format!("DisplayConfigSetDeviceInfo failed: {e}")),
@@ -310,5 +455,46 @@ mod primary_tests {
         let s = shifted(&places, "B").unwrap();
         assert_eq!(s, vec![("A".to_string(), -2560, 200), ("B".to_string(), 0, 0), ("C".to_string(), -4480, 200)]);
         assert!(shifted(&places, "D").is_none());
+    }
+}
+
+#[cfg(test)]
+mod fake_tests {
+    use super::*;
+
+    #[test]
+    fn fake_apply_is_temporary_until_commit() {
+        let d = r"\\.\TEST-TEMP";
+        assert_eq!(current(d), Some(FAKE_START));
+        let want = fake_mode(1920, 1080, 144);
+        apply(d, want).unwrap();
+        assert_eq!(current(d), Some(want));
+        assert_eq!(saved(d), FAKE_START, "в реестр режим попадает только после подтверждения");
+        commit(d, want).unwrap();
+        assert_eq!(saved(d), want);
+        assert!(apply(d, fake_mode(1, 1, 1)).is_err(), "такого режима у монитора нет");
+        assert_eq!(current(d), Some(want), "неудачная смена ничего не меняет");
+        assert!(modes(d).contains(&want) && modes(d).contains(&FAKE_START));
+    }
+
+    #[test]
+    fn fake_scale_follows_its_options() {
+        let d = r"\\.\TEST-SCALE";
+        let s = scale(d).unwrap();
+        assert_eq!((s.current, s.recommended), (FAKE_SCALE, FAKE_RECOMMENDED));
+        assert!(s.options.contains(&s.current) && s.options.contains(&s.recommended));
+        set_scale(d, 200).unwrap();
+        assert_eq!(scale(d).unwrap().current, 200);
+        assert!(set_scale(d, 133).is_err(), "такого масштаба нет");
+        assert_eq!(scale(d).unwrap().current, 200);
+    }
+
+    #[test]
+    fn fake_world_is_one_invented_monitor() {
+        // Один выдуманный монитор «Monitor 27»; настоящие экраны в демо и тестах не показываются.
+        assert_eq!(monitors(r"\\.\TEST-FAKE").len(), 1);
+        assert_eq!(monitor_name(r"\\.\TEST-FAKE"), "Monitor 27");
+        assert!(fake_modes().contains(&FAKE_START), "стартовый режим есть среди режимов");
+        assert!(fake_options().contains(&FAKE_SCALE) && fake_options().contains(&FAKE_RECOMMENDED));
     }
 }

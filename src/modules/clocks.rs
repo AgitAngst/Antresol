@@ -153,8 +153,8 @@ impl Module for Clocks {
     fn ui(&mut self, ui: &mut Ui, cx: &mut Ctx) {
         let t = cx.t;
         let demo = vec![
-            Clock { name: "Токио".into(), zone: "Tokyo Standard Time".into() },
-            Clock { name: "New York".into(), zone: "Eastern Standard Time".into() },
+            Clock { name: texts::demo_city(cx.lang, 0).into(), zone: "Tokyo Standard Time".into() },
+            Clock { name: texts::demo_city(cx.lang, 1).into(), zone: "Eastern Standard Time".into() },
         ];
         let list = if sys::demo() { demo } else { cx.settings.clocks.clone() };
         egui::ScrollArea::vertical().id_salt("clocks").auto_shrink([false, false]).show(ui, |ui| {

@@ -70,9 +70,6 @@ pub struct Tr {
     pub bluetooth: &'static str,
     pub bt_none: &'static str,
     pub bt_settings: &'static str,
-    pub cards_title: &'static str,
-    pub cards_note: &'static str,
-    pub no_cards: &'static str,
     pub timers: &'static str,
     pub timer: &'static str,
     pub timer_work: &'static str,
@@ -120,7 +117,6 @@ pub struct Tr {
     pub refresh_hz: &'static str,
     pub scale_pct: &'static str,
     pub hide: &'static str,
-    pub edit_cards: &'static str,
     pub profile: &'static str,
     pub color: &'static str,
     pub custom_color: &'static str,
@@ -142,7 +138,6 @@ pub struct Tr {
     pub done: &'static str,
     pub media_strip: &'static str,
     pub open_panel: &'static str,
-    pub drag: &'static str,
     pub appearance: &'static str,
     pub more_hint: &'static str,
     pub sound: &'static str,
@@ -168,11 +163,6 @@ pub struct Tr {
     pub power_plan: &'static str,
     pub connect: &'static str,
     pub disconnect: &'static str,
-    pub snippets: &'static str,
-    pub snippets_empty: &'static str,
-    pub snippet_add: &'static str,
-    pub snippet_remove: &'static str,
-    pub snippet_no_text: &'static str,
     pub tools: &'static str,
     pub picker: &'static str,
     pub picker_hint: &'static str,
@@ -190,6 +180,30 @@ pub struct Tr {
     pub clock_search: &'static str,
     pub clock_unknown: &'static str,
     pub temperature: &'static str,
+    // Полки, правка и закреплённое буфера (1.9.0): один блок.
+    pub shelf_av: &'static str,
+    pub shelf_sys: &'static str,
+    pub shelf_hand: &'static str,
+    pub shelf_add: &'static str,
+    pub shelves_edit: &'static str,
+    pub shelves_hint: &'static str,
+    pub shelves_undo: &'static str,
+    pub grip_hint: &'static str,
+    pub removed_cards: &'static str,
+    pub removed_none: &'static str,
+    pub removed_note: &'static str,
+    pub shelf_empty: &'static str,
+    pub shelf_rename: &'static str,
+    pub shelf_remove: &'static str,
+    pub quiet_on: &'static str,
+    pub clip_pin: &'static str,
+    pub clip_pin_from: &'static str,
+    pub clip_no_text: &'static str,
+    pub clip_hint: &'static str,
+    pub clip_pinned_full: &'static str,
+    pub clip_unpinned: &'static str,
+    pub shelf_limit: &'static str,
+    pub paused: &'static str,
     pub accents: [&'static str; 5],
 }
 
@@ -261,9 +275,6 @@ const RU: Tr = Tr {
     bluetooth: "Bluetooth",
     bt_none: "Сопряжённых устройств нет.",
     bt_settings: "Параметры Bluetooth",
-    cards_title: "Карточки панели",
-    cards_note: "Выключенные карточки не видны и ничего не опрашивают; буфер обмена запоминает и без карточки.",
-    no_cards: "Все карточки выключены — включите нужные в настройках.",
     timers: "Таймеры",
     timer: "Таймер",
     timer_work: "Работа",
@@ -311,7 +322,6 @@ const RU: Tr = Tr {
     refresh_hz: "Частота, Гц",
     scale_pct: "Масштаб, %",
     hide: "Спрятать (Esc)",
-    edit_cards: "Изменить карточки",
     profile: "Профиль",
     color: "Цвет",
     custom_color: "Свой цвет…",
@@ -333,7 +343,6 @@ const RU: Tr = Tr {
     done: "Готово",
     media_strip: "Медиа на спрятанной полоске",
     open_panel: "Открыть панель",
-    drag: "Перетащите, чтобы поменять порядок",
     appearance: "Оформление",
     more_hint: "Пролистать к остальным карточкам",
     sound: "Звук",
@@ -355,15 +364,10 @@ const RU: Tr = Tr {
     make_primary: "Сделать основным",
     keep_awake: "Не спать",
     dark_theme_win: "Тёмная тема",
-    quiet: "Без уведомлений",
+    quiet: "Тишина",
     power_plan: "План питания",
     connect: "Подключить",
     disconnect: "Отключить",
-    snippets: "Заготовки",
-    snippets_empty: "Заготовок нет — скопируйте текст и нажмите «Добавить из буфера».",
-    snippet_add: "Добавить из буфера",
-    snippet_remove: "Убрать заготовку",
-    snippet_no_text: "В буфере нет текста",
     tools: "Инструменты",
     picker: "Пипетка",
     picker_hint: "Тяните круг на любой цвет экрана — код цвета попадёт в буфер.",
@@ -381,6 +385,29 @@ const RU: Tr = Tr {
     clock_search: "Пояс, например Tokyo",
     clock_unknown: "Пояс не найден",
     temperature: "Температура",
+    shelf_av: "Экран и звук",
+    shelf_sys: "Система",
+    shelf_hand: "Под рукой",
+    shelf_add: "Полка",
+    shelves_edit: "Изменить полки",
+    shelves_hint: "Тяните карточку за ручку — в ряду или на вкладку другой полки",
+    shelves_undo: "Как было",
+    grip_hint: "Тянуть мышью или Alt + ←/→; Alt + 1…9 — на другую полку",
+    removed_cards: "Убранные карточки",
+    removed_none: "Пока ничего не убрано",
+    removed_note: "Крестик на карточке убирает её сюда. Щелчок по ней — вернуть на эту полку.",
+    shelf_empty: "На этой полке пусто",
+    shelf_rename: "Двойной щелчок — переименовать",
+    shelf_remove: "Убрать полку — её карточки уйдут в «Убранные»",
+    quiet_on: "без всплывающих",
+    clip_pin: "Закрепить",
+    clip_pin_from: "Закрепить из буфера",
+    clip_no_text: "В буфере нет текста",
+    clip_hint: "Щелчок — скопировать снова. Булавка — закрепить.",
+    clip_pinned_full: "Закреплено 30 — открепите лишнее",
+    clip_unpinned: "Откреплено",
+    shelf_limit: "Полок не больше девяти — уберите ненужную",
+    paused: "на паузе",
     accents: ["Лайм", "Фиолетовый", "Индиго", "Фуксия", "Лазурь"],
 };
 
@@ -452,9 +479,6 @@ const EN: Tr = Tr {
     bluetooth: "Bluetooth",
     bt_none: "No paired devices.",
     bt_settings: "Bluetooth settings",
-    cards_title: "Panel cards",
-    cards_note: "Hidden cards are not shown and poll nothing; the clipboard remembers even without its card.",
-    no_cards: "All cards are off — turn the ones you need on in settings.",
     timers: "Timers",
     timer: "Timer",
     timer_work: "Work",
@@ -502,7 +526,6 @@ const EN: Tr = Tr {
     refresh_hz: "Refresh, Hz",
     scale_pct: "Scale, %",
     hide: "Hide (Esc)",
-    edit_cards: "Edit cards",
     profile: "Profile",
     color: "Color",
     custom_color: "Custom color…",
@@ -524,7 +547,6 @@ const EN: Tr = Tr {
     done: "Done",
     media_strip: "Media on the hidden strip",
     open_panel: "Open the panel",
-    drag: "Drag to reorder",
     appearance: "Appearance",
     more_hint: "Scroll to the other cards",
     sound: "Sound",
@@ -546,15 +568,10 @@ const EN: Tr = Tr {
     make_primary: "Make primary",
     keep_awake: "Keep awake",
     dark_theme_win: "Dark mode",
-    quiet: "No notifications",
+    quiet: "Quiet",
     power_plan: "Power plan",
     connect: "Connect",
     disconnect: "Disconnect",
-    snippets: "Snippets",
-    snippets_empty: "No snippets — copy some text and press “Add from clipboard”.",
-    snippet_add: "Add from clipboard",
-    snippet_remove: "Remove snippet",
-    snippet_no_text: "No text in the clipboard",
     tools: "Tools",
     picker: "Color picker",
     picker_hint: "Drag the circle onto any color on screen — its code goes to the clipboard.",
@@ -572,6 +589,29 @@ const EN: Tr = Tr {
     clock_search: "Zone, e.g. Tokyo",
     clock_unknown: "Time zone not found",
     temperature: "Temperature",
+    shelf_av: "Display & sound",
+    shelf_sys: "System",
+    shelf_hand: "At hand",
+    shelf_add: "Shelf",
+    shelves_edit: "Edit shelves",
+    shelves_hint: "Drag a card by its handle — within the row or onto another shelf’s tab",
+    shelves_undo: "Undo all",
+    grip_hint: "Drag with the mouse or Alt + ←/→; Alt + 1…9 moves it to another shelf",
+    removed_cards: "Removed cards",
+    removed_none: "Nothing removed yet",
+    removed_note: "The cross on a card puts it here. Click it to bring it back to this shelf.",
+    shelf_empty: "This shelf is empty",
+    shelf_rename: "Double-click to rename",
+    shelf_remove: "Remove the shelf — its cards go to Removed cards",
+    quiet_on: "no pop-ups",
+    clip_pin: "Pin",
+    clip_pin_from: "Pin from clipboard",
+    clip_no_text: "No text in the clipboard",
+    clip_hint: "Click to copy again. Pin to keep.",
+    clip_pinned_full: "30 pinned — unpin some first",
+    clip_unpinned: "Unpinned",
+    shelf_limit: "At most nine shelves — remove one first",
+    paused: "paused",
     accents: ["Lime", "Violet", "Indigo", "Fuchsia", "Sky"],
 };
 
@@ -597,6 +637,73 @@ pub fn more_cards(lang: Lang, n: usize) -> String {
     match lang {
         Lang::Ru => format!("Ещё {n}"),
         Lang::En => format!("{n} more"),
+    }
+}
+
+/// Имя полки для вкладки: `@av`, `@sys`, `@hand` — готовые (переводятся), остальное — как ввели.
+pub fn shelf_title<'a>(t: &'a Tr, name: &'a str) -> &'a str {
+    match name {
+        "@av" => t.shelf_av,
+        "@sys" => t.shelf_sys,
+        "@hand" => t.shelf_hand,
+        other => other,
+    }
+}
+
+/// Имя новой полки: «Полка 4».
+pub fn shelf_n(lang: Lang, n: usize) -> String {
+    match lang {
+        Lang::Ru => format!("Полка {n}"),
+        Lang::En => format!("Shelf {n}"),
+    }
+}
+
+/// Выдуманные тексты для снимков (демо-режим) — по языку сцены, чтобы в английских не было русских: недавнее и
+/// закреплённое в «Буфере обмена», города в «Часах».
+pub fn demo_clip_recent(lang: Lang) -> [&'static str; 3] {
+    match lang {
+        Lang::Ru => ["Пример текста для вставки", "https://example.com/demo", "#2A5FD0"],
+        Lang::En => ["Sample text to paste", "https://example.com/demo", "#2A5FD0"],
+    }
+}
+
+pub fn demo_clip_pinned(lang: Lang) -> [&'static str; 2] {
+    match lang {
+        Lang::Ru => ["Спасибо, получил!", "Встреча завтра в 10:00\nКомната 3"],
+        Lang::En => ["Thanks, got it!", "Meeting tomorrow at 10:00\nRoom 3"],
+    }
+}
+
+pub fn demo_city(lang: Lang, i: usize) -> &'static str {
+    match (lang, i) {
+        (Lang::Ru, 0) => "Токио",
+        (Lang::Ru, _) => "Нью-Йорк",
+        (Lang::En, 0) => "Tokyo",
+        (Lang::En, _) => "New York",
+    }
+}
+
+/// Имя ручки карточки для диктора: «Перетащить «Экран»».
+pub fn drag_card(lang: Lang, title: &str) -> String {
+    match lang {
+        Lang::Ru => format!("Перетащить «{title}»"),
+        Lang::En => format!("Drag “{title}”"),
+    }
+}
+
+/// Крестик на карточке: «Убрать с полки «Экран»».
+pub fn remove_card(lang: Lang, title: &str) -> String {
+    match lang {
+        Lang::Ru => format!("Убрать с полки «{title}»"),
+        Lang::En => format!("Remove “{title}” from the shelf"),
+    }
+}
+
+/// Подсказка метки таймера на вкладке: «Идёт таймер «Чай», осталось 03:42».
+pub fn timer_running(lang: Lang, name: &str, left: &str) -> String {
+    match lang {
+        Lang::Ru => format!("Идёт таймер «{name}», осталось {left}"),
+        Lang::En => format!("Timer “{name}” is running, {left} left"),
     }
 }
 

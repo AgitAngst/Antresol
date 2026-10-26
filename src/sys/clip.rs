@@ -67,7 +67,11 @@ pub fn read_text() -> Result<Option<String>, ()> {
 
 /// Положить текст в буфер (как «Копировать»).
 pub fn write_text(text: &str) -> Result<(), String> {
+    if super::blocked(&format!("clip::write_text {text}")) {
+        return Ok(());
+    }
     let wide: Vec<u16> = text.encode_utf16().chain([0]).collect();
+    super::real_write("SetClipboardData");
     unsafe {
         OpenClipboard(None).map_err(|e| e.to_string())?;
         let r = (|| {

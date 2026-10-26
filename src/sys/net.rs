@@ -72,9 +72,10 @@ pub fn wifi() -> Option<Wifi> {
 }
 
 pub fn set_wifi(on: bool) -> std::result::Result<(), String> {
-    if super::demo() {
+    if super::blocked(&format!("set_wifi {on}")) {
         return Ok(());
     }
+    super::real_write("Radio::SetStateAsync");
     let run = || -> Result<RadioAccessStatus> {
         let access = wait!(Radio::RequestAccessAsync()?)?;
         if access != RadioAccessStatus::Allowed {
@@ -149,9 +150,10 @@ pub fn vpns() -> Vec<Vpn> {
 
 /// Подключить (сохранёнными данными) или отключить VPN — через `rasdial` без окна.
 pub fn set_vpn(name: &str, on: bool) -> std::result::Result<(), String> {
-    if super::demo() {
+    if super::blocked(&format!("set_vpn {name} {on}")) {
         return Ok(());
     }
+    super::real_write("rasdial");
     let windir = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
     let mut cmd = std::process::Command::new(format!(r"{windir}\System32\rasdial.exe"));
     cmd.arg(name);

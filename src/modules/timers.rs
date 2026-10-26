@@ -88,6 +88,13 @@ pub fn clock(d: Duration) -> String {
     if h > 0 { format!("{h}:{m:02}:{s:02}") } else { format!("{m}:{s:02}") }
 }
 
+/// То же для метки на вкладке: минуты с нулём впереди («03:42»), чтобы метка не дёргалась по ширине.
+fn badge_clock(d: Duration) -> String {
+    let s = d.as_secs() + u64::from(d.subsec_nanos() > 0);
+    let (h, m, s) = (s / 3600, (s / 60) % 60, s % 60);
+    if h > 0 { format!("{h}:{m:02}:{s:02}") } else { format!("{m:02}:{s:02}") }
+}
+
 pub struct Timers {
     list: Vec<Timer>,
     /// Что дошло с прошлого вопроса окна: оно покажет уведомление и выдвинет панель.
@@ -151,6 +158,20 @@ impl Module for Timers {
         self.list.iter().any(|t| !t.paused())
     }
 
+    /// Ближайший идущий таймер (не на паузе): сколько осталось и как он называется.
+    fn badge(&self, t: &Tr, lang: anvil_ui::Lang) -> Option<(String, String)> {
+        let now = Instant::now();
+        let timer = self.list.iter().filter(|x| !x.paused()).min_by_key(|x| x.remaining(now))?;
+        let left = badge_clock(timer.remaining(now));
+        let name = match timer.kind {
+            Phase::Plain => texts::minutes(lang, timer.total.as_secs() / 60),
+            Phase::Work => t.timer_work.to_string(),
+            Phase::Rest => t.timer_rest.to_string(),
+        };
+        let hint = texts::timer_running(lang, &name, &left);
+        Some((left, hint))
+    }
+
     fn ui(&mut self, ui: &mut Ui, cx: &mut Ctx) {
         let t = cx.t;
         let p = Palette::of(ui);
@@ -176,7 +197,27 @@ impl Module for Timers {
             for (i, timer) in self.list.iter_mut().enumerate() {
                 let left = timer.remaining(now);
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(Self::label(timer.kind, t)).color(p.weak));
+                    // Название уступает времени и кнопкам справа: места не хватает — «на паузе» вместо «Таймер · на паузе»,
+                    // а длинное — с многоточием, не под ними.
+                    let time_w =
+                        ui.painter().layout_no_wrap(clock(left), egui::FontId::monospace(20.0), p.text).size().x;
+                    let room =
+                        (ui.available_width() - time_w - 30.0 * 2.0 - ui.spacing().item_spacing.x * 3.0).max(30.0);
+                    let width_of = |text: &str| {
+                        ui.painter().layout_no_wrap(text.to_owned(), egui::FontId::proportional(14.0), p.weak).size().x
+                    };
+                    // На паузе — не только цветом: слово «на паузе» после названия.
+                    let name = if timer.paused() {
+                        let full = format!("{} · {}", Self::label(timer.kind, t), t.paused);
+                        if width_of(&full) <= room { full } else { t.paused.to_string() }
+                    } else {
+                        Self::label(timer.kind, t).to_string()
+                    };
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(room, 24.0),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| ui.add(egui::Label::new(egui::RichText::new(name).color(p.weak)).truncate()),
+                    );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if w::icon_button(ui, Icon::Close, t.timer_cancel).clicked() {
                             remove = Some(i);
@@ -186,7 +227,7 @@ impl Module for Timers {
                         if w::icon_button(ui, icon, hint).clicked() {
                             timer.toggle(now);
                         }
-                        let color = if timer.paused() { p.faint } else { p.text };
+                        let color = if timer.paused() { p.weak } else { p.text };
                         ui.label(
                             egui::RichText::new(clock(left)).font(egui::FontId::monospace(20.0)).strong().color(color),
                         );
@@ -233,6 +274,27 @@ mod tests {
         let done = step(&mut list, t0 + WORK + REST);
         assert_eq!(done, vec![Phase::Rest]);
         assert_eq!(list[0].kind, Phase::Work, "после отдыха — снова работа");
+    }
+
+    #[test]
+    fn badge_shows_nearest_running() {
+        let t0 = Instant::now();
+        let mut timers = Timers { list: Vec::new(), done: Vec::new() };
+        let tr = texts::tr(anvil_ui::Lang::Ru);
+        assert_eq!(timers.badge(tr, anvil_ui::Lang::Ru), None, "таймеров нет — метки нет");
+        let mut paused = Timer::new(Phase::Plain, Duration::from_secs(60), t0);
+        paused.toggle(t0);
+        timers.list = vec![
+            Timer::new(Phase::Plain, Duration::from_secs(15 * 60), t0),
+            Timer::new(Phase::Plain, Duration::from_secs(5 * 60), t0),
+            paused,
+        ];
+        let (text, hint) = timers.badge(tr, anvil_ui::Lang::Ru).unwrap();
+        // Идёт ближайший (5 минут), а не тот, что на паузе, хоть у него осталось меньше.
+        assert!(text.starts_with("04:") || text == "05:00", "{text}");
+        assert_eq!(hint, format!("Идёт таймер «5 мин», осталось {text}"));
+        assert_eq!(badge_clock(Duration::from_secs(3723)), "1:02:03");
+        assert_eq!(badge_clock(Duration::from_secs(5)), "00:05");
     }
 
     #[test]

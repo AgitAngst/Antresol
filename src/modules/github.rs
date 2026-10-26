@@ -114,7 +114,7 @@ impl Module for Github {
     }
 
     fn min_width(&self) -> f32 {
-        260.0
+        240.0
     }
 
     fn refresh(&mut self, _monitor: &str) {
@@ -198,8 +198,13 @@ impl Module for Github {
         }
         // Добавить: «владелец/имя».
         ui.horizontal(|ui| {
+            // Поле уступает кнопке: в узкой карточке «Добавить» не должно уходить за край.
+            let font = egui::FontId::proportional(14.0);
+            let label = ui.painter().layout_no_wrap(t.github_add.to_string(), font, egui::Color32::PLACEHOLDER);
+            let button_w = 12.0 * 2.0 + 16.0 + 7.0 + label.size().x;
+            let field_w = (ui.available_width() - button_w - ui.spacing().item_spacing.x).clamp(60.0, 140.0);
             let edit =
-                ui.add(egui::TextEdit::singleline(&mut self.adding).hint_text("owner/repo").desired_width(140.0));
+                ui.add(egui::TextEdit::singleline(&mut self.adding).hint_text("owner/repo").desired_width(field_w));
             let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             let name = self.adding.trim().to_string();
             let ok = valid_repo(&name);

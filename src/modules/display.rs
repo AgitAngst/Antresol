@@ -4,6 +4,8 @@
 // разрешения (то, что сейчас стоит и не ждёт «Оставить»), и при переходе на него ставится она.
 // Профили — режим и масштаб всех мониторов разом: сохраняются из текущего, ставятся щелчком или
 // клавишей (из app.rs через `Command`), откат — тот же «Оставить?» для всех изменённых мониторов.
+// Режим до «Оставить» стоит только на время (`display::apply` без записи в реестр) и в реестр попадает после ответа
+// (`display::commit`): не ответили, закрыли программу (`shutdown`), она упала — настоящий режим остаётся прежним.
 
 use std::time::{Duration, Instant};
 
@@ -22,7 +24,10 @@ const REVERT_AFTER: Duration = Duration::from_secs(15);
 /// Что вернуть при откате: прежний режим и (или) масштаб монитора.
 struct Change {
     device: String,
+    /// Режим до смены — его вернёт откат.
     mode: Option<Mode>,
+    /// Режим после смены — его запомнит реестр, когда нажмут «Оставить».
+    now: Option<Mode>,
     scale: Option<u32>,
     /// Был основным этот монитор (сменили основной) — вернуть его.
     primary: Option<String>,
@@ -70,11 +75,6 @@ fn profile_active(p: &Profile, states: &[State]) -> bool {
                 && pm.scale.is_none_or(|sc| s.scale == Some(sc))
         })
     })
-}
-
-/// Места мониторов: устройство и левый верхний угол в пикселях экрана.
-fn places() -> Vec<(String, i32, i32)> {
-    monitor::monitors().into_iter().map(|m| (m.device, m.rect.left, m.rect.top)).collect()
 }
 
 /// Соотношение сторон для подписи: «16:9», «21:9»; странные — пусто.
@@ -170,8 +170,13 @@ impl Display {
         if self.picked.is_empty() { panel } else { &self.picked }
     }
 
+    /// Места мониторов: устройство и левый верхний угол в пикселях экрана.
+    fn places(&self) -> Vec<(String, i32, i32)> {
+        display::monitors(&self.panel).into_iter().map(|m| (m.device, m.rect.left, m.rect.top)).collect()
+    }
+
     fn read_states(&mut self) {
-        self.states = monitor::monitors()
+        self.states = display::monitors(&self.panel)
             .into_iter()
             .filter_map(|m| {
                 let mode = display::current(&m.device)?;
@@ -188,7 +193,8 @@ impl Display {
         }
         match display::apply(device, mode) {
             Ok(()) => {
-                let change = Change { device: device.to_string(), mode: Some(old), scale: None, primary: None };
+                let change =
+                    Change { device: device.to_string(), mode: Some(old), now: Some(mode), scale: None, primary: None };
                 self.pending = Some(Pending { changes: vec![change], at: Instant::now() });
                 self.current = Some(mode);
             }
@@ -223,7 +229,7 @@ impl Display {
             cx.toasts.push((t.answer_first.to_string(), Tone::Warning));
             return;
         }
-        let present = monitor::monitors();
+        let present = display::monitors(&self.panel);
         let mut changes = Vec::new();
         let mut missing = 0;
         let mut unavailable = 0;
@@ -233,7 +239,7 @@ impl Display {
                 continue;
             };
             let dev = m.device.clone();
-            let mut change = Change { device: dev.clone(), mode: None, scale: None, primary: None };
+            let mut change = Change { device: dev.clone(), mode: None, now: None, scale: None, primary: None };
             let want = mode_for(&display::modes(&dev), pm.width, pm.height, pm.hz);
             if want.is_none() {
                 unavailable += 1;
@@ -243,7 +249,10 @@ impl Display {
                 && want != old
             {
                 match display::apply(&dev, want) {
-                    Ok(()) => change.mode = Some(old),
+                    Ok(()) => {
+                        change.mode = Some(old);
+                        change.now = Some(want);
+                    }
                     Err(e) => {
                         eprintln!("profile mode change failed on {dev}: {e}");
                         cx.toasts.push((format!("{}: {e}", t.failed), Tone::Danger));
@@ -290,6 +299,20 @@ impl Display {
         self.read_states();
     }
 
+    /// «Оставить»: режим, что стоит на время, — в реестр; откат отменён.
+    fn keep(&mut self) {
+        let Some(pending) = self.pending.take() else { return };
+        for c in pending.changes {
+            if let Some(m) = c.now
+                && let Err(e) = display::commit(&c.device, m)
+            {
+                // Режим останется до перезагрузки, но в реестр не попал: сообщить некому (карточка уже закрыла окно).
+                eprintln!("display mode commit failed on {}: {e}", c.device);
+            }
+        }
+        self.after_change();
+    }
+
     fn revert(&mut self) {
         let Some(pending) = self.pending.take() else { return };
         for c in pending.changes {
@@ -304,7 +327,7 @@ impl Display {
                 eprintln!("scale revert failed on {}: {e}", c.device);
             }
             if let Some(old) = c.primary
-                && let Err(e) = display::set_primary(&old, &places())
+                && let Err(e) = display::set_primary(&old, &self.places())
             {
                 eprintln!("primary revert failed on {old}: {e}");
             }
@@ -314,15 +337,18 @@ impl Display {
 
     /// Сделать монитор основным — с тем же «Оставить?» и откатом через 15 с.
     fn make_primary(&mut self, device: &str, cx: &mut Ctx) {
-        let Some(old) = monitor::monitors().into_iter().find(|m| m.primary).map(|m| m.device) else { return };
+        let Some(old) = display::monitors(&self.panel).into_iter().find(|m| m.primary).map(|m| m.device) else {
+            return;
+        };
         if old == device {
             return;
         }
-        match display::set_primary(device, &places()) {
+        match display::set_primary(device, &self.places()) {
             Ok(()) => {
-                let change = Change { device: device.to_string(), mode: None, scale: None, primary: Some(old) };
+                let change =
+                    Change { device: device.to_string(), mode: None, now: None, scale: None, primary: Some(old) };
                 self.pending = Some(Pending { changes: vec![change], at: Instant::now() });
-                self.monitors = monitor::monitors();
+                self.monitors = display::monitors(&self.panel);
                 self.after_change();
             }
             Err(e) => {
@@ -343,8 +369,7 @@ impl Display {
         let secs = left.as_secs() + 1;
         w::banner(ui, Tone::Warning, t.keep_title, &texts::revert_in(lang, secs), |ui| {
             if w::button(ui, Kind::Primary, None, t.keep).clicked() {
-                self.pending = None;
-                self.after_change();
+                self.keep();
             }
             if w::button(ui, Kind::Secondary, None, t.revert).clicked() {
                 self.revert();
@@ -448,13 +473,13 @@ impl Module for Display {
         if self.pending.is_some() {
             return;
         }
-        self.panel = panel.to_string();
-        self.monitors = monitor::monitors();
+        self.panel = display::device_for(panel).to_string();
+        self.monitors = display::monitors(&self.panel);
         self.read_states();
         if !self.monitors.iter().any(|m| m.device == self.picked) {
             self.picked.clear();
         }
-        let device = self.device(panel).to_string();
+        let device = self.device(&self.panel).to_string();
         self.name = display::monitor_name(&device);
         self.current = display::current(&device);
         self.modes = display::modes(&device);
@@ -465,11 +490,20 @@ impl Module for Display {
         self.pending.is_some()
     }
 
+    /// Справа в заголовке — имя монитора («Monitor 27»); нет имени — «Монитор N» по номеру в шапке; основной при
+    /// нескольких мониторах — «· основной». Устройство (`DISPLAYn`) — в подсказке.
     fn meta(&self, t: &Tr) -> String {
         let device = self.device(&self.panel);
-        let short = device.trim_start_matches(r"\\.\").to_string();
+        let n = self.monitors.iter().position(|m| m.device == device).map_or(1, |i| i + 1);
+        let name = if self.name.is_empty() { format!("{} {n}", t.monitor) } else { self.name.clone() };
         let primary = self.monitors.iter().find(|m| m.device == device).is_some_and(|m| m.primary);
-        if self.monitors.len() > 1 && primary { format!("{short} · {}", t.primary) } else { short }
+        if self.monitors.len() > 1 && primary { format!("{name} · {}", t.primary) } else { name }
+    }
+
+    /// Подсказка к имени: полное имя и устройство («Monitor 27 · DISPLAY1») — в заголовке имя может не поместиться.
+    fn meta_hint(&self) -> String {
+        let device = self.device(&self.panel).trim_start_matches(r"\\.\");
+        if self.name.is_empty() { device.to_string() } else { format!("{} · {device}", self.name) }
     }
 
     fn active_profile(&self, profiles: &[Profile]) -> Option<usize> {
@@ -480,7 +514,25 @@ impl Module for Display {
         self.pending.is_some()
     }
 
+    /// «Оставить этот режим?» без ответа 15 с — вернуть, даже если карточки сейчас не видно (открыта другая полка или
+    /// настройки): откат не должен зависеть от того, рисуется ли она.
+    fn background(&mut self, _settings: &crate::config::Settings) {
+        if self.pending.as_ref().is_some_and(|p| p.at.elapsed() >= REVERT_AFTER) {
+            self.revert();
+        }
+    }
+
+    /// Программа закрывается, а «Оставить?» без ответа — вернуть прежний режим, масштаб и основной монитор: режим стоял
+    /// только на время, но масштаб Windows запоминает сама, а закрытое окно уже не откатит ничего.
+    fn shutdown(&mut self) {
+        self.revert();
+    }
+
     fn command(&mut self, cmd: &Command, cx: &mut Ctx) {
+        // Карточку на закрытой полке ещё не опрашивали: монитор панели — у команды.
+        if self.panel.is_empty() {
+            self.panel = display::device_for(cx.monitor).to_string();
+        }
         match cmd {
             Command::ApplyProfile(i) => {
                 if let Some(profile) = cx.settings.profiles.get(*i).cloned() {
@@ -494,7 +546,7 @@ impl Module for Display {
 
     fn ui(&mut self, ui: &mut Ui, cx: &mut Ctx) {
         let t = cx.t;
-        let device = self.device(cx.monitor).to_string();
+        let device = self.device(display::device_for(cx.monitor)).to_string();
         let p = Palette::of(ui);
 
         if self.pending.is_some() {
@@ -707,6 +759,19 @@ mod tests {
     }
 
     #[test]
+    fn unanswered_keep_prompt_reverts_without_drawing() {
+        let mut display = Display::default();
+        let settings = crate::config::Settings::default();
+        display.pending = Some(Pending { changes: Vec::new(), at: Instant::now() });
+        display.background(&settings);
+        assert!(display.pending.is_some(), "15 с ещё не прошло");
+        let late = Instant::now() - REVERT_AFTER - Duration::from_secs(1);
+        display.pending = Some(Pending { changes: Vec::new(), at: late });
+        display.background(&settings);
+        assert!(display.pending.is_none(), "без ответа 15 с — откат, хотя карточка не рисуется (другая полка)");
+    }
+
+    #[test]
     fn aspects() {
         assert_eq!(aspect(1920, 1080), "16:9");
         assert_eq!(aspect(1920, 1200), "16:10");
@@ -741,5 +806,124 @@ mod profile_tests {
         assert!(!profile_active(&p(vec![pm("A", 2560, 1440, 60, None)]), &states), "другая частота");
         assert!(!profile_active(&p(vec![pm("A", 2560, 1440, 144, Some(125))]), &states), "другой масштаб");
         assert!(!profile_active(&p(vec![pm("C", 800, 600, 60, None)]), &states), "монитора нет");
+    }
+}
+
+// ─── Откат без окна ─────────────────────────────────────────────────────────
+//
+// Выдуманный экран из `sys::display` помнит два режима — «сейчас» и «в реестре»: видно, что до «Оставить» в реестр
+// ничего не попало и что закрытие программы возвращает прежнее. У каждого теста свой монитор — тесты друг другу не мешают.
+
+#[cfg(test)]
+mod revert_tests {
+    use super::*;
+    use anvil_ui::Lang;
+
+    fn mode(width: u32, height: u32, hz: u32) -> Mode {
+        Mode { width, height, hz, bits: 32 }
+    }
+
+    /// Карточка на выдуманном мониторе `device`: опрошена, как при показе панели.
+    fn card(device: &str) -> Display {
+        let mut display = Display::default();
+        display.refresh(device);
+        display
+    }
+
+    fn with_cx<R>(device: &str, settings: &mut crate::config::Settings, f: impl FnOnce(&mut Ctx) -> R) -> R {
+        let mut toasts = Vec::new();
+        let mut cx = Ctx { t: texts::tr(Lang::En), lang: Lang::En, monitor: device, toasts: &mut toasts, settings };
+        f(&mut cx)
+    }
+
+    fn change(display: &mut Display, device: &str, want: Mode) {
+        let mut settings = crate::config::Settings::default();
+        with_cx(device, &mut settings, |cx| display.apply(device, want, cx));
+        assert!(display.busy(), "после смены — «Оставить?»");
+    }
+
+    #[test]
+    fn unconfirmed_mode_is_reverted_on_shutdown() {
+        let dev = r"\\.\TEST-SHUTDOWN";
+        let mut display = card(dev);
+        let start = display::current(dev).unwrap();
+        change(&mut display, dev, mode(1920, 1080, 144));
+        assert_eq!(display::current(dev), Some(mode(1920, 1080, 144)));
+        assert_eq!(display::saved(dev), start, "до «Оставить» режим стоит только на время — в реестре прежний");
+        display.shutdown();
+        assert!(!display.busy());
+        assert_eq!(display::current(dev), Some(start), "закрыли программу без ответа — прежний режим вернулся");
+        assert_eq!(display::saved(dev), start);
+    }
+
+    #[test]
+    fn kept_mode_reaches_the_registry() {
+        let dev = r"\\.\TEST-KEEP";
+        let mut display = card(dev);
+        let want = mode(2560, 1440, 120);
+        change(&mut display, dev, want);
+        display.keep();
+        assert!(!display.busy());
+        assert_eq!((display::current(dev), Some(display::saved(dev))), (Some(want), Some(want)));
+        display.shutdown();
+        assert_eq!(display::current(dev), Some(want), "подтверждённое выход не трогает");
+    }
+
+    #[test]
+    fn revert_button_and_timeout_leave_the_registry_alone() {
+        let dev = r"\\.\TEST-REVERT";
+        let mut display = card(dev);
+        let start = display::current(dev).unwrap();
+        change(&mut display, dev, mode(1920, 1080, 60));
+        display.revert();
+        assert_eq!((display::current(dev), display::saved(dev)), (Some(start), start));
+        // Без ответа 15 с — то же, даже если карточки не видно.
+        change(&mut display, dev, mode(1280, 720, 60));
+        let late = Instant::now() - REVERT_AFTER - Duration::from_secs(1);
+        display.pending.as_mut().unwrap().at = late;
+        display.background(&crate::config::Settings::default());
+        assert!(!display.busy());
+        assert_eq!((display::current(dev), display::saved(dev)), (Some(start), start));
+    }
+
+    #[test]
+    fn profile_is_temporary_too_and_exit_returns_the_scale() {
+        let dev = r"\\.\TEST-PROFILE";
+        let mut display = card(dev);
+        let start = display::current(dev).unwrap();
+        let start_scale = display::scale(dev).unwrap().current;
+        let mut settings = crate::config::Settings::default();
+        let monitor = ProfileMonitor { device: dev.into(), width: 2560, height: 1440, hz: 144, scale: Some(200) };
+        settings.profiles.push(Profile { name: "Test".into(), hotkey: None, monitors: vec![monitor] });
+        with_cx(dev, &mut settings, |cx| display.command(&Command::ApplyProfile(0), cx));
+        assert!(display.busy());
+        assert_eq!(display::current(dev), Some(mode(2560, 1440, 144)));
+        assert_eq!(display::scale(dev).unwrap().current, 200);
+        assert_eq!(display::saved(dev), start, "и у профиля режим до «Оставить» только на время");
+        display.shutdown();
+        assert_eq!(display::current(dev), Some(start));
+        assert_eq!(
+            display::scale(dev).unwrap().current,
+            start_scale,
+            "масштаб Windows помнит сама — вернуть надо вручную"
+        );
+        assert_eq!(display::saved(dev), start);
+        // Тот же профиль и «Оставить»: режим в реестре, масштаб остаётся.
+        with_cx(dev, &mut settings, |cx| display.command(&Command::ApplyProfile(0), cx));
+        display.keep();
+        assert_eq!(display::saved(dev), mode(2560, 1440, 144));
+        assert_eq!(display::scale(dev).unwrap().current, 200);
+        assert_eq!(display.active_profile(&settings.profiles), Some(0), "профиль стоит — его чип выделен");
+    }
+
+    #[test]
+    fn fake_monitor_is_alone() {
+        let dev = r"\\.\TEST-ALONE";
+        let display = card(dev);
+        assert_eq!(display.monitors.len(), 1, "в демо и тестах — один выдуманный монитор, настоящие не показываются");
+        assert!(display.monitors[0].primary);
+        assert_eq!(display.meta(texts::tr(Lang::En)), "Monitor 27");
+        assert_eq!(display.meta_hint(), "Monitor 27 · TEST-ALONE", "в подсказке — полное имя и устройство");
+        assert_eq!(Display::default().meta_hint(), "", "пока не опрашивали — подсказки нет");
     }
 }

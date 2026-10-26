@@ -121,6 +121,7 @@ fn skip_button(ui: &mut Ui, forward: bool, hint: &str) -> egui::Response {
     ui.painter().add(egui::Shape::convex_polygon(tri, color, Stroke::NONE));
     let bar = c.x + dir * (s * 0.8 + 1.5);
     ui.painter().line_segment([Pos2::new(bar, c.y - s), Pos2::new(bar, c.y + s)], Stroke::new(1.8, color));
+    w::focus_ring(ui, rect, &r, 6);
     r.on_hover_text(hint).on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
@@ -259,7 +260,7 @@ impl Module for Media {
                     line(ui, &now.artist, egui::FontId::proportional(13.0), p.weak);
                 }
                 if !now.app.is_empty() {
-                    line(ui, &now.app, egui::FontId::proportional(12.0), p.faint);
+                    line(ui, &now.app, egui::FontId::proportional(12.0), p.weak);
                 }
             });
         });

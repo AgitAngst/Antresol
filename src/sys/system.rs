@@ -27,10 +27,11 @@ use super::wide;
 /// Не давать уснуть компьютеру и гаснуть экрану (`true`) или снова как обычно. Ответ — получилось ли
 /// (ноль от Windows — ошибка; прежнее состояние с `ES_CONTINUOUS` нулём не бывает).
 pub fn keep_awake(on: bool) -> bool {
-    if super::demo() {
+    if super::blocked(&format!("keep_awake {on}")) {
         return true;
     }
     let flags = if on { ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED } else { ES_CONTINUOUS };
+    super::real_write("SetThreadExecutionState");
     unsafe { SetThreadExecutionState(flags) }.0 != 0
 }
 
@@ -58,6 +59,7 @@ fn read_dword(path: &str, name: &str) -> Option<u32> {
 fn write_dword(path: &str, name: &str, value: u32) -> Result<(), String> {
     let key = open(path, KEY_SET_VALUE).ok_or_else(|| format!("cannot open {path}"))?;
     let n = wide(name);
+    super::real_write("RegSetValueExW");
     let r = unsafe { RegSetValueExW(key, PCWSTR(n.as_ptr()), None, REG_DWORD, Some(&value.to_le_bytes())) };
     unsafe {
         let _ = RegCloseKey(key);
@@ -78,7 +80,7 @@ pub fn dark_theme() -> Option<bool> {
 
 /// Тёмная или светлая тема Windows — и для программ, и для панели задач.
 pub fn set_dark_theme(dark: bool) -> Result<(), String> {
-    if super::demo() {
+    if super::blocked(&format!("set_dark_theme {dark}")) {
         return Ok(());
     }
     let light = if dark { 0 } else { 1 };
@@ -87,6 +89,7 @@ pub fn set_dark_theme(dark: bool) -> Result<(), String> {
     // Рассылка всем окнам может ждать по 200 мс на каждое зависшее — не в потоке панели.
     std::thread::spawn(|| {
         let topic = wide("ImmersiveColorSet");
+        super::real_write("SendMessageTimeoutW");
         unsafe {
             let _ = SendMessageTimeoutW(
                 HWND_BROADCAST,
@@ -111,7 +114,7 @@ pub fn notifications_off() -> Option<bool> {
 }
 
 pub fn set_notifications_off(off: bool) -> Result<(), String> {
-    if super::demo() {
+    if super::blocked(&format!("set_notifications_off {off}")) {
         return Ok(());
     }
     write_dword(PUSH, "ToastEnabled", if off { 0 } else { 1 })
@@ -177,9 +180,10 @@ pub fn plans() -> (Vec<Plan>, Option<GUID>) {
 }
 
 pub fn set_plan(guid: &GUID) -> Result<(), String> {
-    if super::demo() {
+    if super::blocked(&format!("set_plan {guid:?}")) {
         return Ok(());
     }
+    super::real_write("PowerSetActiveScheme");
     let r = unsafe { PowerSetActiveScheme(None, Some(guid)) };
     if r.0 == 0 { Ok(()) } else { Err(format!("PowerSetActiveScheme failed: {}", r.0)) }
 }

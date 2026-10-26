@@ -11,7 +11,6 @@ pub mod github;
 pub mod media;
 pub mod quick;
 pub mod resources;
-pub mod snippets;
 pub mod sound;
 pub mod timers;
 pub mod tools;
@@ -85,6 +84,9 @@ pub trait Module {
     fn command(&mut self, _cmd: &Command, _cx: &mut Ctx) {}
     /// Каждый кадр панели, даже спрятанной: дешёвая слежка (номер копирования буфера).
     fn background(&mut self, _settings: &crate::config::Settings) {}
+    /// Программа закрывается (кнопка «Закрыть», Alt+F4, выход из сеанса): вернуть то, что держали на время, —
+    /// «Экран» возвращает режим, который не успели подтвердить.
+    fn shutdown(&mut self) {}
     /// Модулю есть что сказать (таймер дошёл): панель покажет уведомление и выедет.
     fn attention(&mut self, _t: &Tr) -> Option<String> {
         None
@@ -92,6 +94,14 @@ pub trait Module {
     /// Пояснение справа в заголовке карточки: монитор, программа плеера.
     fn meta(&self, _t: &Tr) -> String {
         String::new()
+    }
+    /// Подсказка к пояснению: то, что в заголовок не поместилось (имя устройства монитора).
+    fn meta_hint(&self) -> String {
+        String::new()
+    }
+    /// Короткая живая метка на вкладке полки, пока открыта другая: текст и подсказка (таймер — сколько осталось).
+    fn badge(&self, _t: &Tr, _lang: anvil_ui::Lang) -> Option<(String, String)> {
+        None
     }
     /// Какой профиль экрана стоит сейчас (шапка выделяет его чип).
     fn active_profile(&self, _profiles: &[crate::config::Profile]) -> Option<usize> {
@@ -116,17 +126,19 @@ pub fn icon_of(key: &str) -> Icon {
         "timers" => Icon::Clock,
         "github" => Icon::Branch,
         "quick" => Icon::Tiles,
-        "snippets" => Icon::File,
         "tools" => Icon::Target,
         "clocks" => Icon::Clock,
         _ => Icon::Rocket,
     }
 }
 
-/// Заголовок карточки: значок, подпись заглавными и пояснение справа — всё цветом `weak`.
-/// У «Звука» значок свой — динамик (в наборе такого нет).
-pub fn card_header(ui: &mut Ui, key: &str, title: &str, meta: &str) {
+/// Заголовок карточки: значок, подпись заглавными и пояснение справа — всё цветом `weak`; `hint` — подсказка к
+/// пояснению. У «Звука» значок свой — динамик (в наборе такого нет).
+pub fn card_header(ui: &mut Ui, key: &str, title: &str, meta: &str, hint: &str) {
     let p = anvil_ui::Palette::of(ui);
+    // Строка заголовка 20 высотой, а не 28 («интерактивная» по умолчанию): карточкам нужна каждая точка высоты.
+    let interact = ui.spacing().interact_size.y;
+    ui.spacing_mut().interact_size.y = 20.0;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         let (rect, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
@@ -141,11 +153,23 @@ pub fn card_header(ui: &mut Ui, key: &str, title: &str, meta: &str) {
                 let mut job =
                     egui::text::LayoutJob::simple_singleline(meta.to_owned(), egui::FontId::proportional(12.0), p.weak);
                 job.wrap = egui::text::TextWrapping::truncate_at_width(ui.available_width().max(20.0));
-                ui.label(job);
+                let r = ui.label(job);
+                if !hint.is_empty() {
+                    r.on_hover_text(hint);
+                }
             });
         }
     });
+    ui.spacing_mut().interact_size.y = interact;
 }
+
+/// Полки по умолчанию: ключ имени (`@…` — готовое, переводится при показе) и карточки по порядку. Здесь же —
+/// полный список знакомых панели карточек: чего тут нет, того на полках не бывает.
+pub const DEFAULT_SHELVES: [(&str, &[&str]); 3] = [
+    ("@av", &["display", "brightness", "sound", "media"]),
+    ("@sys", &["quick", "resources", "bluetooth", "github", "clocks"]),
+    ("@hand", &["clipboard", "tray", "tools", "timers", "buttons"]),
+];
 
 pub fn all() -> Vec<Box<dyn Module>> {
     vec![
@@ -156,7 +180,6 @@ pub fn all() -> Vec<Box<dyn Module>> {
         Box::new(sound::Sound::default()),
         Box::new(resources::Resources::default()),
         Box::new(clipboard::Clipboard::default()),
-        Box::new(snippets::Snippets),
         Box::new(tray::Tray::default()),
         Box::new(tools::Tools::default()),
         Box::new(bluetooth::Bluetooth::default()),
@@ -177,8 +200,9 @@ pub fn row(ui: &mut Ui, id: egui::Id, selected: bool, label: &str, trailing: &st
     let mut room = r.rect.width() - 22.0 - reserve;
     if !trailing.is_empty() {
         let right = r.rect.right_center() - egui::vec2(10.0 + reserve, 0.0);
+        // Пометка — читаемый текст: `weak`, а не `faint` (тот — для недоступного и рисунков).
         let g =
-            ui.painter().text(right, egui::Align2::RIGHT_CENTER, trailing, egui::FontId::proportional(12.0), p.faint);
+            ui.painter().text(right, egui::Align2::RIGHT_CENTER, trailing, egui::FontId::proportional(12.0), p.weak);
         room -= g.width() + 8.0;
     }
     // Длинное имя — с многоточием, а не за край карточки.
@@ -265,4 +289,21 @@ pub fn chip(
     let r = r.on_hover_cursor(egui::CursorIcon::PointingHand);
     r.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, on, label));
     r
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_shelves_cover_all_modules() {
+        let mut in_shelves: Vec<&str> = DEFAULT_SHELVES.iter().flat_map(|(_, cards)| cards.iter().copied()).collect();
+        let mut keys: Vec<&'static str> = all().iter().map(|m| m.key()).collect();
+        in_shelves.sort_unstable();
+        keys.sort_unstable();
+        assert_eq!(in_shelves, keys, "каждый модуль — на полке по умолчанию, и наоборот");
+        let mut unique = keys.clone();
+        unique.dedup();
+        assert_eq!(unique.len(), keys.len(), "ключи не повторяются");
+    }
 }

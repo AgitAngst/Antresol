@@ -100,7 +100,7 @@ pub fn state() -> Option<bool> {
 }
 
 pub fn set(on: bool) -> Result<(), String> {
-    if super::demo() {
+    if super::blocked(&format!("nightlight::set {on}")) {
         return Ok(());
     }
     let data = read().ok_or("night light state not found")?;
@@ -108,6 +108,7 @@ pub fn set(on: bool) -> Result<(), String> {
     let new = with_state(&data, on, now).ok_or("unknown night light format")?;
     let key = open(KEY_SET_VALUE).ok_or("cannot open night light key")?;
     let name = wide("Data");
+    super::real_write("RegSetValueExW");
     let r = unsafe { RegSetValueExW(key, PCWSTR(name.as_ptr()), None, REG_BINARY, Some(&new)) };
     unsafe {
         let _ = RegCloseKey(key);

@@ -72,8 +72,26 @@ fn capabilities(m: &PHYSICAL_MONITOR) -> Option<String> {
     }
 }
 
-/// Прочитать монитор. `with_caps` — ещё и строку возможностей (медленно; входы меняются редко).
+/// Выдуманный монитор для снимков и тестов: значения и входы не настоящие, шина DDC/CI не трогается.
+fn fake(device: &str, with_caps: bool) -> Physical {
+    let f = |current| Some(Feature { current, max: 100 });
+    Physical {
+        device: device.to_string(),
+        index: 0,
+        name: "Monitor 27".to_string(),
+        brightness: f(70),
+        contrast: f(50),
+        input: Some(0x11),
+        inputs: if with_caps { vec![0x11, 0x0F] } else { Vec::new() },
+    }
+}
+
+/// Прочитать монитор. `with_caps` — ещё и строку возможностей (медленно; входы меняются редко). В демо-режиме и в
+/// тестах — один выдуманный монитор вместо настоящих.
 pub fn read(device: &str, handle: usize, with_caps: bool) -> Vec<Physical> {
+    if super::isolated() {
+        return vec![fake(device, with_caps)];
+    }
     with_physical(handle, |list| {
         list.iter()
             .enumerate()
@@ -81,25 +99,10 @@ pub fn read(device: &str, handle: usize, with_caps: bool) -> Vec<Physical> {
                 // Структура упакована: поле копируем, ссылку на него брать нельзя.
                 let desc = m.szPhysicalMonitorDescription;
                 let end = desc.iter().position(|&c| c == 0).unwrap_or(desc.len());
-                let name =
-                    if super::demo() { "Monitor 27".to_string() } else { String::from_utf16_lossy(&desc[..end]) };
-                if super::demo() {
-                    // Для снимков — выдуманный монитор: значения и входы не настоящие.
-                    let f = |current| Some(Feature { current, max: 100 });
-                    return Physical {
-                        device: device.to_string(),
-                        index,
-                        name,
-                        brightness: f(70),
-                        contrast: f(50),
-                        input: Some(0x11),
-                        inputs: if with_caps { vec![0x11, 0x0F] } else { Vec::new() },
-                    };
-                }
                 Physical {
                     device: device.to_string(),
                     index,
-                    name,
+                    name: String::from_utf16_lossy(&desc[..end]),
                     brightness: read_feature(m, BRIGHTNESS),
                     contrast: read_feature(m, CONTRAST),
                     // Младший байт — код входа; старший у части мониторов занят чем-то своим.
@@ -118,8 +121,12 @@ pub fn read(device: &str, handle: usize, with_caps: bool) -> Vec<Physical> {
 
 /// Поставить значение VCP физическому монитору `index` логического `handle`.
 pub fn set(handle: usize, index: usize, code: u8, value: u32) -> Result<(), String> {
+    if super::blocked(&format!("ddc::set {handle} {index} 0x{code:02X} {value}")) {
+        return Ok(());
+    }
     with_physical(handle, |list| {
         let m = list.get(index).ok_or("no such physical monitor")?;
+        super::real_write("SetVCPFeature");
         match unsafe { SetVCPFeature(m.hPhysicalMonitor, code, value) } {
             0 => Err(format!("SetVCPFeature 0x{code:02X} failed")),
             _ => Ok(()),

@@ -78,7 +78,7 @@ impl Module for Resources {
     }
 
     fn min_width(&self) -> f32 {
-        260.0
+        240.0
     }
 
     fn refresh(&mut self, _monitor: &str) {

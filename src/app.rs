@@ -9,7 +9,9 @@ use std::time::{Duration, Instant};
 use anvil_ui::motion::{self, Motion};
 use anvil_ui::widgets::{self as w, Kind, Toasts};
 use anvil_ui::{Icon, Lang, Palette, ThemeChoice, Tone, tr};
-use eframe::egui::{self, CornerRadius, CursorIcon, Pos2, Rect, Sense, Stroke, Ui, UiBuilder, Vec2};
+use eframe::egui::{
+    self, Color32, CornerRadius, CursorIcon, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, UiBuilder, Vec2,
+};
 
 use crate::config::{self, ALL_MONITORS, Hotkey, MAX_HEIGHT, MIN_HEIGHT, MIN_WIDTH, Settings};
 use crate::modules::{self, Command, Ctx, Module};
@@ -19,8 +21,34 @@ use crate::{look, texts};
 
 /// Радиус нижних углов панели, в точках.
 const CORNER: u8 = 14;
+/// Шапка: вкладки стоят на её нижней линии; тело — от `BODY_TOP` до `BODY_BOTTOM` над нижним краем.
 const HEADER: f32 = 48.0;
+const BODY_TOP: f32 = 58.0;
+const BODY_BOTTOM: f32 = 16.0;
 const GRIP: f32 = 7.0;
+/// Верхняя полоса карточки в правке полок: ручка, имя, крестик.
+const EDIT_STRIP: f32 = 44.0;
+/// Предел сужения подписи вкладки, точек: «мягкий» — пока справа остаются профили и выбор монитора, «жёсткий» — когда
+/// уходят и они.
+const TAB_SOFT: f32 = 72.0;
+const TAB_FLOOR: f32 = 36.0;
+/// Наименьшая ширина карточки в правке: её содержимое под вуалью всё равно недоступно, а ряд вместе с «Убранными»
+/// должен уместиться, чтобы ничего не листать.
+const EDIT_MIN_WIDTH: f32 = 150.0;
+/// Наименьшая ширина блока «Убранные карточки».
+const REMOVED_MIN_WIDTH: f32 = 220.0;
+/// Клавиши 1…9 для Ctrl + цифра (открыть полку) и Alt + цифра (перенести карточку на полку).
+const NUM_KEYS: [egui::Key; 9] = [
+    egui::Key::Num1,
+    egui::Key::Num2,
+    egui::Key::Num3,
+    egui::Key::Num4,
+    egui::Key::Num5,
+    egui::Key::Num6,
+    egui::Key::Num7,
+    egui::Key::Num8,
+    egui::Key::Num9,
+];
 /// Зазор между карточками.
 const GAP: f32 = 10.0;
 /// Задержка выезда в настройках — чипами, мс.
@@ -86,6 +114,83 @@ enum Grip {
     BottomRight,
 }
 
+/// Правка полок: раскладка на входе — для «Как было».
+struct Edit {
+    shelves: Vec<config::Shelf>,
+    hidden: Vec<String>,
+}
+
+/// Переименование полки: двойной щелчок по вкладке в правке.
+struct Rename {
+    shelf: usize,
+    text: String,
+    /// Поле только появилось — ему ещё нужно дать фокус.
+    fresh: bool,
+}
+
+/// Карточку тянут за ручку: «груз» перетаскивания — её ключ.
+#[derive(Clone, Copy)]
+struct Dragged(&'static str);
+
+/// Что правка просит сделать с раскладкой: набирается за кадр, применяется в конце (`App::apply_ops`).
+enum Op {
+    /// Поставить на место `at` открытой полки (см. `Settings::place_card`).
+    Move { key: &'static str, at: usize },
+    /// Перенести в конец другой полки.
+    ToShelf { key: &'static str, shelf: usize },
+    /// Убрать с полки.
+    Hide(&'static str),
+    /// Вернуть из убранных в конец открытой полки.
+    Show(&'static str),
+}
+
+/// Что стоит в ряду открытой полки.
+#[derive(Clone, Copy, PartialEq)]
+enum Slot {
+    /// Карточка: номер модуля.
+    Card(usize),
+    /// «Убранные карточки» — только в правке.
+    Removed,
+}
+
+/// Геометрия ряда карточек: видимая область, откуда рисовать и высота карточек.
+#[derive(Clone, Copy)]
+struct Row {
+    area: Rect,
+    origin: Pos2,
+    height: f32,
+}
+
+/// Карточка ряда в правке полок.
+struct EditCard<'a> {
+    lang: Lang,
+    key: &'static str,
+    title: &'a str,
+    /// Место в ряду.
+    pos: usize,
+    /// Ключи карточек ряда по порядку.
+    order: &'a [&'static str],
+    /// Сколько полок и какая открыта — для Alt + цифра.
+    shelves: usize,
+    open: usize,
+}
+
+/// Сколько нужно вкладке: ширина подписи и всё остальное (`tab_rest`).
+struct TabMetric {
+    text: f32,
+    rest: f32,
+}
+
+/// Что вернула вкладка за кадр.
+struct TabOut {
+    rect: Rect,
+    click: bool,
+    rename: bool,
+    close: bool,
+    /// Карточка, отпущенная над вкладкой.
+    dropped: Option<&'static str>,
+}
+
 pub struct App {
     settings: Settings,
     edge: Edge,
@@ -132,6 +237,16 @@ pub struct App {
     naming: Option<String>,
     /// «Ещё N»: куда пролистать ряд карточек в следующем кадре.
     scroll_to: Option<f32>,
+    /// Сколько места заняла правая часть шапки в прошлом кадре — левой достаётся остальное.
+    header_right: f32,
+    /// Где кончается место левой части шапки (дальше она обрезана) и где начинается правая (для проверки, что не наезжают).
+    header_edges: (f32, f32),
+    /// Открытая полка (номер в `settings.shelves`); помнится, пока работает программа, в файл не пишется.
+    shelf: usize,
+    /// Правка полок на месте: снимок раскладки на входе; `None` — не правим.
+    editing: Option<Edit>,
+    /// Переименовывают полку (в правке).
+    renaming: Option<Rename>,
     /// «Свой цвет…».
     color: ColorEdit,
     /// Что последним поставили окну: не забирать фокус при щелчке (пока панель спрятана).
@@ -164,6 +279,14 @@ impl App {
         if strip_view.as_deref() == Some("strip-media") {
             settings.media_strip = true;
         }
+        // Для снимков: `ANTRESOL_SHELF=2` — сразу открыть вторую полку, `ANTRESOL_VIEW=edit` — сразу правку полок.
+        let shelf = std::env::var("ANTRESOL_SHELF")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .map_or(0, |n| n.saturating_sub(1))
+            .min(settings.shelves.len().saturating_sub(1));
+        let editing = (std::env::var("ANTRESOL_VIEW").as_deref() == Ok("edit"))
+            .then(|| Edit { shelves: settings.shelves.clone(), hidden: settings.hidden.clone() });
         let mut app = App {
             settings,
             // Для снимков: закрепить сразу, чтобы панель после показа при запуске не уезжала.
@@ -204,6 +327,11 @@ impl App {
             banner: None,
             naming: None,
             scroll_to: None,
+            header_right: 0.0,
+            header_edges: (0.0, f32::MAX),
+            shelf,
+            editing,
+            renaming: None,
             color: ColorEdit::new(look::LIME.dark.fill),
             no_activate: None,
             shot: crate::shot::Shot::from_env(),
@@ -330,6 +458,22 @@ impl App {
         if self.settings != before {
             self.save();
         }
+        if matches!(cmd, Command::ApplyProfile(_)) {
+            self.reveal_busy();
+        }
+    }
+
+    /// Модуль ждёт ответа (после профиля — «Оставить?» у «Экрана»), а карточки на открытой полке нет — открыть ту полку,
+    /// где она: иначе вопрос остался бы невидимым, а отсчёт 15 секунд шёл бы.
+    fn reveal_busy(&mut self) {
+        let open = self.shelf_modules(self.shelf);
+        if open.iter().any(|&m| self.modules[m].busy()) {
+            return;
+        }
+        let shelf = self.modules.iter().find(|m| m.busy()).and_then(|m| self.settings.shelf_of(m.key()));
+        if let Some(shelf) = shelf {
+            self.set_shelf(shelf);
+        }
     }
 
     /// Открыть «Свой цвет…» с тем цветом, что стоит сейчас.
@@ -348,6 +492,13 @@ impl App {
 
     fn save(&self) {
         config::save(&self.settings);
+    }
+
+    /// Программа закрывается: модули возвращают то, что держали на время (режим экрана до «Оставить»).
+    fn shutdown(&mut self) {
+        for module in &mut self.modules {
+            module.shutdown();
+        }
     }
 
     /// Тянут край панели: новый размер считаем от курсора на экране, а не от окна —
@@ -481,6 +632,9 @@ impl App {
             }
             self.view = View::Cards;
             self.naming = None;
+            // Спряталась — правка полок кончена (раскладка сохраняется по ходу), как и настройки.
+            self.editing = None;
+            self.renaming = None;
         }
         if self.edge.shown {
             self.banner = None;
@@ -502,8 +656,8 @@ impl App {
         };
 
         if self.edge.shown && self.refreshed.is_none_or(|at| at.elapsed() > REFRESH) {
-            // Выключенные карточки систему не опрашивают (их `background` идёт и так).
-            for i in self.visible_cards() {
+            // Систему опрашивают карточки открытой полки; убранные и с закрытых полок — нет (их `background` идёт и так).
+            for i in self.refresh_set() {
                 self.modules[i].refresh(&m.device);
             }
             self.refreshed = Some(now);
@@ -574,6 +728,11 @@ impl App {
             self.restore_accent(ctx);
         }
         self.view = View::Cards;
+        // Клавишу нажали в правке — сначала выход из неё: под вуалью «Оставить этот режим?» не нажать, а карточка с ним
+        // может стоять на другой полке — её и открываем.
+        self.finish_edit();
+        self.naming = None;
+        self.reveal_busy();
         if !was {
             self.refreshed = None;
             self.focus(ctx);
@@ -730,81 +889,6 @@ impl App {
         }
     }
 
-    /// «Карточки панели»: включить и выключить, сдвинуть выше или ниже. Порядок пишется целиком.
-    fn cards_card(&mut self, ui: &mut Ui) {
-        let t = texts::tr(self.lang());
-        w::section_label(ui, t.cards_title);
-        let keys: Vec<&'static str> = self.modules.iter().map(|m| m.key()).collect();
-        let arranged = config::arrange(&keys, &self.settings.order, &self.settings.hidden);
-        let mut order: Vec<String> = arranged.iter().map(|(i, _)| keys[*i].to_string()).collect();
-        let mut moved = false;
-        let p = Palette::of(ui);
-        for (pos, (i, on)) in arranged.iter().enumerate() {
-            let title = self.modules[*i].title(t);
-            let key = keys[*i];
-            let row = Vec2::new(ui.available_width(), 32.0);
-            let (rect, row_r) = ui.allocate_exact_size(row, Sense::hover());
-            // Ручка слева: тянуть мышью; в фокусе — Alt + стрелки.
-            let handle = Rect::from_min_size(rect.min + Vec2::new(0.0, 4.0), Vec2::new(22.0, 24.0));
-            let hr = ui.interact(handle, ui.id().with(("card-drag", key)), Sense::click_and_drag());
-            hr.dnd_set_drag_payload(pos);
-            let hot = hr.hovered() || hr.dragged() || hr.has_focus();
-            if hot {
-                ui.painter().rect_filled(handle, 4, p.hover);
-            }
-            paint_grip(ui.painter(), handle.center(), if hot { p.text } else { p.weak });
-            w::focus_ring(ui, handle, &hr, 4);
-            let hr = hr.on_hover_text(t.drag).on_hover_cursor(CursorIcon::Grab);
-            if hr.has_focus() {
-                let (up, down) = ui.input(|i| {
-                    (
-                        i.modifiers.alt && i.key_pressed(egui::Key::ArrowUp),
-                        i.modifiers.alt && i.key_pressed(egui::Key::ArrowDown),
-                    )
-                });
-                if up && pos > 0 {
-                    order.swap(pos, pos - 1);
-                    moved = true;
-                } else if down && pos + 1 < arranged.len() {
-                    order.swap(pos, pos + 1);
-                    moved = true;
-                }
-            }
-            // Сюда бросили другую строку — она встаёт на это место.
-            if let Some(from) = row_r.dnd_hover_payload::<usize>()
-                && *from != pos
-            {
-                let y = if *from < pos { rect.bottom() } else { rect.top() };
-                ui.painter()
-                    .line_segment([Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)], Stroke::new(2.0, p.accent));
-            }
-            if let Some(from) = row_r.dnd_release_payload::<usize>()
-                && *from != pos
-            {
-                let k = order.remove(*from);
-                order.insert(pos, k);
-                moved = true;
-            }
-            let mut v = *on;
-            let switch_rect = Rect::from_min_max(Pos2::new(handle.right() + 8.0, rect.top()), rect.max);
-            let mut sw = ui.new_child(
-                UiBuilder::new().max_rect(switch_rect).layout(egui::Layout::left_to_right(egui::Align::Center)),
-            );
-            w::switch(&mut sw, &mut v, title);
-            if v != *on {
-                if v {
-                    self.settings.hidden.retain(|h| h != key);
-                } else {
-                    self.settings.hidden.push(key.to_string());
-                }
-            }
-        }
-        if moved {
-            self.settings.order = order;
-        }
-        w::note(ui, t.cards_note);
-    }
-
     /// «Не выезжать над программами»: список с крестиками и «Добавить» последнюю программу на
     /// переднем плане.
     fn exclude_ui(&mut self, ui: &mut Ui) {
@@ -834,21 +918,19 @@ impl App {
         }
     }
 
-    fn header(&mut self, ui: &mut Ui) {
+    fn header(&mut self, ui: &mut Ui, ops: &mut Vec<Op>) {
+        if self.view == View::Cards {
+            self.header_cards(ui, ops);
+            return;
+        }
         let t = texts::tr(self.lang());
         let p = Palette::of(ui);
         let ctx = ui.ctx().clone();
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
+            ui.add_space(2.0);
             match self.view {
-                View::Cards => {
-                    anvil_ui::chrome::app_mark(ui, Icon::Layers, 24.0);
-                    ui.label(egui::RichText::new("Antresol").font(anvil_ui::semibold(14.5)).color(p.text));
-                    if !self.settings.hidden.iter().any(|h| h == "display") {
-                        vline(ui, p.border);
-                        self.profiles_bar(ui);
-                    }
-                }
+                View::Cards => {}
                 View::Settings => {
                     if w::button(ui, Kind::Ghost, Some(Icon::ArrowLeft), t.settings).on_hover_text(t.back).clicked() {
                         self.view = View::Cards;
@@ -875,61 +957,276 @@ impl App {
                     }
                     self.edge.hide();
                 }
-                if self.view != View::Cards {
-                    ui.add_space(6.0);
-                    w::mono(ui, &format!("Antresol {}", env!("CARGO_PKG_VERSION")), Some(p.weak));
-                    return;
-                }
-                if w::icon_button(ui, Icon::Gear, t.settings).clicked() {
-                    self.view = View::Settings;
-                }
-                let pinned = self.edge.pinned;
-                let r = w::icon_button(ui, Icon::Pin, if pinned { t.unpin } else { t.pin });
-                if pinned {
-                    // Закреплена — значок на мягкой подложке акцента.
-                    ui.painter().rect_filled(r.rect, 6, p.badge_fill(p.accent));
-                    anvil_ui::icons::paint(
-                        ui.painter(),
-                        Rect::from_center_size(r.rect.center(), Vec2::splat(17.0)),
-                        Icon::Pin,
-                        p.accent_text,
-                    );
-                }
-                if r.clicked() {
-                    self.edge.pinned = !pinned;
-                }
-                if w::icon_button(ui, Icon::Tiles, t.edit_cards).clicked() {
-                    self.view = View::Settings;
-                }
                 ui.add_space(6.0);
-                vline(ui, p.border);
-                ui.add_space(6.0);
-                if self.monitors.len() > 1 {
-                    self.monitor_picker(ui);
-                    ui.label(egui::RichText::new(t.monitor).size(12.0).color(p.weak));
-                }
+                w::mono(ui, &format!("Antresol {}", env!("CARGO_PKG_VERSION")), Some(p.weak));
             });
         });
     }
 
-    /// Профили экрана чипами в шапке, «+» — сохранить то, что стоит сейчас.
-    fn profiles_bar(&mut self, ui: &mut Ui) {
+    /// Шапка над карточками: слева значок, «Antresol» и вкладки, справа значки, монитор и профили. Левая часть рисуется
+    /// по месту, что осталось после правой в прошлом кадре, и обрезана по нему — на правую не заезжает. Не помещается — по
+    /// порядку: уходят подписи («Профиль», «Монитор»), слово «Antresol», подпись у «Полка», вкладки сужаются (многоточие,
+    /// полное имя в подсказке), а если и так тесно — профили и выбор монитора справа (`header_right`).
+    fn header_cards(&mut self, ui: &mut Ui, ops: &mut Vec<Op>) {
         let t = texts::tr(self.lang());
         let p = Palette::of(ui);
-        ui.label(egui::RichText::new(t.profile).size(12.0).color(p.weak));
+        let rect = ui.max_rect();
+        let editing = self.editing.is_some();
+        let tabs = self.tab_metrics(ui);
+        let text_of = |sum_cap: f32| tabs.iter().map(|m| m.text.min(sum_cap)).sum::<f32>();
+        // Отступ со значком, черта после слова, промежутки между вкладками и «Полка» (в правке) — что не сужается.
+        let rest = 2.0
+            + 24.0
+            + 8.0
+            + 1.0
+            + 8.0
+            + tabs.iter().map(|m| m.rest).sum::<f32>()
+            + 2.0 * tabs.len().saturating_sub(1) as f32;
+        let word = ui.painter().layout_no_wrap("Antresol".into(), anvil_ui::semibold(14.5), p.text).size().x + 8.0;
+        let add_icon = if editing { 8.0 + 30.0 } else { 0.0 };
+        let add_text = if editing {
+            let label = ui.painter().layout_no_wrap(t.shelf_add.into(), egui::FontId::proportional(14.0), p.weak);
+            8.0 + 10.0 + 16.0 + 7.0 + label.size().x + 12.0
+        } else {
+            0.0
+        };
+        // Правой части вкладки оставляют не меньше `floor` (подписи на пределе), а профили и монитор — не меньше `soft`.
+        let floor = rest + text_of(TAB_FLOOR) + add_icon;
+        let soft = rest + text_of(TAB_SOFT) + add_icon;
+
+        // Слева — что осталось после правой части в прошлом кадре.
+        let budget = (rect.width() - self.header_right - 16.0).max(0.0);
+        let natural = text_of(f32::INFINITY);
+        let (show_word, add_label, cap) = if rest + word + natural + add_text <= budget {
+            (true, true, None)
+        } else if rest + natural + add_text <= budget {
+            (false, true, None)
+        } else {
+            let texts: Vec<f32> = tabs.iter().map(|m| m.text).collect();
+            (false, false, tab_cap(&texts, budget - rest - add_icon, TAB_FLOOR))
+        };
+        let left_rect = Rect::from_min_max(rect.min, Pos2::new(rect.left() + budget, rect.bottom()));
+        let mut left = ui.new_child(
+            UiBuilder::new()
+                .id_salt("header-left")
+                .max_rect(left_rect)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        left.set_clip_rect(left_rect.expand2(Vec2::new(0.0, 4.0)).intersect(ui.clip_rect()));
+        left.spacing_mut().item_spacing.x = 8.0;
+        left.add_space(2.0);
+        anvil_ui::chrome::app_mark(&mut left, Icon::Layers, 24.0);
+        if show_word {
+            left.label(egui::RichText::new("Antresol").font(anvil_ui::semibold(14.5)).color(p.text));
+        }
+        vline(&mut left, p.border);
+        self.shelf_tabs(&mut left, ops, cap);
+        if editing {
+            let room = self.settings.shelves.len() < config::MAX_SHELVES;
+            let r = left.add_enabled_ui(room, |ui| {
+                if add_label {
+                    w::button(ui, Kind::Ghost, Some(Icon::Plus), t.shelf_add)
+                } else {
+                    w::icon_button(ui, Icon::Plus, t.shelf_add)
+                }
+            });
+            if r.inner.clicked() {
+                self.add_shelf();
+            }
+            if !room {
+                // Девять полок — предел: кнопка серая, а почему — в подсказке.
+                let _ = r.inner.on_disabled_hover_text(t.shelf_limit);
+            }
+        }
+
+        // Справа налево: правой части отдано всё, кроме `floor` слева.
+        let right_rect = Rect::from_min_max(Pos2::new(rect.left() + floor + 16.0, rect.top()), rect.max);
+        let mut right = ui.new_child(
+            UiBuilder::new()
+                .id_salt("header-right")
+                .max_rect(right_rect)
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+        );
+        right.spacing_mut().item_spacing.x = 4.0;
+        self.header_right(&mut right, soft - floor);
+        let used = right.min_rect().width();
+        if (used - self.header_right).abs() > 0.5 {
+            // Правая часть поменялась — левой на следующем кадре другое место.
+            self.header_right = used;
+            ui.ctx().request_repaint();
+        }
+        self.header_edges = (left_rect.right(), right.min_rect().left());
+    }
+
+    /// Правая часть шапки над карточками: «спрятать», настройки, закрепить, правка полок; потом выбор монитора и профили
+    /// экрана — если вкладкам остаётся хотя бы `soft_reserve` сверх наименьшего; в правке — «Готово» и «Как было».
+    fn header_right(&mut self, ui: &mut Ui, soft_reserve: f32) {
+        let t = texts::tr(self.lang());
+        let p = Palette::of(ui);
+        if self.editing.is_some() {
+            // Правка полок: справа только «Готово», «Как было» и подсказка.
+            self.edit_controls(ui, soft_reserve);
+            return;
+        }
+        if w::icon_button(ui, Icon::ChevronUp, t.hide).clicked() {
+            self.edge.hide();
+        }
+        if w::icon_button(ui, Icon::Gear, t.settings).clicked() {
+            self.view = View::Settings;
+        }
+        let pinned = self.edge.pinned;
+        let r = w::icon_button(ui, Icon::Pin, if pinned { t.unpin } else { t.pin });
+        if pinned {
+            // Закреплена — значок на мягкой подложке акцента.
+            ui.painter().rect_filled(r.rect, 6, p.badge_fill(p.accent));
+            anvil_ui::icons::paint(
+                ui.painter(),
+                Rect::from_center_size(r.rect.center(), Vec2::splat(17.0)),
+                Icon::Pin,
+                p.accent_text,
+            );
+        }
+        if r.clicked() {
+            self.edge.pinned = !pinned;
+        }
+        if w::icon_button(ui, Icon::Pencil, t.shelves_edit).clicked() {
+            self.start_edit();
+        }
+        // Профили экрана — слева от монитора панели; без карточки «Экран» их нет. Не помещаются — уходят (ввод имени
+        // нового профиля остаётся: его начали, и он важнее вкладок).
+        let monitors = self.monitors.len() > 1;
+        let divider = 6.0 + 1.0 + 6.0 + 8.0;
+        let mut room = ui.available_width() - soft_reserve - divider;
+        let profiles_w = self.profiles_width(ui);
+        let profiles = !self.settings.is_hidden("display") && (self.naming.is_some() || profiles_w <= room);
+        if profiles {
+            room -= profiles_w + divider;
+        }
+        let monitors = monitors && self.monitor_width(ui) <= room;
+        if profiles || monitors {
+            ui.add_space(6.0);
+            vline(ui, p.border);
+            ui.add_space(6.0);
+        }
+        if monitors {
+            self.monitor_picker(ui);
+            side_label(ui, t.monitor, p.weak, soft_reserve);
+            if profiles {
+                ui.add_space(6.0);
+                vline(ui, p.border);
+                ui.add_space(6.0);
+            }
+        }
+        if profiles {
+            self.profiles_bar(ui, soft_reserve);
+        }
+    }
+
+    /// Сколько места нужно чипам профилей и «+» (с запасом на полужирный): для решения, помещаются ли они в шапку.
+    fn profiles_width(&self, ui: &Ui) -> f32 {
+        let p = Palette::of(ui);
+        let font = anvil_ui::semibold(13.0);
+        let chips: f32 = self
+            .settings
+            .profiles
+            .iter()
+            .map(|pr| ui.painter().layout_no_wrap(pr.name.clone(), font.clone(), p.text).size().x + 20.0 + 4.0)
+            .sum();
+        30.0 + 4.0 + chips
+    }
+
+    /// Сколько места нужно выбору монитора панели («Все» и номера).
+    fn monitor_width(&self, ui: &Ui) -> f32 {
+        let t = texts::tr(self.lang());
+        let p = Palette::of(ui);
+        let font = anvil_ui::semibold(13.5);
+        let names = std::iter::once(t.all_monitors.to_string()).chain((1..=self.monitors.len()).map(|i| i.to_string()));
+        names.map(|n| ui.painter().layout_no_wrap(n, font.clone(), p.text).size().x + 20.0).sum::<f32>() + 4.0 + 8.0
+    }
+
+    /// Сколько места нужно вкладкам: ширина подписи (полужирной) и всё остальное у вкладки (поля, метка, крестик).
+    fn tab_metrics(&self, ui: &Ui) -> Vec<TabMetric> {
+        let t = texts::tr(self.lang());
+        let lang = self.lang();
+        let p = Palette::of(ui);
+        let count = self.settings.shelves.len();
+        let open = self.shelf.min(count.saturating_sub(1));
+        let closable = self.editing.is_some() && count > 1;
+        (0..count)
+            .map(|i| {
+                if self.renaming.as_ref().is_some_and(|r| r.shelf == i) {
+                    // На месте вкладки — поле имени.
+                    return TabMetric { text: 0.0, rest: 140.0 + 8.0 };
+                }
+                let name = texts::shelf_title(t, &self.settings.shelves[i].name);
+                let text = ui.painter().layout_no_wrap(name.to_owned(), anvil_ui::semibold(13.5), p.text).size().x;
+                let badge = if i == open {
+                    None
+                } else {
+                    self.shelf_modules(i).into_iter().find_map(|m| self.modules[m].badge(t, lang))
+                };
+                TabMetric { text, rest: tab_rest(ui, badge.as_ref().map(|(b, _)| b.as_str()), closable) }
+            })
+            .collect()
+    }
+
+    /// Шапка в правке полок, справа налево: «Готово», «Как было», подсказка (если есть где; `soft_reserve` — запас вкладкам).
+    fn edit_controls(&mut self, ui: &mut Ui, soft_reserve: f32) {
+        let t = texts::tr(self.lang());
+        let p = Palette::of(ui);
+        if w::button(ui, Kind::Primary, Some(Icon::Check), t.done).clicked() {
+            self.finish_edit();
+        }
+        // «Как было» без подписи, если рядом с вкладками для неё нет места.
+        let undo_w = 10.0
+            + 16.0
+            + 7.0
+            + ui.painter()
+                .layout_no_wrap(t.shelves_undo.to_string(), egui::FontId::proportional(14.0), p.weak)
+                .size()
+                .x
+            + 12.0;
+        let undo = if ui.available_width() - soft_reserve >= undo_w + 40.0 {
+            w::button(ui, Kind::Ghost, Some(Icon::Undo), t.shelves_undo)
+        } else {
+            w::icon_button(ui, Icon::Undo, t.shelves_undo)
+        };
+        if undo.clicked() {
+            self.undo_edit();
+        }
+        let hint = egui::RichText::new(t.shelves_hint).size(12.5).color(p.weak);
+        let hint_w = ui.painter().layout_no_wrap(t.shelves_hint.to_string(), egui::FontId::proportional(12.5), p.weak);
+        if ui.available_width() - soft_reserve >= hint_w.size().x + 24.0 {
+            ui.add_space(6.0);
+            ui.label(hint);
+        }
+    }
+
+    /// Профили экрана чипами в шапке, «+» — сохранить то, что стоит сейчас. Рисуется справа налево: «+», чипы с
+    /// конца, подпись «Профиль»; ввод имени — на их месте.
+    fn profiles_bar(&mut self, ui: &mut Ui, soft_reserve: f32) {
+        let t = texts::tr(self.lang());
+        let p = Palette::of(ui);
         if let Some(mut name) = self.naming.take() {
             let mut done = None;
+            if w::button(ui, Kind::Ghost, None, t.cancel).clicked() {
+                done = Some(false);
+            }
+            if w::button(ui, Kind::Secondary, Some(Icon::Save), t.save).clicked() {
+                done = Some(true);
+            }
             let edit = ui.add(egui::TextEdit::singleline(&mut name).hint_text(t.profile_name).desired_width(140.0));
             if name.is_empty() && !edit.has_focus() && !edit.lost_focus() {
                 edit.request_focus();
             }
-            let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if w::button(ui, Kind::Secondary, Some(Icon::Save), t.save).clicked() || enter {
+            if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 done = Some(true);
             }
-            if w::button(ui, Kind::Ghost, None, t.cancel).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            // Esc отменяет только ввод имени: клавишу забираем, иначе она спрятала бы и панель.
+            if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
                 done = Some(false);
             }
+            side_label(ui, t.profile, p.weak, soft_reserve);
             match done {
                 Some(true) => self.command_all(Command::SaveProfile(name)),
                 Some(false) => {}
@@ -939,8 +1236,10 @@ impl App {
         }
         let active = self.modules.iter().find_map(|m| m.active_profile(&self.settings.profiles));
         let mut apply = None;
-        ui.spacing_mut().item_spacing.x = 4.0;
-        for (i, profile) in self.settings.profiles.iter().enumerate() {
+        if w::icon_button(ui, Icon::Plus, t.profile_save).clicked() {
+            self.naming = Some(String::new());
+        }
+        for (i, profile) in self.settings.profiles.iter().enumerate().rev() {
             let on = active == Some(i);
             let mut r = modules::chip(ui, ("profile", i), on, &profile.name, None);
             if let Some(h) = &profile.hotkey {
@@ -950,9 +1249,7 @@ impl App {
                 apply = Some(i);
             }
         }
-        if w::icon_button(ui, Icon::Plus, t.profile_save).clicked() {
-            self.naming = Some(String::new());
-        }
+        side_label(ui, t.profile, p.weak, soft_reserve);
         if let Some(i) = apply {
             self.command_all(Command::ApplyProfile(i));
         }
@@ -986,50 +1283,321 @@ impl App {
         self.save();
     }
 
-    /// Карточки в порядке из настроек, включённые: номера в `self.modules`.
-    fn visible_cards(&self) -> Vec<usize> {
-        let keys: Vec<&str> = self.modules.iter().map(|m| m.key()).collect();
-        config::arrange(&keys, &self.settings.order, &self.settings.hidden)
-            .into_iter()
-            .filter(|(_, on)| *on)
-            .map(|(i, _)| i)
-            .collect()
+    /// Номер модуля по ключу.
+    fn module_index(&self, key: &str) -> Option<usize> {
+        self.modules.iter().position(|m| m.key() == key)
     }
 
-    /// Карточки в ряд по долям ширины; узкая панель — у каждой своя наименьшая ширина, а ряд
-    /// листается вбок (колесо мыши с Shift или полоса снизу).
-    fn cards(&mut self, ui: &mut Ui, device: &str) {
-        let area = ui.available_rect_before_wrap();
-        let gap = GAP;
-        let visible = self.visible_cards();
-        if visible.is_empty() {
-            let t = texts::tr(self.lang());
-            w::note(ui, t.no_cards);
+    /// Карточки полки по порядку: номера в `self.modules`.
+    fn shelf_modules(&self, shelf: usize) -> Vec<usize> {
+        let Some(s) = self.settings.shelves.get(shelf) else { return Vec::new() };
+        s.cards.iter().filter_map(|k| self.module_index(k)).collect()
+    }
+
+    /// Что опрашивать, пока панель открыта: карточки открытой полки и «Экран» — его читают чипы профилей в шапке.
+    fn refresh_set(&self) -> Vec<usize> {
+        let mut set = self.shelf_modules(self.shelf);
+        if let Some(d) = self.module_index("display")
+            && self.settings.shelf_of("display").is_some()
+            && !set.contains(&d)
+        {
+            set.push(d);
+        }
+        set
+    }
+
+    /// В карточке открытой полки вводят текст (Esc отменяет ввод, а не прячет панель). С других полок не считается:
+    /// ввода на экране нет.
+    fn typing_here(&self) -> bool {
+        self.view == View::Cards && self.shelf_modules(self.shelf).into_iter().any(|m| self.modules[m].typing())
+    }
+
+    /// Открыть полку `i` (номер в `settings.shelves`).
+    fn set_shelf(&mut self, i: usize) {
+        let i = i.min(self.settings.shelves.len().saturating_sub(1));
+        if i != self.shelf {
+            self.shelf = i;
+            // У новой полки свои карточки: перечитать их и не тащить сюда прокрутку со старой.
+            self.refreshed = None;
+            self.scroll_to = None;
+        }
+    }
+
+    // ─── Правка полок ───────────────────────────────────────────────────────
+
+    fn start_edit(&mut self) {
+        self.naming = None;
+        self.editing = Some(Edit { shelves: self.settings.shelves.clone(), hidden: self.settings.hidden.clone() });
+    }
+
+    /// «Готово» и Esc: раскладка уже сохранена по ходу, остаётся выйти.
+    fn finish_edit(&mut self) {
+        self.editing = None;
+        self.renaming = None;
+    }
+
+    /// «Как было»: раскладка, что стояла на входе в правку; сама правка продолжается.
+    fn undo_edit(&mut self) {
+        let Some(e) = &self.editing else { return };
+        self.settings.shelves = e.shelves.clone();
+        self.settings.hidden = e.hidden.clone();
+        self.renaming = None;
+        self.shelf = self.shelf.min(self.settings.shelves.len().saturating_sub(1));
+        self.refreshed = None;
+        self.save();
+    }
+
+    /// «Полка»: новая полка в конце, она же становится открытой.
+    fn add_shelf(&mut self) {
+        if let Some(i) = self.settings.add_shelf(self.lang()) {
+            self.save();
+            self.set_shelf(i);
+        }
+    }
+
+    /// Крестик на вкладке: полка уходит, её карточки — в «Убранные». Открытой остаётся та же полка; убрали открытую —
+    /// встаёт соседняя.
+    fn remove_shelf(&mut self, i: usize) {
+        if !self.settings.remove_shelf(i) {
             return;
         }
-        let total: f32 = visible.iter().map(|&i| self.modules[i].weight()).sum();
-        let free = area.width() - gap * (visible.len().saturating_sub(1)) as f32;
-        let widths: Vec<f32> = visible
+        if i < self.shelf {
+            self.shelf -= 1;
+        }
+        self.shelf = self.shelf.min(self.settings.shelves.len().saturating_sub(1));
+        self.refreshed = None;
+        self.scroll_to = None;
+        self.save();
+    }
+
+    /// Имя полки ввели: готовое имя без правки остаётся готовым (следует за языком), пустое не сохраняется.
+    fn commit_rename(&mut self, i: usize, text: &str) {
+        let t = texts::tr(self.lang());
+        let Some(shelf) = self.settings.shelves.get(i) else { return };
+        if config::Shelf::clean_name(text) == texts::shelf_title(t, &shelf.name) {
+            return;
+        }
+        if self.settings.rename_shelf(i, text) {
+            self.save();
+        }
+    }
+
+    /// Применить то, что правка набрала за кадр, и сохранить раскладку.
+    fn apply_ops(&mut self, ops: Vec<Op>) {
+        if ops.is_empty() {
+            return;
+        }
+        for op in ops {
+            match op {
+                Op::Move { key, at } => self.settings.place_card(key, self.shelf, Some(at)),
+                Op::ToShelf { key, shelf } => self.settings.place_card(key, shelf, None),
+                Op::Hide(key) => self.settings.hide_card(key),
+                Op::Show(key) => self.settings.place_card(key, self.shelf, None),
+            };
+        }
+        self.save();
+    }
+
+    /// Ctrl+Tab и Ctrl+Shift+Tab — следующая и предыдущая полка (по кругу), Ctrl + 1…9 — полка с этим номером.
+    /// Не когда вводят текст.
+    fn shelf_keys(&mut self, ctx: &egui::Context) {
+        if self.view != View::Cards || self.renaming.is_some() || self.naming.is_some() || ctx.text_edit_focused() {
+            return;
+        }
+        let count = self.settings.shelves.len();
+        if count == 0 {
+            return;
+        }
+        let (back, forward, jump) = ctx.input_mut(|i| {
+            let back = i.consume_key(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, egui::Key::Tab);
+            let forward = !back && i.consume_key(egui::Modifiers::CTRL, egui::Key::Tab);
+            let jump = NUM_KEYS.iter().position(|k| i.consume_key(egui::Modifiers::CTRL, *k));
+            (back, forward, jump)
+        });
+        if forward {
+            self.set_shelf((self.shelf + 1) % count);
+        } else if back {
+            self.set_shelf((self.shelf + count - 1) % count);
+        } else if let Some(n) = jump
+            && n < count
+        {
+            self.set_shelf(n);
+        }
+    }
+
+    /// Вкладки полок в шапке. Щелчок и колесо мыши над ними (а также Ctrl+Tab и Ctrl + 1…9) открывают полку; на
+    /// вкладке закрытой полки — метка её модуля (идущий таймер). В правке: двойной щелчок (или F2) переименовывает,
+    /// крестик (или Delete) убирает полку, а на вкладку можно бросить карточку.
+    fn shelf_tabs(&mut self, ui: &mut Ui, ops: &mut Vec<Op>, cap: Option<f32>) {
+        let t = texts::tr(self.lang());
+        let lang = self.lang();
+        let editing = self.editing.is_some();
+        let count = self.settings.shelves.len();
+        let open = self.shelf.min(count.saturating_sub(1));
+        let (mut pick, mut rename, mut remove) = (None, None, None);
+        let mut strip: Option<Rect> = None;
+        let spacing = ui.spacing().item_spacing.x;
+        ui.spacing_mut().item_spacing.x = 2.0;
+        for i in 0..count {
+            let name = texts::shelf_title(t, &self.settings.shelves[i].name).to_string();
+            if self.renaming.as_ref().is_some_and(|r| r.shelf == i) {
+                self.rename_field(ui, i);
+                continue;
+            }
+            // Метка модуля — только на вкладке закрытой полки.
+            let badge = if i == open {
+                None
+            } else {
+                self.shelf_modules(i).into_iter().find_map(|m| self.modules[m].badge(t, lang))
+            };
+            let spec = TabSpec {
+                name: &name,
+                selected: i == open,
+                badge: badge.as_ref(),
+                edit: editing.then_some(count > 1),
+                cap,
+            };
+            let out = tab(ui, i, t, &spec);
+            strip = Some(strip.map_or(out.rect, |r| r.union(out.rect)));
+            if out.click {
+                pick = Some(i);
+            }
+            if out.rename {
+                rename = Some((i, name));
+            }
+            if out.close {
+                remove = Some(i);
+            }
+            if let Some(key) = out.dropped {
+                ops.push(Op::ToShelf { key, shelf: i });
+            }
+        }
+        ui.spacing_mut().item_spacing.x = spacing;
+        // Колесо мыши над вкладками: вверх — предыдущая полка, вниз — следующая.
+        if let Some(strip) = strip
+            && ui.rect_contains_pointer(strip)
+        {
+            let wheel: f32 = ui.input(|inp| {
+                inp.events
+                    .iter()
+                    .map(|e| match e {
+                        egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Line, delta, .. } => delta.y,
+                        _ => 0.0,
+                    })
+                    .sum()
+            });
+            if wheel > 0.0 && open > 0 {
+                pick = Some(open - 1);
+            } else if wheel < 0.0 && open + 1 < count {
+                pick = Some(open + 1);
+            }
+        }
+        if let Some(i) = pick {
+            self.set_shelf(i);
+        }
+        if let Some((i, name)) = rename {
+            self.renaming = Some(Rename { shelf: i, text: name, fresh: true });
+        }
+        if let Some(i) = remove {
+            self.remove_shelf(i);
+        }
+    }
+
+    /// Поле имени на месте вкладки: Enter или щелчок мимо — сохранить, Esc — отмена; пустое имя не сохраняется.
+    fn rename_field(&mut self, ui: &mut Ui, i: usize) {
+        let Some(mut r) = self.renaming.take() else { return };
+        let edit =
+            ui.add(egui::TextEdit::singleline(&mut r.text).desired_width(140.0).char_limit(config::MAX_SHELF_NAME));
+        if r.fresh {
+            edit.request_focus();
+            r.fresh = false;
+        }
+        // Esc отменяет только переименование: клавишу забираем, иначе она кончила бы и всю правку.
+        if ui.input_mut(|inp| inp.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            return;
+        }
+        if edit.lost_focus() {
+            self.commit_rename(i, &r.text);
+            return;
+        }
+        self.renaming = Some(r);
+    }
+
+    /// Пустая полка: пояснение и кнопка, что делать.
+    fn empty_shelf(&mut self, ui: &mut Ui, area: Rect) {
+        let t = texts::tr(self.lang());
+        let mut child =
+            ui.new_child(UiBuilder::new().max_rect(area).layout(egui::Layout::top_down(egui::Align::Center)));
+        child.add_space((area.height() / 2.0 - 40.0).max(8.0));
+        w::note(&mut child, t.shelf_empty);
+        child.add_space(6.0);
+        if w::button(&mut child, Kind::Ghost, Some(Icon::Pencil), t.shelves_edit).clicked() {
+            self.start_edit();
+        }
+    }
+
+    /// Карточки открытой полки в ряд по долям ширины (`fit_widths`); узкая панель — у каждой своя наименьшая ширина, а ряд
+    /// листается вбок (колесо мыши с Shift, полоса снизу или «Ещё N ›»). В правке в конце ряда ещё «Убранные карточки», а
+    /// карточки сжимаются до `EDIT_MIN_WIDTH`: содержимое под вуалью всё равно недоступно, зато ряд помещается.
+    fn cards(&mut self, ui: &mut Ui, device: &str, ops: &mut Vec<Op>) {
+        let area = ui.available_rect_before_wrap();
+        let gap = GAP;
+        let shelf = self.shelf;
+        let editing = self.editing.is_some();
+        let mut slots: Vec<Slot> = self.shelf_modules(shelf).into_iter().map(Slot::Card).collect();
+        if editing {
+            slots.push(Slot::Removed);
+        }
+        if slots.is_empty() {
+            self.empty_shelf(ui, area);
+            return;
+        }
+        // Доля ширины и наименьшая ширина каждого места в ряду.
+        let sizes: Vec<(f32, f32)> = slots
             .iter()
-            .map(|&i| (free * self.modules[i].weight() / total).max(self.modules[i].min_width()))
+            .map(|s| match s {
+                Slot::Card(i) => {
+                    let m = &self.modules[*i];
+                    (m.weight(), if editing { EDIT_MIN_WIDTH.min(m.min_width()) } else { m.min_width() })
+                }
+                Slot::Removed => (1.0, REMOVED_MIN_WIDTH),
+            })
             .collect();
+        let free = area.width() - gap * (slots.len().saturating_sub(1)) as f32;
+        let widths = fit_widths(free, &sizes);
         let content = widths.iter().sum::<f32>() + gap * (widths.len().saturating_sub(1)) as f32;
         if content <= area.width() + 0.5 {
-            self.card_row(ui, area.min, &visible, &widths, area.height(), device);
+            let row = Row { area, origin: area.min, height: area.height() };
+            self.card_row(ui, row, &slots, &widths, device, ops);
             return;
         }
         let mut child = ui.new_child(UiBuilder::new().max_rect(area));
-        let mut scroll = egui::ScrollArea::horizontal().id_salt("cards").auto_shrink([false, false]);
+        // У каждой полки своя прокрутка.
+        let mut scroll = egui::ScrollArea::horizontal().id_salt(("cards", shelf)).auto_shrink([false, false]);
         if let Some(x) = self.scroll_to.take() {
             scroll = scroll.horizontal_scroll_offset(x);
         }
         let out = scroll.show(&mut child, |ui| {
             // Под полосу прокрутки — 12 снизу.
             let (rect, _) = ui.allocate_exact_size(Vec2::new(content, area.height() - 12.0), Sense::hover());
-            self.card_row(ui, rect.min, &visible, &widths, rect.height(), device);
+            let row = Row { area, origin: rect.min, height: rect.height() };
+            self.card_row(ui, row, &slots, &widths, device, ops);
         });
-        // Сколько карточек справа не видно целиком: затухание и «Ещё N ›».
         let offset = out.state.offset.x;
+        let max_offset = (content - area.width()).max(0.0);
+        // В правке над карточкой лежит её слой, а полоса прокрутки ряда — ниже: колесо с Shift до неё не доходит.
+        // Что она не забрала, передаём ей сами (на следующем кадре).
+        if editing {
+            let ctx = ui.ctx().clone();
+            let over = ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| area.contains(p));
+            let dx = ctx.input(|i| i.smooth_scroll_delta().x);
+            if over && dx != 0.0 {
+                self.scroll_to = Some((offset - dx).clamp(0.0, max_offset));
+                ctx.input_mut(|i| i.smooth_scroll_delta.x = 0.0);
+                ctx.request_repaint();
+            }
+        }
+        // Сколько карточек справа не видно целиком: затухание и «Ещё N ›».
         let view_right = offset + area.width();
         let mut x = 0.0;
         let mut first_hidden = None;
@@ -1041,60 +1609,124 @@ impl App {
             }
             x += w + gap;
         }
-        let Some(target) = first_hidden else { return };
-        let p = Palette::of(ui);
+        if let Some(target) = first_hidden {
+            self.more_button(ui.ctx(), area, hidden, target.min(max_offset));
+        }
+    }
+
+    /// Затухание у правого края и «Ещё N ›»: ряд не поместился. Рисуются в слое `Foreground` — выше слоёв правки
+    /// (`Middle`): иначе в правке кнопка оказалась бы под вуалью карточки и не нажималась.
+    fn more_button(&mut self, ctx: &egui::Context, area: Rect, hidden: usize, target: f32) {
+        let t = texts::tr(self.lang());
+        let p = Palette::of_ctx(ctx);
+        let alpha = self.drawn;
         let fade = Rect::from_min_max(
             Pos2::new(area.right() - 120.0, area.top()),
             Pos2::new(area.right(), area.bottom() - 12.0),
         );
-        fade_right(ui.painter(), fade, p.surface);
-        let t = texts::tr(self.lang());
         let label = texts::more_cards(self.lang(), hidden);
         let font = egui::FontId::proportional(13.0);
-        let text_w = ui.painter().layout_no_wrap(label.clone(), font.clone(), p.text).size().x;
+        // Затухание — свой слой, созданный раньше кнопки (под ней) и не ловящий мышь: карточки под ним остаются живыми.
+        let text_w = egui::Area::new(egui::Id::new("more-fade"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(fade.min)
+            .interactable(false)
+            .constrain(false)
+            .fade_in(false)
+            .show(ctx, |ui| {
+                ui.set_opacity(alpha);
+                let (rect, _) = ui.allocate_exact_size(fade.size(), Sense::hover());
+                fade_right(ui.painter(), rect, p.surface);
+                ui.painter().layout_no_wrap(label.clone(), font.clone(), p.text).size().x
+            })
+            .inner;
         let size = Vec2::new(text_w + 34.0, 32.0);
-        let btn = Rect::from_min_size(Pos2::new(area.right() - size.x - 2.0, fade.center().y - size.y / 2.0), size);
-        let r = ui.interact(btn, ui.id().with("more-cards"), Sense::click());
-        let fill = if r.hovered() { p.hover } else { p.card };
-        ui.painter().rect(btn, 16, fill, Stroke::new(1.0, p.border_strong), egui::StrokeKind::Inside);
-        ui.painter().text(btn.left_center() + Vec2::new(12.0, 0.0), egui::Align2::LEFT_CENTER, &label, font, p.text);
-        anvil_ui::icons::paint(
-            ui.painter(),
-            Rect::from_center_size(Pos2::new(btn.right() - 14.0, btn.center().y), Vec2::splat(14.0)),
-            Icon::ArrowRight,
-            p.text,
-        );
-        w::focus_ring(ui, btn, &r, 16);
-        if r.on_hover_text(t.more_hint).on_hover_cursor(CursorIcon::PointingHand).clicked() {
-            self.scroll_to = Some(target.min(content - area.width()).max(0.0));
+        let at = Pos2::new(area.right() - size.x - 2.0, fade.center().y - size.y / 2.0);
+        let clicked = egui::Area::new(egui::Id::new("more-cards"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(at)
+            .constrain(false)
+            .fade_in(false)
+            .show(ctx, |ui| {
+                ui.set_opacity(alpha);
+                let (btn, r) = ui.allocate_exact_size(size, Sense::click());
+                let fill = if r.hovered() { p.hover } else { p.card };
+                ui.painter().rect(btn, 16, fill, Stroke::new(1.0, p.border_strong), StrokeKind::Inside);
+                ui.painter().text(
+                    btn.left_center() + Vec2::new(12.0, 0.0),
+                    egui::Align2::LEFT_CENTER,
+                    &label,
+                    font,
+                    p.text,
+                );
+                anvil_ui::icons::paint(
+                    ui.painter(),
+                    Rect::from_center_size(Pos2::new(btn.right() - 14.0, btn.center().y), Vec2::splat(14.0)),
+                    Icon::ArrowRight,
+                    p.text,
+                );
+                w::focus_ring(ui, btn, &r, 16);
+                r.on_hover_text(t.more_hint).on_hover_cursor(CursorIcon::PointingHand).clicked()
+            })
+            .inner;
+        if clicked {
+            self.scroll_to = Some(target);
         }
     }
 
-    fn card_row(&mut self, ui: &mut Ui, origin: Pos2, visible: &[usize], widths: &[f32], height: f32, device: &str) {
+    fn card_row(&mut self, ui: &mut Ui, row: Row, slots: &[Slot], widths: &[f32], device: &str, ops: &mut Vec<Op>) {
         let t = texts::tr(self.lang());
         let lang = self.lang();
-        let gap = 10.0;
-        let mut x = origin.x;
+        let editing = self.editing.is_some();
+        // Ключи карточек ряда по порядку — для черты «куда встанет» и сдвига с клавиатуры.
+        let order: Vec<&'static str> = slots
+            .iter()
+            .filter_map(|s| match s {
+                Slot::Card(m) => Some(self.modules[*m].key()),
+                Slot::Removed => None,
+            })
+            .collect();
+        let (open, shelves) = (self.shelf, self.settings.shelves.len());
+        let mut x = row.origin.x;
+        let mut pos = 0;
         let mut toasts = Vec::new();
         let before = self.settings.clone();
-        let settings = &mut self.settings;
-        for (i, &m) in visible.iter().enumerate() {
+        for (i, slot) in slots.iter().enumerate() {
+            let rect = Rect::from_min_size(Pos2::new(x, row.origin.y), Vec2::new(widths[i], row.height));
+            x += widths[i] + GAP;
+            let m = match *slot {
+                Slot::Card(m) => m,
+                Slot::Removed => {
+                    self.removed_block(ui, rect, ops);
+                    continue;
+                }
+            };
             let module = &mut self.modules[m];
-            let width = widths[i];
-            let rect = Rect::from_min_size(Pos2::new(x, origin.y), Vec2::new(width, height));
-            x += width + gap;
+            let (key, title) = (module.key(), module.title(t));
             // Карточки входят по очереди: сдвиг и прозрачность, как строки списка.
-            let (alpha, dy) = Motion::of(ui.ctx()).enter(ui.ctx(), ui.id().with(("card", module.key())), i);
-            let mut child = ui.new_child(UiBuilder::new().max_rect(rect.translate(Vec2::new(0.0, dy))));
+            let (alpha, dy) = Motion::of(ui.ctx()).enter(ui.ctx(), ui.id().with(("card", key)), i);
+            let shifted = rect.translate(Vec2::new(0.0, dy));
+            let mut child = ui.new_child(UiBuilder::new().id(ui.id().with(("card-ui", key))).max_rect(shifted));
             child.set_opacity(alpha);
             w::card_frame(&child).show(&mut child, |ui| {
                 ui.set_min_size(ui.available_size());
                 ui.set_clip_rect(ui.max_rect().intersect(rect.expand(1.0)));
-                modules::card_header(ui, module.key(), module.title(t), &module.meta(t));
+                if editing {
+                    // Под вуалью содержимое не отвечает ни мыши, ни клавиатуре: фокус в него не заходит, Enter ничего не
+                    // нажимает. Бледнеть второй раз ему не надо — вуаль уже приглушает.
+                    ui.visuals_mut().disabled_alpha = 1.0;
+                    ui.disable();
+                }
+                modules::card_header(ui, key, title, &module.meta(t), &module.meta_hint());
                 ui.add_space(8.0);
-                let mut cx = Ctx { t, lang, monitor: device, toasts: &mut toasts, settings: &mut *settings };
+                let mut cx = Ctx { t, lang, monitor: device, toasts: &mut toasts, settings: &mut self.settings };
                 module.ui(ui, &mut cx);
             });
+            if editing {
+                let card = EditCard { lang, key, title, pos, order: &order, shelves, open };
+                edit_overlay(ui.ctx(), &card, shifted, row.area, alpha, ops);
+            }
+            pos += 1;
         }
         for (text, tone) in toasts {
             self.toasts.push(text, tone);
@@ -1104,9 +1736,47 @@ impl App {
         }
     }
 
-    /// Настройки — четыре карточки; уже 1240 точек — листаются вбок, а не сжимаются.
+    /// «Убранные карточки»: в конце ряда, только в правке. Чип возвращает карточку на открытую полку; сюда же можно
+    /// бросить карточку — она уйдёт с полки.
+    fn removed_block(&self, ui: &mut Ui, rect: Rect, ops: &mut Vec<Op>) {
+        let t = texts::tr(self.lang());
+        let p = Palette::of(ui);
+        let drop = ui.interact(rect, egui::Id::new("removed-block"), Sense::hover());
+        let over = drop.dnd_hover_payload::<Dragged>().is_some();
+        if over {
+            ui.painter().rect_filled(rect, 10, p.soft(p.accent));
+        }
+        let line = Stroke::new(1.5, if over { p.accent } else { p.border_strong });
+        dashed_rounded_rect(ui.painter(), rect.shrink(0.75), 10.0, line);
+        if let Some(d) = drop.dnd_release_payload::<Dragged>() {
+            ops.push(Op::Hide(d.0));
+        }
+        let mut child = ui.new_child(UiBuilder::new().id(ui.id().with("removed-ui")).max_rect(rect.shrink(14.0)));
+        w::section_label(&mut child, t.removed_cards);
+        child.add_space(2.0);
+        egui::ScrollArea::vertical().id_salt("removed").auto_shrink([false, false]).show(&mut child, |ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
+            if self.settings.hidden.is_empty() {
+                w::note(ui, t.removed_none);
+            } else {
+                ui.horizontal_wrapped(|ui| {
+                    for key in &self.settings.hidden {
+                        let Some(m) = self.module_index(key) else { continue };
+                        let module = &self.modules[m];
+                        if w::button(ui, Kind::Secondary, Some(Icon::Plus), module.title(t)).clicked() {
+                            ops.push(Op::Show(module.key()));
+                        }
+                    }
+                });
+            }
+            ui.add_space(6.0);
+            w::note(ui, t.removed_note);
+        });
+    }
+
+    /// Настройки — три карточки; уже 930 точек — листаются вбок, а не сжимаются.
     fn settings_view(&mut self, ui: &mut Ui) {
-        const MIN: f32 = 1240.0;
+        const MIN: f32 = 930.0;
         let area = ui.available_rect_before_wrap();
         if area.width() >= MIN {
             self.settings_columns(ui, area);
@@ -1123,23 +1793,16 @@ impl App {
         let t = texts::tr(self.lang());
         let ctx = ui.ctx().clone();
         let before = self.settings.clone();
-        // Четыре карточки: «Панель», «Профили экрана», «Карточки панели», «Оформление».
-        let quarter = (area.width() - 30.0) / 4.0;
+        // Три карточки: «Панель», «Профили экрана», «Оформление». Какие карточки и в каком порядке — правка полок
+        // на самой панели (карандаш в шапке), а не настройки.
+        let third = (area.width() - 20.0) / 3.0;
         let col = |i: f32| {
             Rect::from_min_size(
-                Pos2::new(area.left() + i * (quarter + 10.0), area.top()),
-                Vec2::new(quarter, area.height()),
+                Pos2::new(area.left() + i * (third + 10.0), area.top()),
+                Vec2::new(third, area.height()),
             )
         };
-        let (left, middle, third, right) = (col(0.0), col(1.0), col(2.0), col(3.0));
-
-        let mut c3 = ui.new_child(UiBuilder::new().max_rect(third));
-        w::card_frame(&c3).show(&mut c3, |ui| {
-            ui.set_min_size(ui.available_size());
-            egui::ScrollArea::vertical().id_salt("set-c").auto_shrink([false, false]).show(ui, |ui| {
-                self.cards_card(ui);
-            });
-        });
+        let (left, middle, right) = (col(0.0), col(1.0), col(2.0));
 
         let mut mid = ui.new_child(UiBuilder::new().max_rect(middle));
         w::card_frame(&mid).show(&mut mid, |ui| {
@@ -1631,21 +2294,30 @@ impl App {
         let corner = CornerRadius { nw: 0, ne: 0, sw: CORNER, se: CORNER };
         ui.painter().rect(panel, corner, p.surface, Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
 
-        let inner = Rect::from_min_max(panel.min + Vec2::new(12.0, 4.0), panel.max - Vec2::new(12.0, 14.0));
+        // Полок стало меньше, чем номер открытой, — берётся последняя.
+        self.shelf = self.shelf.min(self.settings.shelves.len().saturating_sub(1));
+        self.shelf_keys(&ctx);
+
+        let inner = Rect::from_min_max(panel.min + Vec2::new(12.0, 0.0), panel.max - Vec2::new(12.0, BODY_BOTTOM));
         let mut content = ui.new_child(UiBuilder::new().max_rect(inner));
         content.set_opacity(t);
         content.set_clip_rect(panel);
-        let header = Rect::from_min_size(inner.min, Vec2::new(inner.width(), HEADER - 8.0));
+        // Под шапкой — линия во всю ширину панели; вкладки стоят на ней.
+        let line = egui::Rangef::new(panel.left() + 1.0, panel.right() - 1.0);
+        content.painter().hline(line, HEADER - 0.5, Stroke::new(1.0, p.border));
+        let header = Rect::from_min_size(inner.min, Vec2::new(inner.width(), HEADER));
+        let mut ops = Vec::new();
         let mut top = content.new_child(UiBuilder::new().max_rect(header));
-        self.header(&mut top);
-        let body = Rect::from_min_max(Pos2::new(inner.left(), header.bottom() + 4.0), inner.max);
+        self.header(&mut top, &mut ops);
+        let body = Rect::from_min_max(Pos2::new(inner.left(), BODY_TOP), inner.max);
         let mut body_ui = content.new_child(UiBuilder::new().max_rect(body));
         let device = self.monitor().map(|m| m.device.clone()).unwrap_or_default();
         match self.view {
-            View::Cards => self.cards(&mut body_ui, &device),
+            View::Cards => self.cards(&mut body_ui, &device, &mut ops),
             View::Settings => self.settings_view(&mut body_ui),
             View::Color => self.color_view(&mut body_ui),
         }
+        self.apply_ops(ops);
         if t >= 1.0 {
             self.grips(ui, panel, ppp);
         }
@@ -1654,12 +2326,18 @@ impl App {
             && self.capture.is_none()
             && !self.capture_panel
             && self.naming.is_none()
-            && !self.modules.iter().any(|m| m.typing())
+            && self.renaming.is_none()
+            && !self.typing_here()
         {
-            if self.view == View::Color {
-                self.restore_accent(&ctx);
+            if self.editing.is_some() {
+                // Esc в правке — как «Готово»; следующий Esc прячет панель.
+                self.finish_edit();
+            } else {
+                if self.view == View::Color {
+                    self.restore_accent(&ctx);
+                }
+                self.edge.hide();
             }
-            self.edge.hide();
         }
         self.toasts.show(&ctx);
     }
@@ -1676,6 +2354,34 @@ impl eframe::App for App {
 
     fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
         anvil_ui::chrome::clear_color(visuals, look::accent_of(&self.settings.accent))
+    }
+
+    /// Окно закрывается (Alt+F4, «Закрыть Antresol»): модули возвращают то, что держали на время, — режим экрана,
+    /// который не успели подтвердить. Выход из сеанса сюда не доходит, но и не нужен: неподтверждённого режима нет в реестре.
+    fn on_exit(&mut self) {
+        self.shutdown();
+    }
+}
+
+/// Ширины мест в ряду: `free` точек поровну по долям `weight`, но не меньше `min`. Кому доля мала, встаёт на `min`, а
+/// остальные делят то, что осталось, — ряд помещается, пока помещаются все `min` (их сумма не больше `free`); иначе
+/// все ширины — `min`, и ряд листается вбок.
+fn fit_widths(free: f32, items: &[(f32, f32)]) -> Vec<f32> {
+    let mut fixed = vec![false; items.len()];
+    loop {
+        let left = free - items.iter().zip(&fixed).filter(|(_, f)| **f).map(|((_, min), _)| *min).sum::<f32>();
+        let weight: f32 = items.iter().zip(&fixed).filter(|(_, f)| !**f).map(|((w, _), _)| *w).sum();
+        let share = |w: f32| if weight > 0.0 { left * w / weight } else { 0.0 };
+        let mut changed = false;
+        for (i, (w, min)) in items.iter().enumerate() {
+            if !fixed[i] && share(*w) < *min {
+                fixed[i] = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            return items.iter().enumerate().map(|(i, (w, min))| if fixed[i] { *min } else { share(*w) }).collect();
+        }
     }
 }
 
@@ -1823,4 +2529,1002 @@ fn preview(ui: &mut Ui, base: egui::Color32, dark: bool, t: &texts::Tr, lang: La
             let moved = sw.text != base || sw.fill != base;
             ui.label(egui::RichText::new(if moved { t.adjusted } else { t.as_picked }).size(12.0).color(p.weak));
         });
+}
+
+/// Подпись в шапке («Профиль», «Монитор») — только если справа налево после неё ещё остаётся место (кроме `reserve`,
+/// что отдано вкладкам).
+fn side_label(ui: &mut Ui, text: &str, color: Color32, reserve: f32) {
+    let width = ui.painter().layout_no_wrap(text.to_owned(), egui::FontId::proportional(12.0), color).size().x;
+    if ui.available_width() - reserve >= width + 40.0 {
+        ui.label(egui::RichText::new(text).size(12.0).color(color));
+    }
+}
+
+/// Скруглённая рамка пунктиром: `Shape::dashed_line` по обходу прямоугольника с дугами в углах.
+fn dashed_rounded_rect(painter: &egui::Painter, rect: Rect, radius: f32, stroke: Stroke) {
+    let r = radius.min(rect.width() / 2.0).min(rect.height() / 2.0).max(0.0);
+    let mut pts: Vec<Pos2> = Vec::new();
+    // По часовой стрелке от левого верхнего угла; в экранных координатах 270° — вверх, 90° — вниз.
+    for (centre, from) in [
+        (rect.left_top() + Vec2::new(r, r), 180.0_f32),
+        (rect.right_top() + Vec2::new(-r, r), 270.0),
+        (rect.right_bottom() + Vec2::new(-r, -r), 0.0),
+        (rect.left_bottom() + Vec2::new(r, -r), 90.0),
+    ] {
+        for k in 0..=6 {
+            let a = (from + 15.0 * k as f32).to_radians();
+            pts.push(centre + Vec2::new(a.cos(), a.sin()) * r);
+        }
+    }
+    pts.push(pts[0]);
+    painter.extend(egui::Shape::dashed_line(&pts, stroke, 5.0, 4.0));
+}
+
+/// Сколько у вкладки места не под подпись: поля по 11, метка модуля и крестик «убрать полку» (в правке).
+fn tab_rest(ui: &Ui, badge: Option<&str>, closable: bool) -> f32 {
+    let p = Palette::of(ui);
+    let mut rest = 11.0 + 11.0;
+    if let Some(text) = badge {
+        let w = ui.painter().layout_no_wrap(text.to_owned(), egui::FontId::monospace(11.5), p.text).size().x;
+        rest += 7.0 + w + 14.0;
+    }
+    if closable {
+        rest += 7.0 + 16.0;
+    }
+    rest
+}
+
+/// Предел ширины подписи вкладки, чтобы все подписи (`texts`, точек) вместе заняли не больше `avail`: короткие остаются
+/// как есть, длинные делят остальное поровну, но не уже `floor`. Влезают без предела — `None`.
+fn tab_cap(texts: &[f32], avail: f32, floor: f32) -> Option<f32> {
+    if texts.iter().sum::<f32>() <= avail {
+        return None;
+    }
+    let mut sorted = texts.to_vec();
+    sorted.sort_by(f32::total_cmp);
+    let mut left = avail;
+    for (i, w) in sorted.iter().enumerate() {
+        let share = left / (sorted.len() - i) as f32;
+        if *w > share {
+            return Some(share.max(floor));
+        }
+        left -= *w;
+    }
+    None
+}
+
+/// Что вкладке рисовать: имя, выбрана ли, метка модуля, правка и предел ширины подписи.
+struct TabSpec<'a> {
+    name: &'a str,
+    selected: bool,
+    badge: Option<&'a (String, String)>,
+    /// `None` — обычный вид; `Some(можно_убрать)` — правка: крестик под мышью, пунктир под брошенной карточкой,
+    /// переименование двойным щелчком.
+    edit: Option<bool>,
+    /// Подпись уже этого не бывает (тесно): обрезается многоточием, полное имя — в подсказке.
+    cap: Option<f32>,
+}
+
+/// Одна вкладка полки: высота шапки, подпись (выбранная — полужирная, с чертой акцента у нижней линии) и метка
+/// модуля.
+fn tab(ui: &mut Ui, salt: usize, t: &texts::Tr, spec: &TabSpec) -> TabOut {
+    let TabSpec { name, selected, badge, edit, cap } = *spec;
+    let p = Palette::of(ui);
+    let bold = anvil_ui::semibold(13.5);
+    let mono = egui::FontId::monospace(11.5);
+    // Ширину под подпись берём по полужирной: выбрали другую вкладку — остальные не сдвинулись. Тесно — подпись
+    // обрезается многоточием до `cap`, а полное имя уходит в подсказку.
+    let name_full = ui.painter().layout_no_wrap(name.to_owned(), bold.clone(), p.text).size().x;
+    let name_w = cap.map_or(name_full, |c| name_full.min(c));
+    let cut = name_w < name_full - 0.5;
+    let badge_w =
+        badge.map_or(0.0, |(text, _)| ui.painter().layout_no_wrap(text.clone(), mono.clone(), p.text).size().x + 14.0);
+    let closable = edit == Some(true);
+    let width = name_w + tab_rest(ui, badge.map(|(text, _)| text.as_str()), closable);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, HEADER), Sense::hover());
+    let r = ui.interact(rect, egui::Id::new(("shelf-tab", salt)), Sense::click());
+
+    // Над вкладкой держат карточку: подложка и пунктир акцентом.
+    if edit.is_some() && !selected && r.dnd_hover_payload::<Dragged>().is_some() {
+        let pill = Rect::from_center_size(rect.center(), Vec2::new(rect.width() - 2.0, 32.0));
+        ui.painter().rect_filled(pill, 6, p.hover);
+        dashed_rounded_rect(ui.painter(), pill.shrink(0.75), 6.0, Stroke::new(1.5, p.accent));
+    }
+    let color = if selected || r.hovered() { p.text } else { p.weak };
+    let font = if selected { bold } else { egui::FontId::proportional(13.5) };
+    let galley = if cut {
+        let mut job = egui::text::LayoutJob::simple_singleline(name.to_owned(), font, color);
+        job.wrap = egui::text::TextWrapping::truncate_at_width(name_w);
+        ui.painter().layout_job(job)
+    } else {
+        ui.painter().layout_no_wrap(name.to_owned(), font, color)
+    };
+    let text_at =
+        Pos2::new(rect.left() + 11.0 + (name_w - galley.size().x) / 2.0, rect.center().y - galley.size().y / 2.0);
+    ui.painter().galley(text_at, galley, color);
+    if selected {
+        let bar = Rect::from_min_max(
+            Pos2::new(rect.left() + 9.0, rect.bottom() - 2.0),
+            Pos2::new(rect.right() - 9.0, rect.bottom()),
+        );
+        ui.painter().rect_filled(bar, 1, p.accent);
+    }
+    if let Some((text, _)) = badge {
+        let at = Pos2::new(rect.left() + 11.0 + name_w + 7.0, rect.center().y - 9.5);
+        let pill = Rect::from_min_size(at, Vec2::new(badge_w, 19.0));
+        ui.painter().rect_filled(pill, 10, p.badge_fill(p.accent));
+        ui.painter().text(pill.center(), egui::Align2::CENTER_CENTER, text, mono, p.accent_text);
+    }
+    w::focus_ring(ui, Rect::from_center_size(rect.center(), Vec2::new(rect.width(), 32.0)), &r, 6);
+    let label = match badge {
+        Some((_, hint)) => format!("{name} — {hint}"),
+        None => name.to_string(),
+    };
+    r.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, &label));
+
+    // Крестик «убрать полку» — у вкладки под мышью (и у той, где он в фокусе).
+    let mut close = false;
+    if closable {
+        let cr = Rect::from_center_size(Pos2::new(rect.right() - 11.0 - 8.0, rect.center().y), Vec2::splat(18.0));
+        let c = ui.interact(cr, egui::Id::new(("shelf-close", salt)), Sense::click());
+        if r.contains_pointer() || c.has_focus() {
+            if c.hovered() {
+                ui.painter().rect_filled(cr, 4, p.hover);
+            }
+            let color = if c.hovered() { p.text } else { p.weak };
+            anvil_ui::icons::paint(
+                ui.painter(),
+                Rect::from_center_size(cr.center(), Vec2::splat(12.0)),
+                Icon::Close,
+                color,
+            );
+        }
+        w::focus_ring(ui, cr, &c, 4);
+        c.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, t.shelf_remove));
+        close = c.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(t.shelf_remove).clicked();
+    }
+
+    let (f2, delete) = ui.input(|i| (i.key_pressed(egui::Key::F2), i.key_pressed(egui::Key::Delete)));
+    let focused = edit.is_some() && r.has_focus();
+    // Переименовать — только в правке: вне её двойной щелчок по вкладке ничего не делает (щелчок открывает полку).
+    let rename = edit.is_some() && (r.double_clicked() || (focused && f2));
+    close |= closable && focused && delete;
+    // Брошенная на вкладку открытой полки карточка остаётся где была: переносить некуда.
+    let dropped = if edit.is_some() && !selected { r.dnd_release_payload::<Dragged>().map(|d| d.0) } else { None };
+    // Подсказка: полное имя, если подпись обрезана, и то, что вкладка умеет.
+    let hint = match (edit, badge) {
+        (Some(_), _) => Some(t.shelf_rename.to_string()),
+        (None, Some((_, hint))) => Some(hint.clone()),
+        (None, None) => None,
+    };
+    let hint = match (cut, hint) {
+        (true, Some(h)) => Some(format!("{name} — {h}")),
+        (true, None) => Some(name.to_string()),
+        (false, h) => h,
+    };
+    let mut r = r.on_hover_cursor(CursorIcon::PointingHand);
+    if let Some(h) = hint {
+        r = r.on_hover_text(h);
+    }
+    TabOut { rect, click: r.clicked(), rename, close, dropped }
+}
+
+/// Правка полок: поверх карточки — вуаль, пунктирная рамка и непрозрачная полоса с ручкой, именем и крестиком.
+/// Это свой слой (`egui::Area`): пока он лежит над карточкой, щелчки, колесо мыши и наведение до модуля не
+/// доходят. `rect` — карточка, `view` — видимая часть ряда: за неё слой не рисуется и не отвечает.
+fn edit_overlay(ctx: &egui::Context, card: &EditCard, rect: Rect, view: Rect, alpha: f32, ops: &mut Vec<Op>) {
+    let t = texts::tr(card.lang);
+    let p = Palette::of_ctx(ctx);
+    let key = card.key;
+    // Черта «куда встанет» стоит в зазоре между карточками — у первой и последней это уже за краем видимого.
+    let clip = view.expand2(Vec2::new(8.0, 0.0));
+    egui::Area::new(egui::Id::new(("edit-card", key)))
+        .order(egui::Order::Middle)
+        .fixed_pos(rect.min)
+        .constrain_to(clip)
+        .constrain(false)
+        .fade_in(false)
+        .show(ctx, |ui| {
+            ui.set_opacity(alpha);
+            let (r, _) = ui.allocate_exact_size(rect.size(), Sense::hover());
+            // Куда бросают карточку: на эту — встанет на её место. Заводим первой, чтобы ручка и крестик были выше.
+            let drop = ui.interact(r, egui::Id::new(("edit-drop", key)), Sense::hover());
+            let painter = ui.painter().clone();
+
+            // Вуаль под полосой; рамка пунктиром (под ней сплошная `surface` закрывает рамку самой карточки).
+            let alpha_veil = if p.dark { 189 } else { 199 };
+            let veil = Color32::from_rgba_unmultiplied(p.surface.r(), p.surface.g(), p.surface.b(), alpha_veil);
+            let lower = Rect::from_min_max(Pos2::new(r.left(), r.top() + EDIT_STRIP + 1.0), r.max);
+            painter.rect_filled(lower, CornerRadius { nw: 0, ne: 0, sw: 10, se: 10 }, veil);
+            let strip = Rect::from_min_max(r.min, Pos2::new(r.right(), r.top() + EDIT_STRIP));
+            painter.rect_filled(strip, CornerRadius { nw: 10, ne: 10, sw: 0, se: 0 }, p.card);
+            painter.hline(r.x_range(), r.top() + EDIT_STRIP + 0.5, Stroke::new(1.0, p.border));
+            painter.rect_stroke(r, 10, Stroke::new(2.0, p.surface), StrokeKind::Inside);
+            dashed_rounded_rect(&painter, r.shrink(0.75), 10.0, Stroke::new(1.5, p.border_strong));
+
+            // Ручка слева, крестик справа, имя между ними.
+            let mid = r.top() + 22.5;
+            let grip = Rect::from_center_size(Pos2::new(r.left() + 9.5 + 14.0, mid), Vec2::splat(28.0));
+            let close = Rect::from_center_size(Pos2::new(r.right() - 9.5 - 14.0, mid), Vec2::splat(28.0));
+
+            let g = ui.interact(grip, egui::Id::new(("edit-grip", key)), Sense::click_and_drag());
+            g.dnd_set_drag_payload(Dragged(key));
+            let hot = g.hovered() || g.dragged() || g.has_focus();
+            let (fill, edge) = (if hot { p.hover } else { p.card }, Stroke::new(1.0, p.border_strong));
+            painter.rect(grip, 6, fill, edge, StrokeKind::Inside);
+            paint_grip(&painter, grip.center(), p.text);
+            w::focus_ring(ui, grip, &g, 6);
+            let drag_name = texts::drag_card(card.lang, card.title);
+            g.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &drag_name));
+            let g = g.on_hover_text(t.grip_hint).on_hover_cursor(CursorIcon::Grab);
+            if g.has_focus() {
+                // С клавиатуры: Alt + ←/→ — сдвиг в ряду, Alt + цифра — на полку с этим номером, Delete — убрать.
+                let (left, right, delete, digit) = ui.input(|i| {
+                    let alt = i.modifiers.alt;
+                    (
+                        alt && i.key_pressed(egui::Key::ArrowLeft),
+                        alt && i.key_pressed(egui::Key::ArrowRight),
+                        i.key_pressed(egui::Key::Delete),
+                        if alt { NUM_KEYS.iter().position(|k| i.key_pressed(*k)) } else { None },
+                    )
+                });
+                if left && card.pos > 0 {
+                    ops.push(Op::Move { key, at: card.pos - 1 });
+                }
+                if right && card.pos + 1 < card.order.len() {
+                    ops.push(Op::Move { key, at: card.pos + 1 });
+                }
+                if delete {
+                    ops.push(Op::Hide(key));
+                }
+                if let Some(n) = digit
+                    && n < card.shelves
+                    && n != card.open
+                {
+                    ops.push(Op::ToShelf { key, shelf: n });
+                }
+            }
+
+            let left = grip.right() + 8.0;
+            let mut job =
+                egui::text::LayoutJob::simple_singleline(card.title.to_owned(), anvil_ui::semibold(13.5), p.text);
+            job.wrap = egui::text::TextWrapping::truncate_at_width((close.left() - 8.0 - left).max(20.0));
+            let galley = painter.layout_job(job);
+            painter.galley(Pos2::new(left, mid - galley.size().y / 2.0), galley, p.text);
+
+            let c = ui.interact(close, egui::Id::new(("edit-close", key)), Sense::click());
+            let fill = if c.hovered() { p.hover } else { p.card };
+            painter.rect(close, 6, fill, Stroke::new(1.0, p.border_strong), StrokeKind::Inside);
+            let cross = Rect::from_center_size(close.center(), Vec2::splat(14.0));
+            anvil_ui::icons::paint(&painter, cross, Icon::Close, p.text);
+            w::focus_ring(ui, close, &c, 6);
+            let remove_name = texts::remove_card(card.lang, card.title);
+            c.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &remove_name));
+            if c.on_hover_text(remove_name.as_str()).on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                ops.push(Op::Hide(key));
+            }
+
+            // Тащат другую карточку этого ряда: черта в зазоре, куда она встанет (вправо — после этой, влево — перед).
+            if let Some(d) = drop.dnd_hover_payload::<Dragged>()
+                && d.0 != key
+                && let Some(from) = card.order.iter().position(|k| *k == d.0)
+            {
+                let x = if from < card.pos { r.right() + 5.0 } else { r.left() - 5.0 };
+                painter.line_segment([Pos2::new(x, r.top()), Pos2::new(x, r.bottom())], Stroke::new(2.0, p.accent));
+            }
+            if let Some(d) = drop.dnd_release_payload::<Dragged>()
+                && d.0 != key
+            {
+                ops.push(Op::Move { key: d.0, at: card.pos });
+            }
+        });
+}
+
+// ─── Тесты правки полок ─────────────────────────────────────────────────────
+//
+// Панель без окна: egui гоняет кадры `App::draw` на ввод, который сочиняет тест (мышь, клавиши) — так проверяются
+// и перетаскивание карточек, и клавиатура, и то, что вуаль правки не пускает ввод до модулей. Координаты берутся у
+// самих виджетов (`Context::read_response`), а не считаются вручную.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::{Event, Key, Modifiers, PointerButton};
+
+    /// Ширина и высота панели в тестах, в точках.
+    const SIZE: Vec2 = Vec2::new(1300.0, 340.0);
+
+    impl App {
+        /// Панель для тестов: как после `new`, но без окна, горячих клавиш и чтения системы.
+        fn for_test(settings: Settings) -> App {
+            App {
+                settings,
+                edge: Edge::default(),
+                modules: modules::all(),
+                toasts: Toasts::default(),
+                view: View::Cards,
+                monitors: Vec::new(),
+                monitors_at: None,
+                placed: None,
+                drawn: 1.0,
+                region: None,
+                focused: true,
+                grip: None,
+                refreshed: None,
+                autostart: false,
+                started: true,
+                capture: None,
+                sent_keys: None,
+                capture_panel: false,
+                sent_panel: None,
+                active_monitor: None,
+                foreground: None,
+                foreground_at: None,
+                strip_on: false,
+                strip_kind: StripKind::Off,
+                strip_fill: None,
+                playing: None,
+                banner: None,
+                naming: None,
+                scroll_to: None,
+                header_right: 0.0,
+                header_edges: (0.0, f32::MAX),
+                shelf: 0,
+                editing: None,
+                renaming: None,
+                color: ColorEdit::new(look::LIME.dark.fill),
+                no_activate: None,
+                shot: None,
+            }
+        }
+    }
+
+    struct Rig {
+        ctx: egui::Context,
+        app: App,
+        time: f64,
+        mouse: Pos2,
+        size: Vec2,
+    }
+
+    impl Rig {
+        fn new() -> Rig {
+            Rig::sized(SIZE.x)
+        }
+
+        /// Панель другой ширины (высота та же).
+        fn sized(width: f32) -> Rig {
+            let settings = Settings { width, height: SIZE.y, ..Settings::default() };
+            let ctx = egui::Context::default();
+            anvil_ui::install(&ctx, look::accent_of(&settings.accent), settings.common.theme);
+            let size = Vec2::new(width, SIZE.y);
+            let mut rig = Rig { ctx, app: App::for_test(settings), time: 0.0, mouse: Pos2::new(5.0, 5.0), size };
+            rig.settle();
+            rig
+        }
+
+        /// Правка уже открыта.
+        fn editing() -> Rig {
+            let mut rig = Rig::new();
+            rig.app.start_edit();
+            rig.settle();
+            rig
+        }
+
+        fn frame(&mut self, events: Vec<Event>) {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, self.size)),
+                time: Some(self.time),
+                events,
+                ..Default::default()
+            };
+            self.time += 1.0 / 30.0;
+            let app = &mut self.app;
+            let mut out = self.ctx.run_ui(input, |ui| app.draw(ui));
+            // Рисовать некому: изменения текстур (шрифты) никто не применит, и egui без `clear` на этом упадёт.
+            out.textures_delta.clear();
+        }
+
+        /// Несколько кадров без ввода: слои и раскладка успокаиваются (у нового слоя первый кадр — на замер).
+        fn settle(&mut self) {
+            for _ in 0..4 {
+                self.frame(Vec::new());
+            }
+        }
+
+        fn rect(&self, id: egui::Id) -> Rect {
+            self.ctx.read_response(id).unwrap_or_else(|| panic!("виджета {id:?} нет на экране")).rect
+        }
+
+        fn grip(&self, key: &str) -> Rect {
+            self.rect(egui::Id::new(("edit-grip", key)))
+        }
+
+        fn drop_zone(&self, key: &str) -> Rect {
+            self.rect(egui::Id::new(("edit-drop", key)))
+        }
+
+        fn tab(&self, i: usize) -> Rect {
+            self.rect(egui::Id::new(("shelf-tab", i)))
+        }
+
+        fn move_to(&mut self, pos: Pos2) {
+            self.mouse = pos;
+            self.frame(vec![Event::PointerMoved(pos)]);
+        }
+
+        fn button(&self, pressed: bool) -> Event {
+            Event::PointerButton {
+                pos: self.mouse,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            }
+        }
+
+        fn click(&mut self, pos: Pos2) {
+            self.move_to(pos);
+            self.frame(vec![self.button(true)]);
+            self.frame(vec![self.button(false)]);
+            self.settle();
+        }
+
+        fn double_click(&mut self, pos: Pos2) {
+            self.click(pos);
+            self.move_to(pos);
+            self.frame(vec![self.button(true)]);
+            self.frame(vec![self.button(false)]);
+            self.settle();
+        }
+
+        /// Взять ручку и отвести к `to`: несколько шагов, чтобы egui признал это перетаскиванием, и отпустить.
+        fn drag(&mut self, from: Pos2, to: Pos2) {
+            self.move_to(from);
+            self.frame(vec![self.button(true)]);
+            for step in 1..=10 {
+                self.move_to(from + (to - from) * (step as f32 / 10.0));
+            }
+            self.move_to(to);
+            self.frame(vec![self.button(false)]);
+            self.settle();
+        }
+
+        fn key(&mut self, key: Key, modifiers: Modifiers) {
+            let ev = |pressed| Event::Key { key, physical_key: Some(key), pressed, repeat: false, modifiers };
+            // Как egui-winit: сначала «нажали модификатор», потом клавишу.
+            self.frame(vec![Event::ModifiersChanged(modifiers), ev(true)]);
+            self.frame(vec![ev(false), Event::ModifiersChanged(Modifiers::NONE)]);
+            self.settle();
+        }
+
+        /// Прямоугольник виджета, у которого сейчас фокус клавиатуры.
+        fn focused_rect(&self) -> Option<Rect> {
+            let id = self.ctx.memory(|m| m.focused())?;
+            self.ctx.read_response(id).map(|r| r.rect)
+        }
+
+        fn cards(&self, shelf: usize) -> Vec<&str> {
+            self.app.settings.shelves[shelf].cards.iter().map(String::as_str).collect()
+        }
+    }
+
+    const CTRL: Modifiers = Modifiers { alt: false, ctrl: true, shift: false, mac_cmd: false, command: true };
+    const ALT: Modifiers = Modifiers { alt: true, ctrl: false, shift: false, mac_cmd: false, command: false };
+
+    #[test]
+    fn edit_veil_takes_input_from_modules() {
+        let mut rig = Rig::editing();
+        let card = rig.drop_zone("display");
+        // Над карточкой — слой правки, а не панель: щелчки, колесо и наведение до модуля не дойдут.
+        let inside = card.center() + Vec2::new(0.0, 30.0);
+        rig.move_to(inside);
+        assert_eq!(rig.ctx.layer_id_at(inside).map(|l| l.order), Some(egui::Order::Middle));
+        let below = egui::LayerId::background();
+        assert!(!rig.ctx.rect_contains_pointer(below, card), "нижний слой не видит мышь над вуалью");
+        // Вне правки — наоборот.
+        rig.app.finish_edit();
+        rig.settle();
+        rig.move_to(inside);
+        assert_eq!(rig.ctx.layer_id_at(inside).map(|l| l.order), Some(egui::Order::Background));
+    }
+
+    #[test]
+    fn edit_veil_blocks_clicks_to_modules() {
+        // Первая кнопка «Таймеров» («5 мин»): щелчок заводит таймер, и модуль просит кадры (`ticking`).
+        let ticking = |rig: &Rig| rig.app.modules.iter().any(|m| m.ticking());
+        // Контроль: вне правки щелчок кнопку нажимает (пять карточек поровну; «Таймеры» — четвёртая).
+        let mut rig = Rig::new();
+        rig.app.set_shelf(2);
+        rig.settle();
+        let width = (SIZE.x - 24.0 - 4.0 * GAP) / 5.0;
+        let timers = 12.0 + 3.0 * (width + GAP);
+        assert!(!ticking(&rig));
+        rig.click(Pos2::new(timers + 16.0 + 40.0, BODY_TOP + 70.0));
+        assert!(ticking(&rig), "вне правки кнопка работает — иначе проверка ниже ничего не стоит");
+        // В правке — тот же щелчок в самую кнопку (карточку находим по её слою) до модуля не доходит.
+        let mut rig = Rig::new();
+        rig.app.set_shelf(2);
+        rig.app.start_edit();
+        rig.settle();
+        let card = rig.drop_zone("timers");
+        rig.click(Pos2::new(card.left() + 16.0 + 40.0, card.top() + 70.0));
+        assert!(!ticking(&rig), "в правке щелчок до кнопки не дошёл");
+    }
+
+    /// Колесо мыши: `lines` строк по вертикали, с модификаторами `modifiers`, над точкой `pos`.
+    impl Rig {
+        fn wheel(&mut self, pos: Pos2, lines: f32, modifiers: Modifiers) {
+            self.move_to(pos);
+            let wheel = Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Line,
+                delta: Vec2::new(0.0, lines),
+                phase: egui::TouchPhase::Move,
+                modifiers,
+            };
+            self.frame(vec![Event::ModifiersChanged(modifiers), wheel]);
+            self.frame(vec![Event::ModifiersChanged(Modifiers::NONE)]);
+            self.settle();
+        }
+
+        /// Левый край первой карточки полки на экране; `None` — её уже не видно (ряд пролистан).
+        fn first_left(&self) -> Option<f32> {
+            let key = self.app.settings.shelves[self.app.shelf].cards.first()?;
+            self.ctx.read_response(egui::Id::new(("edit-drop", key.as_str()))).map(|r| r.rect.left())
+        }
+
+        /// Где «Ещё N ›»: у правого края ряда, посередине высоты.
+        fn more_button(&self) -> Pos2 {
+            Pos2::new(self.size.x - 12.0 - 20.0, (BODY_TOP + (self.size.y - BODY_BOTTOM - 12.0)) / 2.0)
+        }
+    }
+
+    #[test]
+    fn profile_key_leaves_editing_and_shows_the_confirm() {
+        let dev = r"\\.\TEST-PROFILE-KEY";
+        let mut rig = Rig::new();
+        let rect = monitor::PxRect { left: 0, top: 0, right: 1920, bottom: 1080 };
+        rig.app.monitors = vec![monitor::Monitor { device: dev.into(), rect, primary: true, handle: 0 }];
+        rig.app.settings.monitor = dev.into();
+        let screen = config::ProfileMonitor { device: dev.into(), width: 2560, height: 1440, hz: 144, scale: None };
+        rig.app.settings.profiles = vec![config::Profile { name: "P".into(), hotkey: None, monitors: vec![screen] }];
+        // «Экран» — на первой полке; открыта третья, и идёт правка.
+        rig.app.set_shelf(2);
+        rig.app.start_edit();
+        rig.settle();
+        let _one_at_a_time = sys::KEYS_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        sys::press_profile(0);
+        rig.app.profile_keys(&rig.ctx, dev, Instant::now());
+        assert!(rig.app.editing.is_none(), "клавиша профиля вывела из правки");
+        assert!(rig.app.modules.iter().any(|m| m.busy()), "режим сменился — ждём «Оставить?»");
+        assert_eq!(rig.app.shelf, 0, "открылась полка, где «Экран»: вопрос виден");
+        // Щелчок по чипу профиля с другой полки: тот же вывод — открывается полка с вопросом.
+        let mut rig = Rig::new();
+        rig.app.monitors = vec![monitor::Monitor { device: dev.into(), rect, primary: true, handle: 0 }];
+        rig.app.settings.monitor = dev.into();
+        let other = config::ProfileMonitor { device: dev.into(), width: 1920, height: 1080, hz: 120, scale: None };
+        rig.app.settings.profiles = vec![config::Profile { name: "Q".into(), hotkey: None, monitors: vec![other] }];
+        rig.app.set_shelf(1);
+        rig.app.command_all(Command::ApplyProfile(0));
+        assert_eq!(rig.app.shelf, 0, "после щелчка по чипу профиля — тоже");
+    }
+
+    #[test]
+    fn closing_the_app_reverts_an_unanswered_mode() {
+        let dev = r"\\.\TEST-CLOSE";
+        let mut rig = Rig::new();
+        let rect = monitor::PxRect { left: 0, top: 0, right: 1920, bottom: 1080 };
+        rig.app.monitors = vec![monitor::Monitor { device: dev.into(), rect, primary: true, handle: 0 }];
+        rig.app.settings.monitor = dev.into();
+        let start = sys::display::current(dev).expect("выдуманный экран отвечает");
+        let start_scale = sys::display::scale(dev).map(|s| s.current);
+        let screen =
+            config::ProfileMonitor { device: dev.into(), width: 1920, height: 1080, hz: 144, scale: Some(200) };
+        rig.app.settings.profiles = vec![config::Profile { name: "P".into(), hotkey: None, monitors: vec![screen] }];
+        rig.app.command_all(Command::ApplyProfile(0));
+        assert!(rig.app.modules.iter().any(|m| m.busy()), "режим сменился, ответа нет");
+        assert_ne!(sys::display::current(dev), Some(start));
+        assert_eq!(sys::display::saved(dev), start, "в реестр неподтверждённое не попало");
+        // Окно закрывается (`eframe::App::on_exit` зовёт `shutdown`): прежний режим и масштаб вернулись.
+        rig.app.shutdown();
+        assert!(!rig.app.modules.iter().any(|m| m.busy()));
+        assert_eq!(sys::display::current(dev), Some(start));
+        assert_eq!(sys::display::scale(dev).map(|s| s.current), start_scale);
+        assert_eq!(sys::display::saved(dev), start);
+    }
+
+    #[test]
+    fn header_parts_do_not_overlap_when_narrow() {
+        let profile = |name: &str| config::Profile { name: name.into(), hotkey: None, monitors: Vec::new() };
+        for width in [560.0, 640.0, 700.0, 900.0, 1300.0] {
+            for editing in [false, true] {
+                let mut rig = Rig::sized(width);
+                rig.app.settings.profiles = vec![profile("Работа"), profile("Игры"), profile("Кино")];
+                rig.app.settings.shelves[0].name = "Очень длинное имя полки".into();
+                if editing {
+                    rig.app.start_edit();
+                }
+                rig.settle();
+                let (left, right) = rig.app.header_edges;
+                assert!(
+                    left <= right - 8.0,
+                    "{width}/{editing}: левая часть шапки наезжает на правую: {left} > {right}"
+                );
+                for i in 0..3 {
+                    let tab = rig.tab(i);
+                    assert!(
+                        tab.right() <= right - 8.0,
+                        "{width}/{editing}: вкладка {i} {tab:?} заходит на правую часть {right}"
+                    );
+                    assert!(tab.width() > 30.0, "{width}/{editing}: вкладка {i} пропала");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn narrow_header_cuts_names_and_drops_the_word() {
+        let mut wide = Rig::sized(1300.0);
+        wide.app.settings.shelves[0].name = "Очень длинное имя полки".into();
+        wide.settle();
+        let natural = wide.tab(0).width();
+        let mut rig = Rig::sized(560.0);
+        rig.app.settings.shelves[0].name = "Очень длинное имя полки".into();
+        rig.settle();
+        assert!(rig.tab(0).width() < natural, "подпись обрезана многоточием");
+        // Слово «Antresol» на узкой панели ушло, значок остался: вкладки начинаются левее, чем на широкой.
+        assert!(rig.tab(0).left() < wide.tab(0).left() - 40.0);
+        // Много полок с длинными именами и профили: ничего не наезжает и в самом тесном случае (девять вкладок).
+        let mut rig = Rig::sized(560.0);
+        for i in 0..9 {
+            if rig.app.settings.shelves.len() <= i {
+                rig.app
+                    .settings
+                    .shelves
+                    .push(config::Shelf {
+                        name: format!("Полка с длинным именем {i}"), cards: Vec::new()
+                    });
+            }
+        }
+        rig.settle();
+        let (left, right) = rig.app.header_edges;
+        assert!(left <= right + 0.5, "{left} > {right}");
+    }
+
+    #[test]
+    fn fit_widths_rules() {
+        // Поровну по долям.
+        assert_eq!(fit_widths(300.0, &[(1.0, 50.0), (2.0, 50.0)]), [100.0, 200.0]);
+        // Кому доля мала, встаёт на минимум, остальные делят остаток.
+        assert_eq!(fit_widths(1000.0, &[(1.0, 400.0), (1.0, 100.0), (1.0, 100.0)]), [400.0, 300.0, 300.0]);
+        // Несколько сразу.
+        assert_eq!(fit_widths(900.0, &[(1.0, 400.0), (1.0, 350.0), (1.0, 100.0)]), [400.0, 350.0, 150.0]);
+        // Все минимумы не помещаются — все на минимуме, ряд листается.
+        assert_eq!(fit_widths(500.0, &[(1.0, 300.0), (1.0, 300.0)]), [300.0, 300.0]);
+        assert!(fit_widths(0.0, &[]).is_empty());
+        // Помещается — ровно в свободное место, и никто не меньше минимума.
+        let items = [(1.8, 420.0), (1.0, 220.0), (1.0, 240.0), (1.0, 220.0), (1.0, 220.0)];
+        let w = fit_widths(1400.0, &items);
+        assert!((w.iter().sum::<f32>() - 1400.0).abs() < 0.01);
+        assert!(w.iter().zip(items).all(|(w, (_, min))| *w >= min - 0.001), "{w:?}");
+    }
+
+    #[test]
+    fn edit_row_fits_on_every_default_shelf_at_1300() {
+        let mut rig = Rig::editing();
+        for shelf in 0..3 {
+            rig.app.set_shelf(shelf);
+            rig.settle();
+            let removed = rig.rect(egui::Id::new("removed-block"));
+            assert!(removed.right() <= SIZE.x - 12.0 + 0.5, "полка {shelf}: «Убранные» за краем — {removed:?}");
+            assert!(removed.width() >= REMOVED_MIN_WIDTH - 0.5, "полка {shelf}: {removed:?}");
+            for key in rig.app.settings.shelves[shelf].cards.clone() {
+                assert!(rig.drop_zone(&key).width() >= EDIT_MIN_WIDTH - 0.5, "полка {shelf}: «{key}» уже наименьшей");
+            }
+            assert_eq!(rig.first_left(), Some(12.0), "полка {shelf}: ряд не листается");
+        }
+    }
+
+    #[test]
+    fn more_button_and_shift_wheel_scroll_the_row_while_editing() {
+        for width in [780.0, 1000.0] {
+            for shelf in 0..3 {
+                let mut rig = Rig::sized(width);
+                rig.app.set_shelf(shelf);
+                rig.app.start_edit();
+                rig.settle();
+                let cards = rig.app.settings.shelves[shelf].cards.clone();
+                // Ряд вместе с «Убранными» при наименьших ширинах не помещается — тогда он листается.
+                let mins = cards.len() as f32 * EDIT_MIN_WIDTH + REMOVED_MIN_WIDTH + cards.len() as f32 * GAP;
+                let before = rig.first_left().expect("первая карточка видна");
+                if mins <= width - 24.0 {
+                    assert_eq!(before, 12.0, "{width}/{shelf}: помещается — не листается");
+                    continue;
+                }
+                // «Ещё N ›» над слоями правки: щелчок листает ряд.
+                rig.click(rig.more_button());
+                let after = rig.first_left();
+                assert!(
+                    after.is_none_or(|x| x < before - 20.0),
+                    "{width}/{shelf}: «Ещё» не листает: {before} → {after:?}"
+                );
+                // Shift + колесо над карточкой в правке: тоже листает (слой правки колесо не пускал).
+                let mut rig = Rig::sized(width);
+                rig.app.set_shelf(shelf);
+                rig.app.start_edit();
+                rig.settle();
+                let over = rig.drop_zone(&cards[0]).center();
+                rig.wheel(over, -3.0, Modifiers::SHIFT);
+                let after = rig.first_left();
+                assert!(
+                    after.is_none_or(|x| x < before - 20.0),
+                    "{width}/{shelf}: колесо с Shift не листает: {before} → {after:?}"
+                );
+                // Без Shift колесо ряд не двигает.
+                let mut rig = Rig::sized(width);
+                rig.app.set_shelf(shelf);
+                rig.app.start_edit();
+                rig.settle();
+                let over = rig.drop_zone(&cards[0]).center();
+                rig.wheel(over, -3.0, Modifiers::NONE);
+                assert_eq!(rig.first_left(), Some(before), "{width}/{shelf}: колесо без Shift ряд не листает");
+            }
+        }
+    }
+
+    #[test]
+    fn fade_at_the_edge_does_not_catch_the_mouse() {
+        // Ряд не помещается: справа затухание и «Ещё N ›». Затухание мышь не ловит — карточка под ним остаётся живой,
+        // а над самой кнопкой лежит её слой.
+        let mut rig = Rig::sized(780.0);
+        rig.settle();
+        let above_button = Pos2::new(rig.size.x - 12.0 - 60.0, BODY_TOP + 20.0);
+        rig.move_to(above_button);
+        assert_eq!(rig.ctx.layer_id_at(above_button).map(|l| l.order), Some(egui::Order::Background));
+        let button = rig.more_button();
+        rig.move_to(button);
+        assert_eq!(rig.ctx.layer_id_at(button).map(|l| l.order), Some(egui::Order::Foreground));
+    }
+
+    #[test]
+    fn drag_card_within_the_row() {
+        let mut rig = Rig::editing();
+        assert_eq!(rig.cards(0), ["display", "brightness", "sound", "media"]);
+        // «Яркость» вправо, на «Звук»: встаёт после него.
+        let (from, to) = (rig.grip("brightness").center(), rig.drop_zone("sound").center());
+        rig.drag(from, to);
+        assert_eq!(rig.cards(0), ["display", "sound", "brightness", "media"]);
+        // «Медиа» влево, на «Экран»: встаёт перед ним.
+        let (from, to) = (rig.grip("media").center(), rig.drop_zone("display").center());
+        rig.drag(from, to);
+        assert_eq!(rig.cards(0), ["media", "display", "sound", "brightness"]);
+        // На себя — ничего.
+        let (from, to) = (rig.grip("sound").center(), rig.drop_zone("sound").center());
+        rig.drag(from, to);
+        assert_eq!(rig.cards(0), ["media", "display", "sound", "brightness"]);
+    }
+
+    #[test]
+    fn drag_card_onto_another_shelf_tab() {
+        let mut rig = Rig::editing();
+        let (from, to) = (rig.grip("display").center(), rig.tab(1).center());
+        rig.drag(from, to);
+        assert_eq!(rig.cards(0), ["brightness", "sound", "media"]);
+        assert_eq!(rig.cards(1).last(), Some(&"display"), "в конец той полки");
+        assert_eq!(rig.app.shelf, 0, "сама полка не переключается");
+        // На вкладку открытой полки — ничего.
+        let (from, to) = (rig.grip("sound").center(), rig.tab(0).center());
+        rig.drag(from, to);
+        assert_eq!(rig.cards(0), ["brightness", "sound", "media"]);
+    }
+
+    #[test]
+    fn drag_card_into_removed() {
+        let mut rig = Rig::editing();
+        let (from, to) = (rig.grip("sound").center(), rig.rect(egui::Id::new("removed-block")).center());
+        rig.drag(from, to);
+        assert_eq!(rig.cards(0), ["display", "brightness", "media"]);
+        assert!(rig.app.settings.is_hidden("sound"));
+    }
+
+    #[test]
+    fn cross_removes_and_chip_returns() {
+        let mut rig = Rig::editing();
+        let cross = rig.rect(egui::Id::new(("edit-close", "brightness"))).center();
+        rig.click(cross);
+        assert_eq!(rig.cards(0), ["display", "sound", "media"]);
+        assert!(rig.app.settings.is_hidden("brightness"));
+        // Чип в «Убранных»: щелчок — в конец открытой полки.
+        let block = rig.rect(egui::Id::new("removed-block"));
+        rig.click(Pos2::new(block.left() + 14.0 + 40.0, block.top() + 14.0 + 40.0));
+        assert_eq!(rig.cards(0), ["display", "sound", "media", "brightness"]);
+        assert!(!rig.app.settings.is_hidden("brightness"));
+    }
+
+    #[test]
+    fn undo_and_done() {
+        let mut rig = Rig::editing();
+        let before = rig.app.settings.clone();
+        let cross = rig.rect(egui::Id::new(("edit-close", "display"))).center();
+        rig.click(cross);
+        assert_ne!(rig.app.settings, before);
+        rig.app.undo_edit();
+        rig.settle();
+        assert_eq!(rig.app.settings, before, "«Как было» возвращает раскладку с входа");
+        assert!(rig.app.editing.is_some(), "а правка продолжается");
+        // Esc — как «Готово»: правка кончилась, раскладка осталась.
+        rig.app.settings.hide_card("tools");
+        rig.key(Key::Escape, Modifiers::NONE);
+        assert!(rig.app.editing.is_none());
+        assert!(rig.app.settings.is_hidden("tools"));
+    }
+
+    #[test]
+    fn rename_a_shelf() {
+        let mut rig = Rig::editing();
+        rig.double_click(rig.tab(1).center());
+        assert!(rig.app.renaming.is_some(), "двойной щелчок по вкладке — поле имени");
+        // Заменить всё и записать.
+        rig.key(Key::A, CTRL);
+        rig.frame(vec![Event::Text("Дом".into())]);
+        rig.key(Key::Enter, Modifiers::NONE);
+        assert!(rig.app.renaming.is_none());
+        assert_eq!(rig.app.settings.shelves[1].name, "Дом");
+        // Esc — отмена, и правка не кончается.
+        rig.double_click(rig.tab(1).center());
+        rig.frame(vec![Event::Text("Лишнее".into())]);
+        rig.key(Key::Escape, Modifiers::NONE);
+        assert!(rig.app.renaming.is_none() && rig.app.editing.is_some());
+        assert_eq!(rig.app.settings.shelves[1].name, "Дом");
+        // Пустое имя не сохраняется.
+        rig.double_click(rig.tab(1).center());
+        rig.key(Key::A, CTRL);
+        rig.key(Key::Backspace, Modifiers::NONE);
+        rig.key(Key::Enter, Modifiers::NONE);
+        assert_eq!(rig.app.settings.shelves[1].name, "Дом");
+    }
+
+    #[test]
+    fn double_click_renames_only_while_editing() {
+        let mut rig = Rig::new();
+        rig.double_click(rig.tab(1).center());
+        assert!(rig.app.renaming.is_none(), "вне правки двойной щелчок по вкладке поле имени не открывает");
+        assert_eq!(rig.app.shelf, 1, "а полку открывает, как обычный щелчок");
+        // F2 на вкладке в фокусе — тоже только в правке.
+        rig.ctx.memory_mut(|m| m.request_focus(egui::Id::new(("shelf-tab", 1))));
+        rig.settle();
+        rig.key(Key::F2, Modifiers::NONE);
+        assert!(rig.app.renaming.is_none());
+        rig.app.start_edit();
+        rig.settle();
+        rig.double_click(rig.tab(1).center());
+        assert!(rig.app.renaming.is_some(), "в правке — открывает");
+    }
+
+    #[test]
+    fn edit_keyboard_does_not_reach_modules() {
+        let ticking = |rig: &Rig| rig.app.modules.iter().any(|m| m.ticking());
+        // Контроль: вне правки Tab доводит фокус до кнопки «Таймеров» (четвёртая карточка третьей полки), Enter заводит таймер.
+        let mut rig = Rig::new();
+        rig.app.set_shelf(2);
+        rig.settle();
+        let width = (SIZE.x - 24.0 - 4.0 * GAP) / 5.0;
+        let timers = Rect::from_min_size(Pos2::new(12.0 + 3.0 * (width + GAP), BODY_TOP), Vec2::new(width, 280.0));
+        let content = Rect::from_min_max(timers.min + Vec2::new(0.0, 50.0), timers.max);
+        let mut reached = false;
+        for _ in 0..80 {
+            rig.key(Key::Tab, Modifiers::NONE);
+            if rig.focused_rect().is_some_and(|r| content.contains(r.center())) {
+                reached = true;
+                break;
+            }
+        }
+        assert!(reached, "вне правки Tab доходит до карточки «Таймеры» — иначе проверка ниже ничего не стоит");
+        rig.key(Key::Enter, Modifiers::NONE);
+        assert!(ticking(&rig), "Enter на кнопке таймера её нажимает");
+
+        // В правке содержимое карточек не отвечает: фокус ни Tab, ни Shift+Tab, ни стрелки в него не заводят, а Enter и
+        // пробел ничего не заводят.
+        let mut rig = Rig::new();
+        rig.app.set_shelf(2);
+        rig.app.start_edit();
+        rig.settle();
+        let shift = Modifiers { shift: true, ..Modifiers::NONE };
+        let keys = rig.app.settings.shelves[2].cards.clone();
+        for key in keys.iter().map(String::as_str) {
+            // С ручки назад и с крестика вперёд: фокус выходит за слой карточки, и егui ищет следующий виджет в соседнем
+            // слое — в нём лежит содержимое модуля под вуалью.
+            for (from, press) in [("edit-grip", shift), ("edit-close", Modifiers::NONE)] {
+                rig.ctx.memory_mut(|m| m.request_focus(egui::Id::new((from, key))));
+                rig.settle();
+                rig.key(Key::Tab, press);
+                // Содержимое карточек — под полосой правки; кадр от кадра ряд может сдвинуться (фокус его прокручивает).
+                if let Some(at) = rig.focused_rect() {
+                    for card in &keys {
+                        // Карточки, что ушли за край ряда, не рисуются — их слоя нет.
+                        let Some(area) = rig.ctx.read_response(egui::Id::new(("edit-drop", card.as_str()))) else {
+                            continue;
+                        };
+                        let under = Rect::from_min_max(area.rect.min + Vec2::new(0.0, EDIT_STRIP + 1.0), area.rect.max);
+                        assert!(
+                            !under.contains(at.center()),
+                            "фокус ушёл под вуаль ({from} «{key}», карточка «{card}»): {at:?}"
+                        );
+                    }
+                }
+                rig.key(Key::Space, Modifiers::NONE);
+                rig.key(Key::Enter, Modifiers::NONE);
+                assert!(!ticking(&rig), "в правке клавиша дошла до кнопки таймера ({from} «{key}»)");
+            }
+        }
+    }
+
+    #[test]
+    fn shelf_tabs_and_keys() {
+        let mut rig = Rig::new();
+        assert_eq!(rig.app.shelf, 0);
+        rig.click(rig.tab(2).center());
+        assert_eq!(rig.app.shelf, 2);
+        rig.key(Key::Num1, CTRL);
+        assert_eq!(rig.app.shelf, 0);
+        rig.key(Key::Tab, CTRL);
+        assert_eq!(rig.app.shelf, 1);
+        rig.key(Key::Tab, Modifiers { shift: true, ..CTRL });
+        assert_eq!(rig.app.shelf, 0);
+        rig.key(Key::Tab, Modifiers { shift: true, ..CTRL });
+        assert_eq!(rig.app.shelf, 2, "по кругу");
+        rig.key(Key::Num9, CTRL);
+        assert_eq!(rig.app.shelf, 2, "нет такой полки — остаётся");
+    }
+
+    #[test]
+    fn grip_keyboard() {
+        let mut rig = Rig::editing();
+        let id = egui::Id::new(("edit-grip", "brightness"));
+        rig.ctx.memory_mut(|m| m.request_focus(id));
+        rig.settle();
+        rig.key(Key::ArrowRight, ALT);
+        assert_eq!(rig.cards(0), ["display", "sound", "brightness", "media"]);
+        rig.key(Key::ArrowLeft, ALT);
+        rig.key(Key::ArrowLeft, ALT);
+        assert_eq!(rig.cards(0), ["brightness", "display", "sound", "media"]);
+        rig.key(Key::ArrowLeft, ALT);
+        assert_eq!(rig.cards(0), ["brightness", "display", "sound", "media"], "левее некуда");
+        rig.key(Key::Num2, ALT);
+        assert_eq!(rig.cards(1).last(), Some(&"brightness"), "Alt + 2 — на вторую полку");
+        assert!(!rig.cards(0).contains(&"brightness"));
+        // Фокус остался на ручке (её `Id` по ключу), но карточки уже нет на открытой полке — берём «Экран».
+        let id = egui::Id::new(("edit-grip", "display"));
+        rig.ctx.memory_mut(|m| m.request_focus(id));
+        rig.settle();
+        rig.key(Key::Delete, Modifiers::NONE);
+        assert!(rig.app.settings.is_hidden("display"));
+    }
+
+    #[test]
+    fn remove_a_shelf_by_its_cross() {
+        let mut rig = Rig::editing();
+        rig.app.set_shelf(2);
+        rig.settle();
+        let before = rig.app.settings.shelves[2].cards.clone();
+        rig.click(rig.rect(egui::Id::new(("shelf-close", 2))).center());
+        assert_eq!(rig.app.settings.shelves.len(), 2);
+        for card in &before {
+            assert!(rig.app.settings.is_hidden(card), "{card} ушла в «Убранные»");
+        }
+        assert_eq!(rig.app.shelf, 1, "открытой стала соседняя");
+        // Единственную полку убрать нельзя: крестика нет.
+        rig.app.settings.remove_shelf(1);
+        rig.settle();
+        assert!(rig.ctx.read_response(egui::Id::new(("shelf-close", 0))).is_none());
+    }
+
+    #[test]
+    fn empty_shelf_offers_editing() {
+        let mut rig = Rig::new();
+        rig.app.settings.shelves.push(config::Shelf { name: "Пусто".into(), cards: Vec::new() });
+        rig.app.set_shelf(3);
+        rig.settle();
+        assert!(rig.app.editing.is_none());
+        assert!(rig.app.shelf_modules(3).is_empty());
+    }
 }

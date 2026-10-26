@@ -1,7 +1,7 @@
-// Быстрые настройки: плитки «включить / выключить» системного (как быстрые настройки Windows),
-// план питания и VPN Windows. Плитка — состояние, прочитанное при показе панели, и щелчок — поменять.
-// Не узнали состояние — плитка «Недоступно» и не нажимается. Wi‑Fi и VPN отвечают медленно — их
-// читает и меняет поток модуля.
+// Быстрые настройки: четыре плитки «включить / выключить» системного (как быстрые настройки Windows) —
+// «Не спать», «Тёмная тема», «Тишина», «Wi‑Fi», — план питания и VPN Windows. Плитка — состояние, прочитанное
+// при показе панели, и щелчок — поменять. Не узнали состояние — плитка «Недоступно» и не нажимается. Wi‑Fi и VPN
+// отвечают медленно — их читает и меняет поток модуля. Ночной свет — выключателем в карточке «Яркость».
 
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -12,7 +12,7 @@ use eframe::egui::{self, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 
 use super::{Ctx, Module, chips};
 use crate::sys::net::{self, Vpn, Wifi};
-use crate::sys::{nightlight, system};
+use crate::sys::system;
 use crate::texts::Tr;
 
 enum Job {
@@ -31,8 +31,6 @@ struct Shared {
 }
 
 pub struct Quick {
-    /// Ночной свет: включён ли; `None` — не узнать.
-    night: Option<bool>,
     /// «Не спать» — только пока работает программа.
     awake: bool,
     dark: Option<bool>,
@@ -49,7 +47,7 @@ impl Default for Quick {
         let shared = Arc::new(Mutex::new(Shared::default()));
         let s = shared.clone();
         std::thread::spawn(move || worker(rx, s));
-        Quick { night: None, awake: false, dark: None, quiet: None, plans: Vec::new(), plan: None, jobs: tx, shared }
+        Quick { awake: false, dark: None, quiet: None, plans: Vec::new(), plan: None, jobs: tx, shared }
     }
 }
 
@@ -82,11 +80,12 @@ fn worker(rx: Receiver<Job>, shared: Arc<Mutex<Shared>>) {
     }
 }
 
-/// Плитка 2 строки: значок и название, ниже состояние. Включена — подложка акцента.
-/// `state` — `None`: недоступно (не нажимается). Ответ — щелчок.
-pub fn tile(ui: &mut Ui, icon: Icon, label: &str, state: Option<bool>, t: &Tr) -> bool {
+/// Плитка 2 строки: значок и состояние сверху, ниже название. Включена — подложка акцента.
+/// `state` — `None`: недоступно (не нажимается). `on_text` — что написать вместо «Вкл», пока плитка включена
+/// (имя сети, «без всплывающих»); длинное обрезается многоточием, целиком — в подсказке плитки. Ответ — щелчок.
+pub fn tile(ui: &mut Ui, icon: Icon, label: &str, state: Option<bool>, on_text: Option<&str>, t: &Tr) -> bool {
     let p = Palette::of(ui);
-    let size = Vec2::new(ui.available_width(), 54.0);
+    let size = Vec2::new(ui.available_width(), 48.0);
     let sense = if state.is_some() { Sense::click() } else { Sense::hover() };
     let (rect, r) = ui.allocate_exact_size(size, sense);
     let on = state == Some(true);
@@ -101,28 +100,30 @@ pub fn tile(ui: &mut Ui, icon: Icon, label: &str, state: Option<bool>, t: &Tr) -
     let stroke = if on { p.accent } else { p.border };
     ui.painter().rect(rect, 8, fill, Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
     let (fg, sub) = match state {
-        Some(true) => (p.accent_text, t.on),
+        Some(true) => (p.accent_text, on_text.unwrap_or(t.on)),
         Some(false) => (p.text, t.off),
         None => (p.faint, t.unavailable),
     };
     // Сверху значок и состояние, снизу название во всю ширину.
-    let ic = Rect::from_min_size(rect.min + Vec2::new(10.0, 9.0), Vec2::splat(16.0));
+    let ic = Rect::from_min_size(rect.min + Vec2::new(10.0, 7.0), Vec2::splat(16.0));
     anvil_ui::icons::paint(ui.painter(), ic, icon, fg);
     let sub_color = if on { p.accent_text } else { p.weak };
-    ui.painter().text(
-        Pos2::new(rect.right() - 10.0, ic.center().y),
-        egui::Align2::RIGHT_CENTER,
-        sub,
-        egui::FontId::proportional(12.0),
-        sub_color,
-    );
+    let mut sub_job =
+        egui::text::LayoutJob::simple_singleline(sub.to_owned(), egui::FontId::proportional(12.0), sub_color);
+    sub_job.wrap = egui::text::TextWrapping::truncate_at_width((rect.width() - 10.0 - 16.0 - 8.0 - 10.0).max(20.0));
+    let sub_galley = ui.painter().layout_job(sub_job);
+    let sub_at = Pos2::new(rect.right() - 10.0 - sub_galley.size().x, ic.center().y - sub_galley.size().y / 2.0);
+    ui.painter().galley(sub_at, sub_galley, sub_color);
     let mut job = egui::text::LayoutJob::simple_singleline(label.to_owned(), anvil_ui::semibold(13.0), fg);
     job.wrap = egui::text::TextWrapping::truncate_at_width(rect.width() - 20.0);
     let galley = ui.painter().layout_job(job);
-    ui.painter().galley(Pos2::new(rect.left() + 10.0, rect.bottom() - 9.0 - galley.size().y), galley, fg);
+    ui.painter().galley(Pos2::new(rect.left() + 10.0, rect.bottom() - 7.0 - galley.size().y), galley, fg);
     w::focus_ring(ui, rect, &r, 8);
     r.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, state.is_some(), on, label));
-    let r = if state.is_some() { r.on_hover_cursor(egui::CursorIcon::PointingHand) } else { r };
+    let mut r = if state.is_some() { r.on_hover_cursor(egui::CursorIcon::PointingHand) } else { r };
+    if on && on_text.is_some() {
+        r = r.on_hover_text(sub);
+    }
     r.clicked()
 }
 
@@ -136,11 +137,10 @@ impl Module for Quick {
     }
 
     fn min_width(&self) -> f32 {
-        260.0
+        240.0
     }
 
     fn refresh(&mut self, _monitor: &str) {
-        self.night = nightlight::state();
         self.dark = system::dark_theme();
         self.quiet = system::notifications_off();
         (self.plans, self.plan) = system::plans();
@@ -157,18 +157,15 @@ impl Module for Quick {
             cx.toasts.push((format!("{}: {e}", t.failed), Tone::Danger));
         }
         let wifi_state = wifi.clone().flatten();
-        let wifi_label = match &wifi_state {
-            Some(wf) if !wf.network.is_empty() => format!("Wi‑Fi · {}", wf.network),
-            _ => "Wi‑Fi".to_string(),
-        };
+        // Название плитки одно — «Wi‑Fi»; сеть, через которую выход в интернет, — в строке состояния.
+        let network = wifi_state.as_ref().filter(|wf| wf.on && !wf.network.is_empty()).map(|wf| wf.network.as_str());
         egui::ScrollArea::vertical().id_salt("quick").auto_shrink([false, false]).show(ui, |ui| {
-            // Плитки по две в ряд.
-            let tiles: [(Icon, &str, Option<bool>); 5] = [
-                (Icon::Moon, t.night_light, self.night),
-                (Icon::Sun, t.keep_awake, Some(self.awake)),
-                (Icon::Image, t.dark_theme_win, self.dark),
-                (Icon::Pause, t.quiet, self.quiet),
-                (Icon::Broadcast, wifi_label.as_str(), wifi_state.as_ref().map(|wf| wf.on)),
+            // Четыре плитки по две в ряд.
+            let tiles: [(Icon, &str, Option<bool>, Option<&str>); 4] = [
+                (Icon::Sun, t.keep_awake, Some(self.awake), None),
+                (Icon::Image, t.dark_theme_win, self.dark, None),
+                (Icon::Pause, t.quiet, self.quiet, Some(t.quiet_on)),
+                (Icon::Broadcast, "Wi‑Fi", wifi_state.as_ref().map(|wf| wf.on), network),
             ];
             let gap = 6.0;
             let half = ((ui.available_width() - gap) / 2.0).floor();
@@ -176,9 +173,9 @@ impl Module for Quick {
             for (r, row) in tiles.chunks(2).enumerate() {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = gap;
-                    for (c, (icon, label, state)) in row.iter().enumerate() {
-                        ui.allocate_ui(Vec2::new(half, 54.0), |ui| {
-                            if tile(ui, *icon, label, *state, t) {
+                    for (c, (icon, label, state, on_text)) in row.iter().enumerate() {
+                        ui.allocate_ui(Vec2::new(half, 48.0), |ui| {
+                            if tile(ui, *icon, label, *state, *on_text, t) {
                                 clicked = Some(r * 2 + c);
                             }
                         });
@@ -231,8 +228,7 @@ impl Quick {
     fn toggle(&mut self, i: usize, wifi: Option<&Wifi>, cx: &mut Ctx) {
         let t = cx.t;
         let result = match i {
-            0 => self.night.map(|on| nightlight::set(!on).map(|()| self.night = Some(!on))),
-            1 => {
+            0 => {
                 let on = !self.awake;
                 Some(if system::keep_awake(on) {
                     self.awake = on;
@@ -241,9 +237,9 @@ impl Quick {
                     Err("SetThreadExecutionState failed".to_string())
                 })
             }
-            2 => self.dark.map(|on| system::set_dark_theme(!on).map(|()| self.dark = Some(!on))),
-            3 => self.quiet.map(|on| system::set_notifications_off(!on).map(|()| self.quiet = Some(!on))),
-            4 => wifi.map(|wf| {
+            1 => self.dark.map(|on| system::set_dark_theme(!on).map(|()| self.dark = Some(!on))),
+            2 => self.quiet.map(|on| system::set_notifications_off(!on).map(|()| self.quiet = Some(!on))),
+            3 => wifi.map(|wf| {
                 let _ = self.jobs.send(Job::Wifi(!wf.on));
                 Ok(())
             }),
