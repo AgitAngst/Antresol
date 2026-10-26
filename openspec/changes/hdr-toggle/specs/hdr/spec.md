@@ -13,6 +13,14 @@ show the toggle disabled with the reason. A change made outside the panel SHALL 
 - **WHEN** монитор панели HDR не поддерживает
 - **THEN** кнопки «HDR» в плашке нет
 
+#### Scenario: Windows не даёт включить
+- **WHEN** монитор поддерживает HDR, но Windows сейчас не даёт его включить
+- **THEN** кнопка «HDR» недоступна, в подсказке причина
+
+#### Scenario: HDR включили снаружи
+- **WHEN** HDR монитора включили Win+Alt+B или в «Параметрах», а панель открыта
+- **THEN** при ближайшем чтении (раз в 1,5 с) кнопка показывает «HDR Вкл»
+
 ### Requirement: HDR в профилях экрана
 A saved display profile SHALL remember HDR of every monitor that supports it and applying the profile MUST set it;
 profiles saved before this change MUST leave HDR untouched.
@@ -20,6 +28,10 @@ profiles saved before this change MUST leave HDR untouched.
 #### Scenario: Профиль «Кино»
 - **WHEN** «Кино» сохранён с включённым HDR, а сейчас HDR выключен
 - **THEN** щелчок по «Кино» ставит режим и включает HDR; «Вернуть» в «Оставить этот режим?» возвращает и HDR
+
+#### Scenario: Профиль до 2.0
+- **WHEN** профиль сохранён до этого изменения (в строке `profile=` нет слов `hdr` / `sdr`)
+- **THEN** его применение и откат HDR не трогают
 
 ### Requirement: HDR в демо и тестах
 In demo mode and tests the HDR toggle SHALL work on the invented monitor only and MUST NOT write to Windows.

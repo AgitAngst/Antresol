@@ -137,6 +137,28 @@ VPN Windows. Не вошло: VPN-программы со своим клиен�
 Версия 1.9.0: 1.8.0 занята изменением `kamerton-sound-2` (карточка «Звук»). Не вошло: идеи «второго круга» (сцены,
 поиск действий, живые плашки и др.) — отдельными этапами, по одной.
 
+## Этап 2.0 — HDR одним щелчком (сделан 26.10.2026, решение владельца)
+
+Владелец 26.10.2026: идеи «второго круга» со звёздочкой — по одной после «Проще»; первой — HDR. Макет — холст «Antresol —
+новый вид», страница «Идеи ★ — 26.10». Изменение OpenSpec `hdr-toggle`.
+
+- **Кнопка «HDR».** Справа в плашке текущего режима «Экрана»: «HDR Вкл» / «HDR Выкл». Щелчок включает или выключает HDR
+  одного монитора — не всех сразу, как Win+Alt+B (его бывает перехватывает Game Bar), — и без «Оставить?»: тот же щелчок
+  возвращает назад. Монитору без HDR кнопки нет; Windows сейчас не даёт включить — кнопка серая, в подсказке причина.
+  Состояние читается вместе с режимом (раз в 1,5 с), поэтому включённое снаружи видно сразу.
+- **Профили экрана помнят HDR.** «+» записывает HDR мониторов, которые его умеют; профиль ставит его после режима и
+  масштаба, а «Вернуть» в «Оставить этот режим?» возвращает и его. В `profile=` — слова `hdr` / `sdr` после масштаба;
+  профили до 2.0 HDR не трогают.
+- **Система.** `DisplayConfigGetDeviceInfo` / `DisplayConfigSetDeviceInfo` (`GET_ADVANCED_COLOR_INFO`,
+  `SET_ADVANCED_COLOR_STATE`) у цели монитора. Выдуманный монитор демо и тестов — с HDR, писатель за заслоном
+  (`sys::blocked`): в Windows ничего не пишется.
+- **Вид.** Наименьшая ширина «Экрана» с HDR — 480 (при выборе монитора шире, но не больше 560): плашке режима нужно место
+  под кнопку; без HDR — 420, как было.
+
+Версия 2.0.0: после 1.9.x вторая цифра даёт 2.0.0. Не вошло: HDR на всех мониторах одной кнопкой, сцены (следующий этап),
+поиск действий. Windows 11 24H2 дополнила API новыми типами (`GET_ADVANCED_COLOR_INFO_2`, `SET_HDR_STATE`); взяты старые —
+они работают и там; на настоящем мониторе владельца не проверено.
+
 ## Кандидаты этапов — по аналогам (22.10.2026, не согласованы, порядок решит владелец)
 
 Собраны по программам, которые обсуждают в r/software и r/Windows11 (сам Reddit прочитать не удалось —
@@ -188,7 +210,7 @@ VPN Windows. Не вошло: VPN-программы со своим клиен�
 | ★ | Живые плашки у края | Короткое событие без выезда панели: наушники подключились (заряд), флешка вставлена («Извлечь»), сборка упала, загрузка готова, мышь разряжается. Механизм — как у плашки таймера | средне | [DynamicWin](https://github.com/FlorianButz/DynamicWin), [boring.notch](https://github.com/TheBoredTeam/boring.notch) |
 | ★ | Встречи | Ближайшая встреча из календаря по ссылке .ics (Google, Outlook — без учётной записи Windows) и «Подключиться» к Zoom, Meet, Teams; плашка за пару минут | средне | [MeetingBar](https://github.com/leits/meetingbar), [DynamicWin](https://github.com/FlorianButz/DynamicWin) |
 | ★ | Микрофон «без звука» | Для всех программ сразу, с клавишей и красной меткой у края, пока выключен; через Kamerton | средне | [SoundSwitch](https://github.com/Belphemur/SoundSwitch), [MicKey](https://www.ghacks.net/2021/04/27/mute-your-microphone-with-a-hotkey-using-mickey/), [Easymic](https://github.com/k1tbyte/easymic) |
-| ★ | HDR одним щелчком | На каждый монитор отдельно (Win+Alt+B переключает все сразу и бывает занят Game Bar); входит в сцены | просто | [HDRTray](https://www.warp2search.net/story/hdrtray-053/), [HDR Toggle](https://www.raycast.com/abdullah_shabib/hdr-toggle) |
+| ✓ 2.0 (в сцены войдёт вместе с ними) | HDR одним щелчком | На каждый монитор отдельно (Win+Alt+B переключает все сразу и бывает занят Game Bar); входит в сцены | просто | [HDRTray](https://www.warp2search.net/story/hdrtray-053/), [HDR Toggle](https://www.raycast.com/abdullah_shabib/hdr-toggle) |
 | ★ | Наушники одним щелчком | Подключить или отключить сопряжённое устройство из карточки «Bluetooth» (отложено в 0.9) | сложно | [ToothTray](https://github.com/m2jean/ToothTray) |
 | ★ | Буфер: картинки и фильтр | Картинки, ссылки, цвета пипетки в истории (отложено в 0.8); «Исправить раскладку» («ghbdtn» → «привет»), «Без форматирования» | средне | [Raycast](https://en.wikipedia.org/wiki/Raycast_(software)), [Notchify](https://www.windowscentral.com/software-apps/want-your-pc-to-be-a-bit-more-like-a-mac-the-dynamic-island-for-windows-just-got-a-big-update) |
 | | Вывод звука чипами | «Динамики / Наушники» в карточке «Звук» одним щелчком; через Kamerton | просто | [SoundSwitch](https://github.com/Belphemur/SoundSwitch), [boring.notch](https://newreleases.io/project/github/TheBoredTeam/boring.notch/release/v2.8-rc.0) |
