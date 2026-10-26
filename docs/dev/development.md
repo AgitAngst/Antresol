@@ -18,7 +18,8 @@ python E:/dev_personal/tools/checks.py --repo . -j 4 fmt test clippy
 переименование, вуаль над модулями (мышь, колесо, клавиатура), ряд в правке и «Ещё N ›», шапка на узких панелях
 (`app.rs`, модуль `tests`), заслон писателей в Windows, выдуманный экран и откат «Оставить?» без окна (`sys/mod.rs`,
 `sys/display.rs`, `modules/display.rs`), HDR: биты ответа Windows, отказы, выдуманный монитор (`sys/display.rs`), кнопка,
-профили с HDR и их откат (`modules/display.rs`), слова `hdr` / `sdr` в `profile=` (`config.rs`),
+профили с HDR и их откат, ширина карточки (`modules/display.rs`), щелчок по кнопке «HDR» без окна, в том числе под вуалью
+правки (`app.rs`), слова `hdr` / `sdr` в `profile=` (`config.rs`),
 адреса Bluetooth и настоящий опрос (`sys/bt.rs`),
 таймеры и «помидор» (`modules/timers.rs`), разбор ответов GitHub и время (`sys/gh.rs`,
 `modules/github.rs`). Сеть — отдельно: `cargo test -- --ignored` читает открытый репозиторий панели.

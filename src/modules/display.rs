@@ -22,6 +22,11 @@ use crate::texts::{self, Tr};
 
 const REVERT_AFTER: Duration = Duration::from_secs(15);
 
+/// `Id` кнопки «HDR» в плашке режима: «Экран» на панели один, так что хватает одного.
+pub fn hdr_button_id() -> egui::Id {
+    egui::Id::new("hdr-toggle")
+}
+
 /// Что вернуть при откате: прежний режим, масштаб и (или) HDR монитора.
 struct Change {
     device: String,
@@ -542,8 +547,9 @@ impl Display {
         } else {
             return None;
         };
-        let sense = if usable { Sense::click() } else { Sense::hover() };
-        let (rect, r) = ui.allocate_exact_size(Vec2::new(width, 30.0), sense);
+        // Свой `Id` — чтобы тест без окна находил кнопку.
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 30.0), Sense::hover());
+        let r = ui.interact(rect, hdr_button_id(), if usable { Sense::click() } else { Sense::hover() });
         let fill = if hdr.enabled {
             p.badge_fill(p.accent)
         } else if usable && r.hovered() {
@@ -914,6 +920,23 @@ mod tests {
         display.pending = Some(Pending { changes: Vec::new(), at: late });
         display.background(&settings);
         assert!(display.pending.is_none(), "без ответа 15 с — откат, хотя карточка не рисуется (другая полка)");
+    }
+
+    #[test]
+    fn card_is_wider_only_when_a_monitor_has_hdr() {
+        let mut display = Display::default();
+        assert_eq!(display.min_width(), 420.0, "пока ничего не прочитано — как было");
+        let state = |hdr| State { device: "A".into(), mode: m(1920, 1080, 60), scale: None, hdr };
+        display.states = vec![state(None)];
+        assert_eq!(display.min_width(), 420.0, "HDR нет ни у одного монитора — как было");
+        display.states = vec![state(Some(false))];
+        assert_eq!(display.min_width(), 480.0, "кнопке «HDR» нужно место рядом с режимом");
+        let rect = monitor::PxRect { left: 0, top: 0, right: 1, bottom: 1 };
+        let mon = |device: &str| monitor::Monitor { device: device.into(), rect, primary: false, handle: 0 };
+        display.monitors = vec![mon("A"), mon("B")];
+        assert!(display.min_width() > 480.0, "и выбору монитора");
+        display.monitors = (0..9).map(|i| mon(&i.to_string())).collect();
+        assert_eq!(display.min_width(), 560.0, "но не шире 560: «Экран и звук» влезает в 1300");
     }
 
     #[test]

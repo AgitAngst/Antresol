@@ -3111,6 +3111,44 @@ mod tests {
     }
 
     #[test]
+    fn hdr_button_flips_the_invented_hdr_and_the_veil_blocks_it() {
+        let dev = r"\\.\TEST-HDR-BUTTON";
+        let hdr_on = || sys::display::hdr(dev).map(|h| h.enabled);
+        let rect = monitor::PxRect { left: 0, top: 0, right: 1920, bottom: 1080 };
+        let setup = |mut rig: Rig| {
+            rig.app.monitors = vec![monitor::Monitor { device: dev.into(), rect, primary: true, handle: 0 }];
+            rig.app.settings.monitor = dev.into();
+            // «Экран» опрашивает `update`, а тест гоняет только рисование: опрашиваем сами.
+            rig.app.modules.iter_mut().find(|m| m.key() == "display").unwrap().refresh(dev);
+            rig.settle();
+            rig
+        };
+        let mut rig = setup(Rig::new());
+        let button = rig.rect(modules::display::hdr_button_id());
+        assert_eq!(button.height(), 30.0);
+        assert_eq!(hdr_on(), Some(false), "выдуманный монитор стартует с выключенным HDR");
+        rig.click(button.center());
+        assert_eq!(hdr_on(), Some(true), "щелчок по кнопке включил HDR выдуманного монитора");
+        rig.click(button.center());
+        assert_eq!(hdr_on(), Some(false), "и выключил");
+        // В правке содержимое карточки отключено: щелчок до кнопки не доходит (панель пошире: в правке карточки уже, и
+        // на 1300 кнопке не хватило бы места).
+        let mut rig = setup(Rig::sized(1800.0));
+        rig.click(rig.rect(modules::display::hdr_button_id()).center());
+        assert_eq!(
+            hdr_on(),
+            Some(true),
+            "вне правки и на широкой панели кнопка работает — иначе проверка ниже ничего не стоит"
+        );
+        rig.click(rig.rect(modules::display::hdr_button_id()).center());
+        assert_eq!(hdr_on(), Some(false));
+        rig.app.start_edit();
+        rig.settle();
+        rig.click(rig.rect(modules::display::hdr_button_id()).center());
+        assert_eq!(hdr_on(), Some(false), "в правке щелчок до кнопки не дошёл");
+    }
+
+    #[test]
     fn closing_the_app_reverts_an_unanswered_mode() {
         let dev = r"\\.\TEST-CLOSE";
         let mut rig = Rig::new();
