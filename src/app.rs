@@ -2328,6 +2328,21 @@ impl App {
         };
         let title = texts::scene_quoted(lang, &shown);
         let problem = self.scene_problem();
+        // Справа — «Удалить сцену», черта и «Готово», слева — «‹ Сцены» и «/»: их ширина известна заранее, а имени в заголовке
+        // остаётся остальное — длинное обрезается многоточием, полное — в подсказке.
+        let width =
+            |text: &str, font: egui::FontId| ui.painter().layout_no_wrap(text.to_owned(), font, p.text).size().x;
+        let button = |text: &str, font: egui::FontId| 12.0 + 16.0 + 7.0 + width(text, font) + 12.0;
+        let sides = 2.0
+            + button(t.scenes, egui::FontId::proportional(14.0))
+            + 8.0 * 3.0
+            + width("/", egui::FontId::proportional(14.0))
+            + button(t.scene_delete, egui::FontId::proportional(14.0))
+            + 8.0 * 2.0
+            + 1.0
+            + button(t.done, anvil_ui::semibold(14.0));
+        let room = (ui.available_width() - sides - 16.0).max(40.0);
+        let cut = width(&title, anvil_ui::semibold(14.5)) > room;
         let (mut leave, mut ask_delete) = (false, false);
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
@@ -2336,7 +2351,12 @@ impl App {
             anchor(ui, back.rect, "scene-back");
             leave |= back.clicked();
             ui.label(egui::RichText::new("/").color(p.weak));
-            ui.label(egui::RichText::new(title).font(anvil_ui::semibold(14.5)).color(p.text));
+            let mut job = egui::text::LayoutJob::simple_singleline(title.clone(), anvil_ui::semibold(14.5), p.text);
+            job.wrap = egui::text::TextWrapping::truncate_at_width(room);
+            let name = ui.label(job);
+            if cut {
+                name.on_hover_text(&title);
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 let done =
@@ -2363,9 +2383,10 @@ impl App {
         }
     }
 
-    /// Правка сцены — вместо карточек: три карточки; уже 1000 точек — листаются вбок, а не сжимаются.
+    /// Правка сцены — вместо карточек: три карточки; уже 1270 точек (хватает панели 1300 по умолчанию) — листаются вбок, а
+    /// не сжимаются: подписи и значения строк иначе обрезались бы.
     fn scene_view(&mut self, ui: &mut Ui) {
-        const MIN: f32 = 1000.0;
+        const MIN: f32 = 1270.0;
         let area = ui.available_rect_before_wrap();
         if area.width() >= MIN {
             self.scene_columns(ui, area);
@@ -2460,13 +2481,14 @@ impl App {
             }
         }
 
-        // Три карточки по долям 2,2 : 1 : 1,3 (в макете 2,3 : 1 : 1,15 — третья на 1300 узка: подпись выключателя
-        // «Повторный щелчок — вернуть как было» в одну строку не влезает), зазор 10.
-        let unit = (body.width() - 20.0) / 4.5;
-        let card1 = Rect::from_min_size(body.min, Vec2::new(unit * 2.2, body.height()));
+        // Три карточки по долям 2,45 : 1 : 1,32, зазор 10. В макете 2,3 : 1 : 1,15, но на 1300 так узка и первая («Display»
+        // в английской подписи сжимается до «Displ…» рядом со значением экрана), и третья (подпись выключателя «Повторный
+        // щелчок — вернуть как было» в одну строку не влезает).
+        let unit = (body.width() - 20.0) / 4.77;
+        let card1 = Rect::from_min_size(body.min, Vec2::new(unit * 2.45, body.height()));
         let card2 = Rect::from_min_size(Pos2::new(card1.right() + 10.0, body.top()), Vec2::new(unit, body.height()));
         let card3 =
-            Rect::from_min_size(Pos2::new(card2.right() + 10.0, body.top()), Vec2::new(unit * 1.3, body.height()));
+            Rect::from_min_size(Pos2::new(card2.right() + 10.0, body.top()), Vec2::new(unit * 1.32, body.height()));
         let rows_state: Vec<(SceneRow, bool)> = self.modules.iter().flat_map(|m| m.scene_rows()).collect();
         let (mut toggle, mut take) = (None, false);
         let before = self.settings.clone();
@@ -2504,7 +2526,9 @@ impl App {
                                     } else if available {
                                         (t.scene_untouched.to_string(), String::new())
                                     } else {
-                                        (t.unavailable.to_string(), t.unavailable.to_string())
+                                        // Недоступно в системе: в подсказке причина (у яркости — про DDC/CI).
+                                        let why = if row == SceneRow::Bright { t.ddc_none } else { t.unavailable };
+                                        (t.unavailable.to_string(), why.to_string())
                                     };
                                     let id = egui::Id::new(("scene-row", col * 4 + k));
                                     let r =
@@ -4348,6 +4372,66 @@ mod tests {
     }
 
     #[test]
+    fn the_movie_scene_sets_the_screen_hdr_quiet_and_awake_and_nothing_else() {
+        let _world = world();
+        let dev = r"\\.\TEST-SCENE-SPEC";
+        let screen = config::ProfileMonitor {
+            device: dev.into(),
+            width: 3840,
+            height: 2160,
+            hz: 60,
+            scale: None,
+            hdr: Some(true),
+        };
+        let system = config::SceneSystem { quiet: Some(true), awake: Some(true), ..Default::default() };
+        let mut rig = scene_rig(dev, vec![Profile { monitors: vec![screen], system, ..Profile::new("Movie") }]);
+        let start = sys::display::current(dev).unwrap();
+        assert_eq!(sys::display::hdr(dev).map(|h| h.enabled), Some(false));
+        rig.click_anchor("scene-chip-0");
+        // Режим — с «Оставить этот режим?», HDR, «Тишина» и «Не спать» включены (чип выделен: «Не спать» стоит тоже).
+        assert!(rig.app.modules.iter().any(|m| m.busy()));
+        assert_eq!(sys::display::current(dev).map(|m| (m.width, m.height, m.hz)), Some((3840, 2160, 60)));
+        assert_eq!(sys::display::hdr(dev).map(|h| h.enabled), Some(true));
+        assert_eq!(sys::system::notifications_off(), Some(true));
+        assert_eq!(rig.app.active_scene(), Some(0));
+        // Остальное не тронуто: тема, план питания, Wi‑Fi, ночной свет.
+        assert_eq!(sys::system::dark_theme(), Some(true));
+        assert_eq!(sys::system::plans().1, Some(windows::core::GUID::from_u128(1)));
+        assert_eq!((sys::net::wifi().map(|w| w.on), sys::nightlight::state()), (Some(true), Some(false)));
+        // Снова «Кино» — всё как до неё, в том числе HDR и режим.
+        let before = Instant::now();
+        rig.click_anchor("scene-chip-0");
+        assert_eq!(sys::display::current(dev), Some(start));
+        assert_eq!(sys::display::hdr(dev).map(|h| h.enabled), Some(false));
+        assert_eq!(sys::system::notifications_off(), Some(false));
+        assert_eq!(rig.app.active_scene(), None);
+        assert_eq!(
+            rig.app.toasts.since(before),
+            vec![(texts::tr(rig.app.lang()).scene_undone.to_string(), Tone::Neutral)]
+        );
+    }
+
+    #[test]
+    fn a_profile_saved_before_scenes_changes_the_screen_only() {
+        let _world = world();
+        let dev = r"\\.\TEST-SCENE-OLD-LINE";
+        let line = format!("profile=Old | | {dev} 2560x1440@144 125%\n");
+        let scenes = config::parse(&line).profiles;
+        assert!(scenes[0].system.is_empty() && scenes[0].undo);
+        let mut rig = scene_rig(dev, scenes);
+        let start = sys::display::current(dev).unwrap();
+        rig.click_anchor("scene-chip-0");
+        assert_eq!(sys::display::current(dev).map(|m| (m.width, m.hz)), Some((2560, 144)));
+        assert_eq!(sys::display::scale(dev).map(|s| s.current), Some(125));
+        // Система — как была: тема, «Тишина», план, Wi‑Fi, ночной свет.
+        assert_eq!((sys::system::dark_theme(), sys::system::notifications_off()), (Some(true), Some(false)));
+        assert_eq!((sys::net::wifi().map(|w| w.on), sys::nightlight::state()), (Some(true), Some(false)));
+        // Второй щелчок возвращает экран (профили до 2.1 так не умели; у сцены возврат включён по умолчанию).
+        rig.click_anchor("scene-chip-0");
+        assert_eq!(sys::display::current(dev), Some(start));
+    }
+
+    #[test]
     fn the_key_sets_and_returns_the_scene_and_brings_the_panel_out() {
         let _world = world();
         let _keys = sys::KEYS_TEST.lock().unwrap_or_else(|e| e.into_inner());
@@ -4489,12 +4573,25 @@ mod tests {
             assert_eq!(s.has(row), row == SceneRow::Screen, "{row:?}");
         }
         assert_eq!((s.monitors[0].width, s.monitors[0].height, s.monitors[0].hz), (3840, 2160, 120));
-        // Фокус в поле имени и имя выделено: печатаем — заменяет.
+        // Отметить «Тишину» (строка 3), назвать сцену: фокус в поле имени и имя выделено — печатаем, и оно заменяется.
+        rig.click(rig.scene_row(3).center());
+        rig.click(rig.rect(egui::Id::new("scene-name")).center());
+        rig.key(Key::A, CTRL);
         rig.type_text("Report");
         assert_eq!(rig.app.settings.profiles[i].name, "Report");
         rig.click_anchor("scene-done");
         assert!(rig.app.view == View::Cards && rig.app.settings.profiles.len() == 3);
         rig.anchor("scene-chip-2");
+        let made = rig.app.settings.profiles[2].clone();
+        assert!(made.has(SceneRow::Screen) && made.system.quiet == Some(false) && !made.has(SceneRow::Awake));
+        // Чип нового экрана-и-«Тишины» ставит и то и другое.
+        rig.app.settings.profiles[2].system.quiet = Some(true);
+        rig.app.settings.profiles[2].monitors[0].hz = 60;
+        rig.click_anchor("scene-chip-2");
+        assert_eq!(sys::system::notifications_off(), Some(true));
+        assert_eq!(sys::display::current(dev).map(|m| m.hz), Some(60));
+        rig.app.scene_click(2, dev);
+        assert_eq!(sys::system::notifications_off(), Some(false), "второй щелчок вернул");
         // Новая сцена без отмеченных строк или без имени — уходит, как не было.
         rig.click_anchor("scene-new");
         let i = rig.app.scene.as_ref().unwrap().index;
@@ -4628,6 +4725,8 @@ mod tests {
         first.hotkey = Hotkey::parse("Ctrl+Alt+1");
         let mut rig =
             scene_rig(dev, vec![first, only("Work", config::SceneSystem { dark: Some(false), ..Default::default() })]);
+        let _keys = sys::KEYS_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        rig.app.profile_keys(&rig.ctx, dev, Instant::now());
         rig.open_editor(0);
         assert!(rig.ctx.read_response(egui::Id::new(("anchor", "scene-delete-yes"))).is_none(), "вопроса пока нет");
         rig.click_anchor("scene-delete");
@@ -4647,6 +4746,11 @@ mod tests {
         assert!(rig.app.settings.profiles.iter().all(|p| p.hotkey.is_none()));
         assert!(rig.ctx.read_response(egui::Id::new(("anchor", "scene-chip-1"))).is_none());
         rig.anchor("scene-chip-0");
+        // Клавиша освобождена: набор клавиш сцен окно пересобирает без неё.
+        assert_eq!(rig.app.sent_keys, Some(vec![Some("Ctrl+Alt+1".to_string()), None]), "до удаления");
+        rig.app.profile_keys(&rig.ctx, dev, Instant::now());
+        assert_eq!(rig.app.sent_keys, Some(vec![None]));
+        assert_eq!(sys::profile_hotkey_status(0), None);
     }
 
     #[test]
@@ -4701,6 +4805,27 @@ mod tests {
             rig.anchor("scene-delete-yes");
             let done = rig.anchor("scene-done");
             assert!(done.right() <= width && done.left() > 0.0, "{width}: «Готово» за краем: {done:?}");
+        }
+    }
+
+    #[test]
+    fn a_long_name_in_the_editor_header_does_not_cover_the_buttons() {
+        let _world = world();
+        let dev = r"\\.\TEST-SCENE-LONG-NAME";
+        for width in [560.0, 700.0, 1300.0] {
+            let mut rig = Rig::sized(width);
+            let mut scene = movie(dev);
+            scene.name = "Очень длинное имя сцены для шапки".into();
+            rig.app.settings.profiles = vec![scene];
+            rig.app.open_scene(0, false, View::Cards);
+            rig.settle();
+            let (back, delete, done) = (rig.anchor("scene-back"), rig.anchor("scene-delete"), rig.anchor("scene-done"));
+            assert!(
+                back.right() < delete.left() && delete.right() < done.left(),
+                "{width}: кнопки наехали друг на друга"
+            );
+            // Имя между «‹ Сцены» и «Удалить сцену»: ничто не лезет за правый край.
+            assert!(done.right() <= width, "{width}: «Готово» за краем: {done:?}");
         }
     }
 
