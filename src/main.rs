@@ -6,6 +6,7 @@ mod config;
 mod look;
 mod modules;
 mod panel;
+mod search;
 mod shot;
 mod sys;
 mod texts;

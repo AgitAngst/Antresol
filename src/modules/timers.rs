@@ -8,7 +8,8 @@ use anvil_ui::widgets::{self as w, Kind};
 use anvil_ui::{Icon, Palette};
 use eframe::egui::{self, Ui};
 
-use super::{Ctx, Module};
+use super::{Action, Command, Ctx, Module, mine};
+use crate::config::Settings;
 use crate::texts::{self, Tr};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,6 +24,8 @@ pub enum Phase {
 pub struct Timer {
     pub kind: Phase,
     pub total: Duration,
+    /// Своё имя («чай» из запроса поиска); без него — «Таймер».
+    pub name: Option<String>,
     /// Сколько осталось на момент `since` (или всё время, пока на паузе).
     left: Duration,
     /// Идёт с этого момента; `None` — на паузе.
@@ -31,7 +34,12 @@ pub struct Timer {
 
 impl Timer {
     pub fn new(kind: Phase, total: Duration, now: Instant) -> Timer {
-        Timer { kind, total, left: total, since: Some(now) }
+        Timer { kind, total, name: None, left: total, since: Some(now) }
+    }
+
+    /// Простой таймер со своим именем.
+    pub fn named(name: &str, total: Duration, now: Instant) -> Timer {
+        Timer { name: Some(name.to_string()).filter(|n| !n.is_empty()), ..Timer::new(Phase::Plain, total, now) }
     }
 
     pub fn remaining(&self, now: Instant) -> Duration {
@@ -59,15 +67,15 @@ impl Timer {
 pub const WORK: Duration = Duration::from_secs(25 * 60);
 pub const REST: Duration = Duration::from_secs(5 * 60);
 
-/// Шаг: снять дошедшие таймеры; «помидор» сменяется следующим отрезком. Ответ — что дошло.
-pub fn step(timers: &mut Vec<Timer>, now: Instant) -> Vec<Phase> {
+/// Шаг: снять дошедшие таймеры; «помидор» сменяется следующим отрезком. Ответ — что дошло и как оно называлось.
+pub fn step(timers: &mut Vec<Timer>, now: Instant) -> Vec<(Phase, Option<String>)> {
     let mut done = Vec::new();
     let mut next = Vec::new();
     timers.retain(|t| {
         if t.paused() || !t.remaining(now).is_zero() {
             return true;
         }
-        done.push(t.kind);
+        done.push((t.kind, t.name.clone()));
         // Следующий отрезок «помидора» — ровно с конца прошлого, а не с этого кадра: без сдвига за цикл.
         let end = t.since.map(|at| at + t.left).unwrap_or(now);
         match t.kind {
@@ -97,8 +105,8 @@ fn badge_clock(d: Duration) -> String {
 
 pub struct Timers {
     list: Vec<Timer>,
-    /// Что дошло с прошлого вопроса окна: оно покажет уведомление и выдвинет панель.
-    done: Vec<Phase>,
+    /// Что дошло с прошлого вопроса окна (и как оно называлось): окно покажет уведомление и выдвинет панель.
+    done: Vec<(Phase, Option<String>)>,
 }
 
 impl Default for Timers {
@@ -119,12 +127,24 @@ impl Default for Timers {
 }
 
 impl Timers {
-    fn label(kind: Phase, t: &Tr) -> &'static str {
-        match kind {
-            Phase::Plain => t.timer,
-            Phase::Work => t.timer_work,
-            Phase::Rest => t.timer_rest,
+    /// Как таймер назван в списке: «Работа», «Отдых», своё имя или «Таймер».
+    fn label<'a>(timer: &'a Timer, t: &'a Tr) -> &'a str {
+        match (timer.kind, &timer.name) {
+            (Phase::Plain, Some(name)) => name,
+            (Phase::Plain, None) => t.timer,
+            (Phase::Work, _) => t.timer_work,
+            (Phase::Rest, _) => t.timer_rest,
         }
+    }
+
+    /// Завести таймер: кнопки карточки и действия поиска. `name` — своё имя (из запроса «чай 5»).
+    fn start(&mut self, minutes: u64, name: Option<&str>) {
+        let total = Duration::from_secs(minutes * 60);
+        let now = Instant::now();
+        self.list.push(match name {
+            Some(name) => Timer::named(name, total, now),
+            None => Timer::new(Phase::Plain, total, now),
+        });
     }
 }
 
@@ -145,13 +165,48 @@ impl Module for Timers {
     }
 
     fn attention(&mut self, t: &Tr) -> Option<String> {
-        let kind = self.done.pop()?;
+        let (kind, name) = self.done.pop()?;
         self.done.clear();
-        Some(match kind {
-            Phase::Plain => t.timer_done.to_string(),
-            Phase::Work => t.timer_work_done.to_string(),
-            Phase::Rest => t.timer_rest_done.to_string(),
+        Some(match (kind, name) {
+            (Phase::Plain, Some(name)) => t.timer_named_done.replace("{}", &name),
+            (Phase::Plain, None) => t.timer_done.to_string(),
+            (Phase::Work, _) => t.timer_work_done.to_string(),
+            (Phase::Rest, _) => t.timer_rest_done.to_string(),
         })
+    }
+
+    /// Те же кнопки, что в карточке (5, 10, 15 минут, «Помидор»), и таймер из запроса «чай 5» (`timers:new:<минуты>:<имя>`).
+    fn command(&mut self, cmd: &Command, _cx: &mut Ctx) {
+        let Command::RunAction(id) = cmd else { return };
+        match mine(self.key(), id) {
+            Some("pomodoro") => self.list.push(Timer::new(Phase::Work, WORK, Instant::now())),
+            Some(what) => {
+                if let Some(min) = what.strip_prefix("min:").and_then(|m| m.parse::<u64>().ok()) {
+                    self.start(min, None);
+                } else if let Some((min, name)) = what.strip_prefix("new:").and_then(|r| r.split_once(':'))
+                    && let Ok(min) = min.parse::<u64>()
+                    && (1..=999).contains(&min)
+                {
+                    self.start(min, Some(name.trim()));
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn actions(&self, t: &Tr, lang: anvil_ui::Lang, _settings: &Settings) -> Vec<Action> {
+        let mut out: Vec<Action> = [5u64, 10, 15]
+            .into_iter()
+            .map(|min| {
+                let title = format!("{}: {}", t.timer, texts::minutes(lang, min));
+                Action::new(format!("timers:min:{min}"), title, t.timers, Icon::Clock)
+                    .words("таймер минуты timer minutes")
+            })
+            .collect();
+        let title = format!("{} — {}", t.pomodoro, texts::minutes(lang, WORK.as_secs() / 60));
+        let words = "помидор помодоро работа отдых pomodoro focus work break";
+        out.push(Action::new("timers:pomodoro", title, t.timers, Icon::Target).words(words));
+        out
     }
 
     fn ticking(&self) -> bool {
@@ -163,10 +218,11 @@ impl Module for Timers {
         let now = Instant::now();
         let timer = self.list.iter().filter(|x| !x.paused()).min_by_key(|x| x.remaining(now))?;
         let left = badge_clock(timer.remaining(now));
-        let name = match timer.kind {
-            Phase::Plain => texts::minutes(lang, timer.total.as_secs() / 60),
-            Phase::Work => t.timer_work.to_string(),
-            Phase::Rest => t.timer_rest.to_string(),
+        let name = match (timer.kind, &timer.name) {
+            (Phase::Plain, Some(name)) => name.clone(),
+            (Phase::Plain, None) => texts::minutes(lang, timer.total.as_secs() / 60),
+            (Phase::Work, _) => t.timer_work.to_string(),
+            (Phase::Rest, _) => t.timer_rest.to_string(),
         };
         let hint = texts::timer_running(lang, &name, &left);
         Some((left, hint))
@@ -180,7 +236,7 @@ impl Module for Timers {
             ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
             for min in [5u64, 10, 15] {
                 if w::button(ui, Kind::Secondary, Some(Icon::Clock), &texts::minutes(cx.lang, min)).clicked() {
-                    self.list.push(Timer::new(Phase::Plain, Duration::from_secs(min * 60), now));
+                    self.start(min, None);
                 }
             }
             if w::button(ui, Kind::Secondary, Some(Icon::Target), t.pomodoro).on_hover_text(t.pomodoro_hint).clicked() {
@@ -208,10 +264,10 @@ impl Module for Timers {
                     };
                     // На паузе — не только цветом: слово «на паузе» после названия.
                     let name = if timer.paused() {
-                        let full = format!("{} · {}", Self::label(timer.kind, t), t.paused);
+                        let full = format!("{} · {}", Self::label(timer, t), t.paused);
                         if width_of(&full) <= room { full } else { t.paused.to_string() }
                     } else {
-                        Self::label(timer.kind, t).to_string()
+                        Self::label(timer, t).to_string()
                     };
                     ui.allocate_ui_with_layout(
                         egui::vec2(room, 24.0),
@@ -267,11 +323,12 @@ mod tests {
     fn pomodoro_cycles() {
         let t0 = Instant::now();
         let mut list = vec![Timer::new(Phase::Work, WORK, t0), Timer::new(Phase::Plain, Duration::from_secs(5), t0)];
-        let done = step(&mut list, t0 + WORK);
+        let kinds = |done: Vec<(Phase, Option<String>)>| done.into_iter().map(|(kind, _)| kind).collect::<Vec<_>>();
+        let done = kinds(step(&mut list, t0 + WORK));
         assert_eq!(done, vec![Phase::Work, Phase::Plain]);
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].kind, Phase::Rest, "после работы — отдых");
-        let done = step(&mut list, t0 + WORK + REST);
+        let done = kinds(step(&mut list, t0 + WORK + REST));
         assert_eq!(done, vec![Phase::Rest]);
         assert_eq!(list[0].kind, Phase::Work, "после отдыха — снова работа");
     }
@@ -302,5 +359,106 @@ mod tests {
         assert_eq!(clock(Duration::from_secs(65)), "1:05");
         assert_eq!(clock(Duration::from_millis(500)), "0:01", "неполная секунда — вверх");
         assert_eq!(clock(Duration::from_secs(3723)), "1:02:03");
+    }
+
+    fn run(timers: &mut Timers, id: &str) {
+        run_command(timers, &Command::RunAction(id.to_string()));
+    }
+
+    fn run_command(timers: &mut Timers, cmd: &Command) {
+        let mut toasts = Vec::new();
+        let mut settings = Settings::default();
+        let mut cx = Ctx {
+            t: texts::tr(anvil_ui::Lang::En),
+            lang: anvil_ui::Lang::En,
+            monitor: "",
+            toasts: &mut toasts,
+            settings: &mut settings,
+        };
+        timers.command(cmd, &mut cx);
+    }
+
+    #[test]
+    fn search_offers_the_quick_buttons_of_the_card() {
+        let timers = Timers { list: Vec::new(), done: Vec::new() };
+        let (ru, en) = (texts::tr(anvil_ui::Lang::Ru), texts::tr(anvil_ui::Lang::En));
+        let titles = |t: &Tr, lang| -> Vec<String> {
+            timers.actions(t, lang, &Settings::default()).into_iter().map(|a| a.title).collect()
+        };
+        assert_eq!(
+            titles(ru, anvil_ui::Lang::Ru),
+            ["Таймер: 5 мин", "Таймер: 10 мин", "Таймер: 15 мин", "Помидор — 25 мин"]
+        );
+        assert_eq!(
+            titles(en, anvil_ui::Lang::En),
+            ["Timer: 5 min", "Timer: 10 min", "Timer: 15 min", "Pomodoro — 25 min"]
+        );
+        let actions = timers.actions(en, anvil_ui::Lang::En, &Settings::default());
+        assert!(actions.iter().all(|a| a.enabled && a.place == en.timers));
+        assert!(actions[3].words.contains("помидор") && actions[3].words.contains("pomodoro"));
+    }
+
+    #[test]
+    fn search_buttons_start_the_same_timers_as_the_card() {
+        let mut timers = Timers { list: Vec::new(), done: Vec::new() };
+        run(&mut timers, "timers:min:10");
+        run(&mut timers, "timers:pomodoro");
+        assert_eq!(timers.list.len(), 2);
+        assert_eq!((timers.list[0].kind, timers.list[0].total), (Phase::Plain, Duration::from_secs(600)));
+        assert_eq!((timers.list[1].kind, timers.list[1].total), (Phase::Work, WORK));
+        assert!(timers.list.iter().all(|t| t.name.is_none() && !t.paused()), "идут сразу, без имени");
+        assert!(timers.ticking(), "карточке нужны кадры");
+        // Чужое действие и чужая команда — ничего.
+        run(&mut timers, "quick:wifi");
+        run_command(&mut timers, &Command::Media(crate::sys::media::Action::Next));
+        assert_eq!(timers.list.len(), 2);
+    }
+
+    #[test]
+    fn a_timer_from_the_query_has_its_name_in_the_list_the_tab_and_the_notice() {
+        let mut timers = Timers { list: Vec::new(), done: Vec::new() };
+        run(&mut timers, "timers:new:5:чай");
+        assert_eq!(timers.list.len(), 1);
+        let timer = &timers.list[0];
+        assert_eq!(timer.kind, Phase::Plain);
+        assert_eq!(timer.total, Duration::from_secs(300));
+        assert_eq!(timer.name.as_deref(), Some("чай"));
+        let (ru, en) = (texts::tr(anvil_ui::Lang::Ru), texts::tr(anvil_ui::Lang::En));
+        assert_eq!(Timers::label(timer, ru), "чай", "в списке — своё имя, а не «Таймер»");
+        // Метка на вкладке и подсказка к ней называют его.
+        let (left, hint) = timers.badge(ru, anvil_ui::Lang::Ru).expect("идёт — метка есть");
+        assert_eq!(hint, format!("Идёт таймер «чай», осталось {left}"));
+        // Дошёл: уведомление со своим именем.
+        timers.list[0].left = Duration::ZERO;
+        timers.background(&Settings::default());
+        assert_eq!(timers.attention(ru).as_deref(), Some("Таймер «чай» дошёл"));
+        assert!(timers.list.is_empty());
+        run(&mut timers, "timers:new:5:tea");
+        timers.list[0].left = Duration::ZERO;
+        timers.background(&Settings::default());
+        assert_eq!(timers.attention(en).as_deref(), Some("Timer “tea” is up"));
+        // Без имени — как у быстрых таймеров.
+        run(&mut timers, "timers:new:7:");
+        assert_eq!(timers.list[0].name, None);
+        assert_eq!(Timers::label(&timers.list[0], en), "Timer");
+        timers.list[0].left = Duration::ZERO;
+        timers.background(&Settings::default());
+        assert_eq!(timers.attention(ru).as_deref(), Some("Таймер дошёл"));
+    }
+
+    #[test]
+    fn a_bad_timer_request_starts_nothing() {
+        let mut timers = Timers { list: Vec::new(), done: Vec::new() };
+        for id in [
+            "timers:new:0:чай",
+            "timers:new:1000:чай",
+            "timers:new:x:чай",
+            "timers:new:5",
+            "timers:min:x",
+            "timers:what",
+        ] {
+            run(&mut timers, id);
+        }
+        assert!(timers.list.is_empty());
     }
 }

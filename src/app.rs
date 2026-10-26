@@ -19,6 +19,9 @@ use crate::panel::{self, Edge, Input};
 use crate::sys::{self, monitor};
 use crate::{look, texts};
 
+mod search_ui;
+use search_ui::Search;
+
 /// Радиус нижних углов панели, в точках.
 const CORNER: u8 = 14;
 /// Шапка: вкладки стоят на её нижней линии; тело — от `BODY_TOP` до `BODY_BOTTOM` над нижним краем.
@@ -72,6 +75,8 @@ enum View {
     Color,
     /// Правка сцены — вместо карточек (шапка «+», правый щелчок по чипу) или настроек («Изменить…»).
     Scene,
+    /// Поиск действий — вместо карточек (поле в шапке, Ctrl+K, Ctrl+F, просто начать печатать).
+    Search,
 }
 
 /// Что видно у края, пока панель спрятана.
@@ -278,6 +283,12 @@ pub struct App {
     renaming: Option<Rename>,
     /// «Свой цвет…».
     color: ColorEdit,
+    /// Поиск действий: запрос и выбранная строка; живёт, пока открыт вид поиска.
+    search: Search,
+    /// Недавние действия поиска (`Action::id`), самое недавнее первым; только в памяти.
+    recent: Vec<String>,
+    /// Мышь над самой панелью (с прошлого кадра): «Пипетка» поиска берёт цвет под мышью, и над панелью брать нечего.
+    pointer_over: bool,
     /// Что последним поставили окну: не забирать фокус при щелчке (пока панель спрятана).
     no_activate: Option<bool>,
     /// `ANTRESOL_SHOT`: снять своё окно в файл и закрыться.
@@ -331,6 +342,7 @@ impl App {
                 Ok("settings" | "settings-ask") => View::Settings,
                 Ok("color") => View::Color,
                 Ok("scene" | "scene-ask" | "scene-name") => View::Scene,
+                Ok("search") => View::Search,
                 _ => View::Cards,
             },
             monitors: Vec::new(),
@@ -366,9 +378,17 @@ impl App {
             editing,
             renaming: None,
             color: ColorEdit::new(look::LIME.dark.fill),
+            search: Search::default(),
+            recent: Vec::new(),
+            pointer_over: false,
             no_activate: None,
             shot: crate::shot::Shot::from_env(),
         };
+        // Для снимков: `ANTRESOL_VIEW=search` — сразу вид поиска, `ANTRESOL_QUERY=1080` — с этим запросом.
+        if app.view == View::Search {
+            app.search.query = std::env::var("ANTRESOL_QUERY").unwrap_or_default();
+            app.search.focus = true;
+        }
         if let Some(v) = strip_view {
             app.edge.pinned = false;
             app.started = true;
@@ -861,6 +881,7 @@ impl App {
             focused,
         };
         self.focused = focused;
+        self.pointer_over = input.over;
         let show_delay = Duration::from_millis(self.settings.show_delay_ms as u64);
         let hide_delay = Duration::from_millis(self.settings.hide_delay_ms as u64);
         let changed = self.edge.step(input, now, show_delay, hide_delay);
@@ -881,9 +902,10 @@ impl App {
             if self.view == View::Color {
                 self.restore_accent(ctx);
             }
-            // Спряталась — правка сцены кончена (негодная сцена убирается), как и настройки.
+            // Спряталась — правка сцены кончена (негодная сцена убирается), как и настройки; поиск тоже, набранное забыто.
             self.finish_scene();
             self.view = View::Cards;
+            self.search = Search::default();
             // Правка полок кончена тоже (раскладка сохраняется по ходу).
             self.editing = None;
             self.renaming = None;
@@ -976,6 +998,7 @@ impl App {
             self.restore_accent(ctx);
         }
         self.view = View::Cards;
+        self.search = Search::default();
         // Клавишу нажали в правке — сначала выход из неё: под вуалью «Оставить этот режим?» не нажать, а карточка с ним
         // может стоять на другой полке — её и открываем.
         self.finish_edit();
@@ -1201,6 +1224,7 @@ impl App {
         match self.view {
             View::Cards => return self.header_cards(ui, ops),
             View::Scene => return self.scene_header(ui),
+            View::Search => return self.search_header(ui),
             View::Settings | View::Color => {}
         }
         let t = texts::tr(self.lang());
@@ -1210,7 +1234,7 @@ impl App {
             ui.spacing_mut().item_spacing.x = 8.0;
             ui.add_space(2.0);
             match self.view {
-                View::Cards | View::Scene => {}
+                View::Cards | View::Scene | View::Search => {}
                 View::Settings => {
                     if w::button(ui, Kind::Ghost, Some(Icon::ArrowLeft), t.settings).on_hover_text(t.back).clicked() {
                         self.view = View::Cards;
@@ -1243,10 +1267,11 @@ impl App {
         });
     }
 
-    /// Шапка над карточками: слева значок, «Antresol» и вкладки, справа значки, монитор и сцены. Левая часть рисуется
-    /// по месту, что осталось после правой в прошлом кадре, и обрезана по нему — на правую не заезжает. Не помещается — по
-    /// порядку: уходят подписи («Сцена», «Монитор»), слово «Antresol», подпись у «Полка», вкладки сужаются (многоточие,
-    /// полное имя в подсказке), а если и так тесно — сцены и выбор монитора справа (`header_right`).
+    /// Шапка над карточками: слева значок, «Antresol» и вкладки, справа значки, монитор, сцены и поиск. Левая часть
+    /// рисуется по месту, что осталось после правой в прошлом кадре, и обрезана по нему — на правую не заезжает. Не
+    /// помещается — по порядку: уходят подписи («Сцена», «Монитор»), слово «Antresol», подпись у «Полка», вкладки сужаются
+    /// (многоточие, полное имя в подсказке), а если и так тесно — сцены и выбор монитора справа, и поиск остаётся значком
+    /// (`header_right`).
     fn header_cards(&mut self, ui: &mut Ui, ops: &mut Vec<Op>) {
         let t = texts::tr(self.lang());
         let p = Palette::of(ui);
@@ -1339,7 +1364,8 @@ impl App {
     }
 
     /// Правая часть шапки над карточками: «спрятать», настройки, закрепить, правка полок; потом выбор монитора и сцены —
-    /// если вкладкам остаётся хотя бы `soft_reserve` сверх наименьшего; в правке — «Готово» и «Как было».
+    /// если вкладкам остаётся хотя бы `soft_reserve` сверх наименьшего; левее них — поиск: значок есть всегда, а целое поле
+    /// (204) — если уместились и сцены, и монитор; в правке — «Готово» и «Как было».
     fn header_right(&mut self, ui: &mut Ui, soft_reserve: f32) {
         let t = texts::tr(self.lang());
         let p = Palette::of(ui);
@@ -1376,21 +1402,31 @@ impl App {
         // и на клавишах).
         let monitors = self.monitors.len() > 1;
         let divider = 6.0 + 1.0 + 6.0 + 8.0;
-        let mut room = ui.available_width() - soft_reserve - divider;
+        // Поиск — самый левый: его значок есть всегда (место под него отложено), сцены и монитор берут остальное, а поле
+        // целиком — если и после них хватает места.
+        let icon_w = 30.0;
+        let mut room = ui.available_width() - soft_reserve - divider - (icon_w + divider);
         let profiles_w = self.profiles_width(ui);
         let profiles = !self.settings.is_hidden("display") && profiles_w <= room;
         if profiles {
             room -= profiles_w + divider;
         }
         let monitors = monitors && self.monitor_width(ui) <= room;
-        if profiles || monitors {
-            ui.add_space(6.0);
-            vline(ui, p.border);
-            ui.add_space(6.0);
+        if monitors {
+            room -= self.monitor_width(ui) + divider;
         }
+        // Поле целиком — только если уместилось и всё, что стоит правее: стоило сценам или монитору уйти, поле остаётся
+        // значком (иначе при сужении панели оно то росло бы, то сжималось).
+        let dropped = (!self.settings.is_hidden("display") && !profiles) || (self.monitors.len() > 1 && !monitors);
+        let full = !dropped && room >= search_ui::FIELD_W - icon_w;
+        // Подписи «Сцена» и «Монитор» не едят место поиска.
+        let reserve = soft_reserve + divider + if full { search_ui::FIELD_W } else { icon_w };
+        ui.add_space(6.0);
+        vline(ui, p.border);
+        ui.add_space(6.0);
         if monitors {
             self.monitor_picker(ui);
-            side_label(ui, t.monitor, p.weak, soft_reserve);
+            side_label(ui, t.monitor, p.weak, reserve);
             if profiles {
                 ui.add_space(6.0);
                 vline(ui, p.border);
@@ -1398,8 +1434,14 @@ impl App {
             }
         }
         if profiles {
-            self.scenes_bar(ui, soft_reserve);
+            self.scenes_bar(ui, reserve);
         }
+        if profiles || monitors {
+            ui.add_space(6.0);
+            vline(ui, p.border);
+            ui.add_space(6.0);
+        }
+        self.search_button(ui, full);
     }
 
     /// Сколько места нужно чипам сцен и «+» (с запасом на полужирный): для решения, помещаются ли они в шапку.
@@ -1563,7 +1605,12 @@ impl App {
     /// настройки» и «Яркость» — если какая-то сцена что-то отмечает у них (чип стоящей сцены узнают по ним, где бы ни лежали
     /// карточки и убраны ли они); при правке сцены — все три: строкам нужны свежие значения.
     fn refresh_set(&self) -> Vec<usize> {
-        let mut set = self.shelf_modules(self.shelf);
+        // Поиск строит действия по каждой карточке на любой полке: пока он открыт, перечитываются все.
+        let mut set: Vec<usize> = if self.view == View::Search {
+            self.settings.shelves.iter().flat_map(|s| s.cards.iter()).filter_map(|k| self.module_index(k)).collect()
+        } else {
+            self.shelf_modules(self.shelf)
+        };
         let editing = self.view == View::Scene;
         let scenes = &self.settings.profiles;
         let wants = |key: &str| match key {
@@ -2949,6 +2996,7 @@ impl App {
             self.ask_delete = None;
         }
         self.shelf_keys(&ctx);
+        self.search_keys(&ctx);
 
         let inner = Rect::from_min_max(panel.min + Vec2::new(12.0, 0.0), panel.max - Vec2::new(12.0, BODY_BOTTOM));
         let mut content = ui.new_child(UiBuilder::new().max_rect(inner));
@@ -2969,6 +3017,7 @@ impl App {
             View::Settings => self.settings_view(&mut body_ui),
             View::Color => self.color_view(&mut body_ui),
             View::Scene => self.scene_view(&mut body_ui),
+            View::Search => self.search_view(&mut body_ui),
         }
         self.apply_ops(ops);
         if t >= 1.0 {
@@ -2981,7 +3030,10 @@ impl App {
             && self.renaming.is_none()
             && !self.typing_here()
         {
-            if self.view == View::Scene {
+            if self.view == View::Search {
+                // Esc в поиске — назад к карточкам; следующий прячет панель.
+                self.close_search();
+            } else if self.view == View::Scene {
                 // Esc в правке сцены: сперва снимает вопрос «Удалить сцену?», потом — как «Готово» (следующий Esc прячет панель).
                 match &mut self.scene {
                     Some(edit) if edit.confirm_delete => edit.confirm_delete = false,
@@ -3692,6 +3744,9 @@ mod tests {
                 editing: None,
                 renaming: None,
                 color: ColorEdit::new(look::LIME.dark.fill),
+                search: Search::default(),
+                recent: Vec::new(),
+                pointer_over: false,
                 no_activate: None,
                 shot: None,
             }
@@ -5442,5 +5497,612 @@ mod tests {
         };
         assert!(run(true, true), "доступную строку щелчок нажимает");
         assert!(!run(false, true), "недоступную — нет");
+    }
+
+    // ─── Поиск действий ─────────────────────────────────────────────────────
+    //
+    // Панель без окна в выдуманном мире: поиск открывается с клавиатуры, действия делают то же, что щелчок в карточке.
+    // Язык кадров задаёт `search_rig`; тесты, что смотрят на русские слова, просят `Lang::Ru`.
+
+    const NO_KEYS: Modifiers = Modifiers::NONE;
+
+    /// Панель с выдуманным монитором: открыта, карточки опрошены, как при показе; поиск закрыт.
+    fn search_rig(dev: &str, lang: Lang) -> Rig {
+        let mut rig = scene_rig(dev, Vec::new());
+        rig.app.settings.common.language = lang;
+        rig.app.edge.shown = true;
+        // Остальные карточки (часы, буфер, таймеры…) опрашивать нечем — они читают настройки.
+        rig.settle();
+        rig
+    }
+
+    /// Весь текст, что нарисован в последнем кадре.
+    fn painted(rig: &Rig) -> String {
+        fn walk(shape: &egui::Shape, out: &mut String) {
+            match shape {
+                egui::Shape::Text(t) => {
+                    out.push_str(t.galley.text());
+                    out.push('\n');
+                }
+                egui::Shape::Vec(list) => list.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut out = String::new();
+        rig.shapes.iter().for_each(|s| walk(&s.shape, &mut out));
+        out
+    }
+
+    fn titles(rig: &Rig) -> Vec<String> {
+        rig.app.found().hits.into_iter().map(|h| h.title).collect()
+    }
+
+    /// Заглушка с недоступным и доступным действием: считает, сколько раз ей велели выполнить.
+    struct Stuck(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    impl Module for Stuck {
+        fn key(&self) -> &'static str {
+            "stuck"
+        }
+
+        fn title(&self, _t: &texts::Tr) -> &'static str {
+            "Stuck"
+        }
+
+        fn refresh(&mut self, _monitor: &str) {}
+
+        fn ui(&mut self, _ui: &mut Ui, _cx: &mut Ctx) {}
+
+        fn actions(&self, _t: &texts::Tr, _lang: Lang, _settings: &Settings) -> Vec<modules::Action> {
+            vec![
+                modules::Action::new("stuck:closed", "Stuck: closed", "Stuck", Icon::Gear)
+                    .words("stuck")
+                    .off("Not now"),
+                modules::Action::new("stuck:open", "Stuck: open", "Stuck", Icon::Gear).words("stuck"),
+            ]
+        }
+
+        fn command(&mut self, cmd: &Command, _cx: &mut Ctx) {
+            if let Command::RunAction(id) = cmd
+                && modules::mine("stuck", id).is_some()
+            {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+
+    #[test]
+    fn ctrl_k_and_ctrl_f_open_the_search_and_the_second_esc_hides_the_panel() {
+        for key in [Key::K, Key::F] {
+            let mut rig = Rig::new();
+            rig.app.edge.shown = true;
+            rig.key(key, CTRL);
+            assert!(rig.app.view == View::Search, "{key:?}");
+            assert!(rig.app.search.query.is_empty());
+            // Поле в фокусе: можно печатать сразу.
+            assert_eq!(rig.ctx.memory(|m| m.focused()), Some(egui::Id::new("search-field")));
+            // Esc — назад к карточкам, а не прятать панель; второй прячет, как раньше.
+            rig.key(Key::Escape, NO_KEYS);
+            assert!(rig.app.view == View::Cards && rig.app.edge.shown && rig.app.search.query.is_empty());
+            rig.key(Key::Escape, NO_KEYS);
+            assert!(!rig.app.edge.shown);
+        }
+    }
+
+    #[test]
+    fn a_letter_or_a_digit_opens_the_search_with_it_and_the_rest_goes_into_the_field() {
+        let mut rig = Rig::new();
+        rig.app.edge.shown = true;
+        rig.type_text("н");
+        assert!(rig.app.view == View::Search);
+        assert_eq!(rig.app.search.query, "н", "буква не потеряна и не задвоилась");
+        rig.type_text("очн");
+        assert_eq!(rig.app.search.query, "ночн");
+        // Цифра тоже; быстрый набор — несколько букв за кадр — приходит целиком.
+        let mut rig = Rig::new();
+        rig.type_text("10");
+        assert_eq!(rig.app.search.query, "10");
+        let mut rig = Rig::new();
+        rig.type_text("eng");
+        rig.type_text("lish");
+        assert_eq!(rig.app.search.query, "english");
+    }
+
+    #[test]
+    fn typing_does_not_open_the_search_where_it_must_not() {
+        // Пробел и знаки — не буква и не цифра.
+        let mut rig = Rig::new();
+        for text in [" ", "+", "-", "("] {
+            rig.type_text(text);
+            assert!(rig.app.view == View::Cards, "«{text}» открыло поиск");
+        }
+        // В правке полок поиск не открывается — ни буквой, ни Ctrl+K.
+        let mut rig = Rig::editing();
+        rig.type_text("н");
+        rig.key(Key::K, CTRL);
+        assert!(rig.app.view == View::Cards && rig.app.editing.is_some());
+        // Пока вводят имя полки или ждут сочетание — тоже.
+        let mut rig = Rig::new();
+        rig.app.renaming = Some(Rename { shelf: 0, text: String::new(), fresh: false });
+        rig.type_text("н");
+        assert!(rig.app.view == View::Cards);
+        rig.app.renaming = None;
+        rig.app.capture = Some(0);
+        rig.type_text("н");
+        rig.app.capture = None;
+        rig.app.capture_panel = true;
+        rig.type_text("н");
+        assert!(rig.app.view == View::Cards);
+        // Пока в карточке вводят текст (поиск пояса у «Часов»), буквы — туда.
+        let mut rig = Rig::new();
+        rig.app.set_shelf(1);
+        rig.app.run_action("clocks:add");
+        rig.settle();
+        assert!(rig.app.typing_here());
+        rig.type_text("н");
+        assert!(rig.app.view == View::Cards, "печатают в поле пояса, а не в поиск");
+        // В правке сцены и в настройках — тоже нет.
+        let _world = world();
+        let dev = r"\\.\TEST-SEARCH-NOT-HERE";
+        let mut rig = scene_rig(dev, vec![movie(dev)]);
+        rig.open_editor(0);
+        rig.key(Key::K, CTRL);
+        assert!(rig.app.view == View::Scene);
+        rig.app.finish_scene();
+        rig.app.view = View::Settings;
+        rig.settle();
+        rig.key(Key::K, CTRL);
+        rig.type_text("н");
+        assert!(rig.app.view == View::Settings);
+    }
+
+    /// Сценарий «Ночной свет с клавиатуры»: «ночн» и Enter — включён, вид вернулся к карточкам.
+    #[test]
+    fn night_light_from_the_keyboard() {
+        let _world = world();
+        let dev = r"\\.\TEST-SEARCH-NIGHT";
+        let mut rig = search_rig(dev, Lang::Ru);
+        assert_eq!(sys::nightlight::state(), Some(false));
+        rig.key(Key::K, CTRL);
+        rig.type_text("ночн");
+        let found = rig.app.found();
+        assert_eq!(found.hits[0].title, "Ночной свет: включить");
+        assert_eq!(found.hits[0].marks, vec![(0, 4)], "совпадение выделено");
+        assert_eq!(found.hits[0].sub, "Яркость · Экран и звук", "где это: карточка и полка");
+        assert!(rig.app.view == View::Search);
+        rig.key(Key::Enter, NO_KEYS);
+        assert_eq!(sys::nightlight::state(), Some(true));
+        assert!(rig.app.view == View::Cards && rig.app.search.query.is_empty());
+        // Недавнее: пустой запрос показывает это действие, уже «выключить».
+        rig.key(Key::K, CTRL);
+        let found = rig.app.found();
+        assert_eq!(found.listing, search_ui::Listing::Recent);
+        assert_eq!(found.hits[0].title, "Ночной свет: выключить");
+    }
+
+    /// Сценарий «Режим экрана»: «1080», режим из списка — с «Оставить этот режим?», как щелчком в карточке «Экран».
+    #[test]
+    fn a_display_mode_from_the_keyboard_asks_keep() {
+        let _world = world();
+        let dev = r"\\.\TEST-SEARCH-APP-MODE";
+        let mut rig = search_rig(dev, Lang::En);
+        let start = sys::display::current(dev).unwrap();
+        rig.key(Key::K, CTRL);
+        rig.type_text("1080");
+        let list = titles(&rig);
+        assert_eq!(
+            list,
+            ["Display: 1920 × 1080 · 144 Hz", "Display: 1920 × 1080 · 120 Hz", "Display: 1920 × 1080 · 60 Hz"]
+        );
+        // Одна ↓ — второй режим; Enter ставит его.
+        rig.key(Key::ArrowDown, NO_KEYS);
+        assert_eq!(rig.app.search.selected, 1);
+        rig.key(Key::Enter, NO_KEYS);
+        assert_eq!(sys::display::current(dev).map(|m| (m.width, m.height, m.hz)), Some((1920, 1080, 120)));
+        assert_ne!(sys::display::current(dev), Some(start));
+        assert_eq!(sys::display::saved(dev), start, "в реестр — только после «Оставить»");
+        assert!(rig.app.modules.iter().any(|m| m.busy()), "ждёт ответа «Оставить этот режим?»");
+        assert!(rig.app.view == View::Cards);
+        // Пока вопрос висит, в поиске режимы серые, с причиной, и Enter их не выполняет.
+        rig.key(Key::K, CTRL);
+        rig.type_text("1080");
+        let found = rig.app.found();
+        let t = texts::tr(Lang::En);
+        assert!(found.hits.iter().all(|h| !h.enabled && h.sub == t.answer_first), "{:?}", titles(&rig));
+        let now = sys::display::current(dev);
+        rig.key(Key::Enter, NO_KEYS);
+        assert_eq!(sys::display::current(dev), now);
+        assert!(rig.app.view == View::Search, "недоступное не выполняется и поиск не закрывает");
+    }
+
+    #[test]
+    fn the_calculator_row_is_first_and_enter_copies_the_result() {
+        let _world = world();
+        let mut rig = search_rig(r"\\.\TEST-SEARCH-CALC", Lang::Ru);
+        rig.key(Key::K, CTRL);
+        rig.type_text("21*3,5");
+        let found = rig.app.found();
+        assert_eq!(found.hits[0].title, "21*3,5 = 73,5");
+        assert_eq!(found.hits[0].marks, vec![(9, 13)], "результат выделен");
+        assert_eq!(found.hits[0].sub, texts::tr(Lang::Ru).search_calc);
+        assert!(painted(&rig).contains("21*3,5 = 73,5"));
+        let before = Instant::now();
+        rig.key(Key::Enter, NO_KEYS);
+        let written = sys::BLOCKED.lock().unwrap().iter().any(|w| w == "clip::write_text 73,5");
+        assert!(written, "в буфер ушёл результат, как он написан");
+        assert_eq!(rig.app.toasts.since(before), vec![(texts::tr(Lang::Ru).clipboard_done.to_string(), Tone::Success)]);
+        assert!(rig.app.view == View::Cards);
+        // По-английски — с точкой.
+        rig.app.settings.common.language = Lang::En;
+        rig.key(Key::K, CTRL);
+        rig.type_text("21*3.5");
+        assert_eq!(rig.app.found().hits[0].title, "21*3.5 = 73.5");
+        // Деление на ноль и переполнение — строки нет.
+        for bad in ["1/0", "99999999999999*99999999999999"] {
+            rig.app.search.query = bad.to_string();
+            assert!(!titles(&rig).iter().any(|t| t.contains(" = ")), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_word_and_a_number_start_a_named_timer() {
+        let _world = world();
+        let mut rig = search_rig(r"\\.\TEST-SEARCH-TIMER", Lang::Ru);
+        rig.key(Key::K, CTRL);
+        rig.type_text("чай 5");
+        let found = rig.app.found();
+        assert_eq!(found.hits[0].title, "Таймер «чай» на 5 мин");
+        assert_eq!(found.hits[0].sub, "Таймеры · Под рукой");
+        rig.key(Key::Enter, NO_KEYS);
+        assert!(rig.app.view == View::Cards);
+        let (t, lang) = (texts::tr(Lang::Ru), Lang::Ru);
+        let timers = rig.app.module_index("timers").unwrap();
+        let (_, hint) = rig.app.modules[timers].badge(t, lang).expect("таймер идёт");
+        assert!(hint.starts_with("Идёт таймер «чай», осталось 0"), "{hint}");
+        // Таймер из запроса в недавние не идёт: он каждый раз свой.
+        assert!(rig.app.recent.is_empty());
+        // «5 мин» — без имени, как быстрые таймеры.
+        rig.key(Key::K, CTRL);
+        rig.type_text("7 мин");
+        assert_eq!(rig.app.found().hits[0].title, "Таймер на 7 мин");
+    }
+
+    /// «Яркость 50» — это яркость, а не таймер «яркость»: таймер встаёт следом за лучшим совпадением.
+    #[test]
+    fn a_timer_row_does_not_push_a_real_match_out_of_first_place() {
+        let _world = world();
+        let mut rig = search_rig(r"\\.\TEST-SEARCH-TIMER-ORDER", Lang::Ru);
+        rig.key(Key::K, CTRL);
+        rig.type_text("яркость 50");
+        let list = titles(&rig);
+        assert_eq!(list[..2], ["Яркость: 50 %", "Таймер «яркость» на 50 мин"]);
+    }
+
+    #[test]
+    fn an_unavailable_action_is_grey_with_its_reason_and_enter_does_not_run_it() {
+        let _world = world();
+        let mut rig = search_rig(r"\\.\TEST-SEARCH-GREY", Lang::En);
+        let runs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        rig.app.modules.push(Box::new(Stuck(runs.clone())));
+        rig.app.settings.shelves[0].cards.push("stuck".into());
+        rig.settle();
+        rig.key(Key::K, CTRL);
+        rig.type_text("stuck");
+        let found = rig.app.found();
+        assert_eq!(found.hits.iter().map(|h| h.title.as_str()).collect::<Vec<_>>(), ["Stuck: closed", "Stuck: open"]);
+        assert!(!found.hits[0].enabled && found.hits[0].sub == "Not now", "серая — причина во второй строке");
+        assert!(found.hits[1].enabled && found.hits[1].sub == "Stuck · Display & sound");
+        let shown = painted(&rig);
+        assert!(shown.contains("Not now") && shown.contains("Stuck · Display & sound"), "{shown}");
+        // Enter по серой — ничего, поиск остаётся; щелчок по ней — тоже.
+        rig.key(Key::Enter, NO_KEYS);
+        assert_eq!(runs.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert!(rig.app.view == View::Search);
+        let first = rig.anchor("search-row-0").center();
+        rig.click(first);
+        assert_eq!(runs.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert!(rig.app.view == View::Search);
+        // Следующая — доступная: Enter выполняет.
+        rig.key(Key::ArrowDown, NO_KEYS);
+        rig.key(Key::Enter, NO_KEYS);
+        assert_eq!(runs.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert!(rig.app.view == View::Cards);
+    }
+
+    #[test]
+    fn a_click_on_a_row_runs_it_and_the_arrows_stop_at_the_ends() {
+        let _world = world();
+        let mut rig = search_rig(r"\\.\TEST-SEARCH-CLICK", Lang::En);
+        rig.key(Key::K, CTRL);
+        rig.type_text("turn");
+        let list = titles(&rig);
+        let quiet = list.iter().position(|t| t == "Quiet: turn on").expect("«Тишина» найдена");
+        let count = list.len();
+        assert!(count > 3, "{list:?}");
+        // ↑ на первой и ↓ на последней по кругу не ходят.
+        rig.key(Key::ArrowUp, NO_KEYS);
+        assert_eq!(rig.app.search.selected, 0);
+        for _ in 0..count + 3 {
+            rig.key(Key::ArrowDown, NO_KEYS);
+        }
+        assert_eq!(rig.app.search.selected, count - 1);
+        // Щелчок по строке «Тишина» включает её, а не выбранную стрелками.
+        assert_eq!(sys::system::notifications_off(), Some(false));
+        let row = rig.anchor(&format!("search-row-{quiet}")).center();
+        rig.click(row);
+        assert_eq!(sys::system::notifications_off(), Some(true));
+        assert!(rig.app.view == View::Cards);
+    }
+
+    #[test]
+    fn scenes_are_found_set_and_returned_from_the_search() {
+        let _world = world();
+        let dev = r"\\.\TEST-SEARCH-SCENE";
+        let mut scene = movie(dev);
+        scene.hotkey = Hotkey::parse("Ctrl+Alt+3");
+        let mut rig = scene_rig(dev, vec![scene]);
+        rig.app.settings.common.language = Lang::En;
+        rig.app.edge.shown = true;
+        let start = sys::display::current(dev).unwrap();
+        rig.key(Key::K, CTRL);
+        rig.type_text("movie");
+        let found = rig.app.found();
+        assert_eq!(found.hits[0].title, "Scene “Movie”: 2560 × 1440 · 144 Hz");
+        assert_eq!(found.hits[0].sub, "Scenes · Ctrl+Alt+3");
+        // Найти можно и по режиму, и по тому, что сцена меняет.
+        for q in ["1440", "quiet", "тишина"] {
+            rig.app.search.query = q.to_string();
+            assert!(titles(&rig).iter().any(|t| t.starts_with("Scene “Movie”")), "{q}");
+        }
+        rig.app.search.query = "movie".into();
+        rig.key(Key::Enter, NO_KEYS);
+        assert_eq!(rig.app.active_scene(), Some(0), "сцена стоит, как после щелчка по чипу");
+        assert_eq!(sys::system::notifications_off(), Some(true));
+        // Стоящая сцена — «вернуть как было»: тот же второй щелчок.
+        rig.key(Key::K, CTRL);
+        rig.type_text("movie");
+        assert_eq!(rig.app.found().hits[0].title, "Scene “Movie”: undo");
+        rig.key(Key::Enter, NO_KEYS);
+        assert_eq!(sys::display::current(dev), Some(start));
+        assert_eq!(sys::system::notifications_off(), Some(false));
+        assert_eq!(rig.app.active_scene(), None);
+    }
+
+    #[test]
+    fn the_panels_own_actions_do_what_their_buttons_do() {
+        let _world = world();
+        let mut rig = search_rig(r"\\.\TEST-SEARCH-OWN", Lang::En);
+        // «Настройки».
+        rig.key(Key::K, CTRL);
+        rig.type_text("settings");
+        assert_eq!(titles(&rig)[0], "Settings");
+        rig.key(Key::Enter, NO_KEYS);
+        assert!(rig.app.view == View::Settings);
+        // «Открыть полку».
+        rig.app.view = View::Cards;
+        rig.key(Key::K, CTRL);
+        rig.type_text("shelf");
+        assert_eq!(
+            titles(&rig),
+            ["Open the “System” shelf", "Open the “At hand” shelf"],
+            "открытую полку не предлагаем"
+        );
+        rig.key(Key::Enter, NO_KEYS);
+        assert_eq!(rig.app.shelf, 1);
+        // «Изменить полки».
+        rig.key(Key::K, CTRL);
+        rig.type_text("edit shelves");
+        assert_eq!(titles(&rig)[0], "Edit shelves");
+        rig.key(Key::Enter, NO_KEYS);
+        assert!(rig.app.editing.is_some());
+        rig.app.finish_edit();
+        // «Спрятать».
+        rig.settle();
+        rig.key(Key::K, CTRL);
+        rig.type_text("hide");
+        assert_eq!(titles(&rig)[0], "Hide the panel");
+        rig.key(Key::Enter, NO_KEYS);
+        assert!(!rig.app.edge.shown);
+    }
+
+    #[test]
+    fn a_card_not_on_a_shelf_gives_no_actions_and_the_place_names_the_shelf() {
+        let _world = world();
+        let mut rig = search_rig(r"\\.\TEST-SEARCH-SHELVES", Lang::En);
+        let place_of = |rig: &Rig, id: &str| rig.app.all_actions().into_iter().find(|a| a.id == id).map(|a| a.place);
+        assert_eq!(place_of(&rig, "media:next").as_deref(), Some("Media · Display & sound"));
+        assert_eq!(place_of(&rig, "timers:min:5").as_deref(), Some("Timers · At hand"));
+        assert_eq!(place_of(&rig, "bluetooth:settings").as_deref(), Some("Bluetooth · System"));
+        // Убрали карточку с полок — её действий нет; вернули — есть.
+        rig.app.settings.hide_card("media");
+        assert!(place_of(&rig, "media:next").is_none());
+        rig.app.settings.place_card("media", 2, None);
+        assert_eq!(place_of(&rig, "media:next").as_deref(), Some("Media · At hand"));
+        // Имя своей полки в месте — как на вкладке.
+        rig.app.settings.rename_shelf(2, "Мой стол");
+        assert_eq!(place_of(&rig, "media:next").as_deref(), Some("Media · Мой стол"));
+    }
+
+    #[test]
+    fn the_card_name_finds_its_actions_but_the_shelf_name_does_not() {
+        let _world = world();
+        let mut rig = search_rig(r"\\.\TEST-SEARCH-CARD-NAME", Lang::Ru);
+        rig.key(Key::K, CTRL);
+        // «Яркость» — имя карточки: находятся и шаги яркости, и «Ночной свет», что лежит в этой карточке.
+        rig.type_text("яркость");
+        let list = titles(&rig);
+        assert!(
+            list.contains(&"Яркость: 25 %".to_string()) && list.contains(&"Ночной свет: включить".to_string()),
+            "{list:?}"
+        );
+        // «Экран и звук» — полка, а не название действия: её имя действия не находит.
+        rig.app.search.query = "звук".into();
+        assert!(
+            !titles(&rig).iter().any(|t| t.starts_with("Ночной свет")),
+            "по полке находятся только «Открыть полку…»"
+        );
+    }
+
+    #[test]
+    fn the_picker_waits_for_a_free_pointer_and_the_clock_search_opens_its_shelf() {
+        let _world = world();
+        let mut rig = search_rig(r"\\.\TEST-SEARCH-POINTER", Lang::En);
+        let t = texts::tr(Lang::En);
+        let pick = |rig: &Rig| rig.app.all_actions().into_iter().find(|a| a.id == "tools:pick").unwrap();
+        assert!(pick(&rig).enabled);
+        rig.app.pointer_over = true;
+        let grey = pick(&rig);
+        assert!(!grey.enabled && grey.reason.as_deref() == Some(t.search_pointer));
+        // «Добавить пояс» открывает поиск пояса в карточке — и полку, где она: «Часы» на «Системе».
+        assert_eq!(rig.app.shelf, 0);
+        rig.app.run_action("clocks:add");
+        assert_eq!(rig.app.shelf, 1, "карточка «Часы» должна быть на виду");
+        assert!(rig.app.typing_here());
+    }
+
+    #[test]
+    fn recent_actions_are_shown_for_an_empty_query_and_win_a_tie() {
+        let _world = world();
+        let mut rig = search_rig(r"\\.\TEST-SEARCH-RECENT", Lang::En);
+        rig.key(Key::K, CTRL);
+        let found = rig.app.found();
+        assert_eq!(
+            (found.listing, found.hits.len()),
+            (search_ui::Listing::Start, 0),
+            "ни одного недавнего — подсказка"
+        );
+        assert!(painted(&rig).contains(texts::tr(Lang::En).search_start));
+        rig.key(Key::Escape, NO_KEYS);
+        // Два действия подряд — недавнее первым.
+        for query in ["quiet", "dark"] {
+            rig.key(Key::K, CTRL);
+            rig.type_text(query);
+            rig.key(Key::Enter, NO_KEYS);
+        }
+        rig.key(Key::K, CTRL);
+        let found = rig.app.found();
+        assert_eq!(found.listing, search_ui::Listing::Recent);
+        let list: Vec<&str> = found.hits.iter().map(|h| h.title.as_str()).collect();
+        assert_eq!(list, ["Dark mode: turn on", "Quiet: turn off"]);
+        assert!(painted(&rig).contains(&texts::tr(Lang::En).search_recent.to_uppercase()));
+        // Равное совпадение — недавнее выше: «turn» есть у обоих и у «Не спать», но «Тёмная тема» была последней.
+        rig.type_text("turn");
+        let list = titles(&rig);
+        assert_eq!(list[..2], ["Dark mode: turn on", "Quiet: turn off"], "{list:?}");
+        // Повтор не дублируется, помнится не больше положенного.
+        for _ in 0..3 {
+            rig.app.remember_action("quick:dark");
+        }
+        assert_eq!(rig.app.recent.iter().filter(|r| *r == "quick:dark").count(), 1);
+        for i in 0..40 {
+            rig.app.remember_action(&format!("x:{i}"));
+        }
+        assert_eq!(rig.app.recent.len(), crate::search::KEEP_RECENT);
+    }
+
+    #[test]
+    fn the_view_lists_at_most_seven_rows_counts_them_all_and_says_when_nothing_is_found() {
+        let _world = world();
+        let mut rig = search_rig(r"\\.\TEST-SEARCH-COUNT", Lang::En);
+        rig.key(Key::K, CTRL);
+        rig.type_text("display");
+        let found = rig.app.found();
+        assert_eq!(found.hits.len(), crate::search::SHOWN);
+        assert!(found.total > crate::search::SHOWN);
+        let shown = painted(&rig);
+        assert!(shown.contains(&format!("RESULTS · {}", found.total)), "{shown}");
+        // Выбранная строка называет клавишу.
+        assert!(shown.lines().any(|l| l == "Enter"), "{shown}");
+        // Ничего нет — так и сказано, число — ноль.
+        rig.app.search.query = "zzzz-nothing".into();
+        rig.settle();
+        let shown = painted(&rig);
+        assert!(shown.contains(texts::tr(Lang::En).search_none) && shown.contains("RESULTS · 0"), "{shown}");
+        assert!(!shown.lines().any(|l| l == "Enter"), "строк нет — и клавиши нет");
+    }
+
+    #[test]
+    fn the_examples_fill_the_query_and_the_buttons_clear_and_close() {
+        let _world = world();
+        let mut rig = search_rig(r"\\.\TEST-SEARCH-BUTTONS", Lang::En);
+        rig.key(Key::K, CTRL);
+        // Крестика «Стереть» пока нет: стирать нечего.
+        assert!(rig.ctx.read_response(egui::Id::new(("anchor", "search-clear"))).is_none());
+        // Пример из «Можно так» подставляет запрос; найденное — по нему.
+        rig.click_anchor("search-tip-2");
+        assert_eq!(rig.app.search.query, "tea 5");
+        assert_eq!(titles(&rig)[0], "Timer “tea” for 5 min");
+        assert_eq!(rig.ctx.memory(|m| m.focused()), Some(egui::Id::new("search-field")), "поле снова в фокусе");
+        // «Стереть» очищает запрос и остаётся в поиске.
+        rig.click_anchor("search-clear");
+        assert!(rig.app.view == View::Search && rig.app.search.query.is_empty());
+        // Крестик «Закрыть поиск» — назад к карточкам.
+        rig.click_anchor("search-close");
+        assert!(rig.app.view == View::Cards);
+        // На узкой панели «Можно так» нет: результатам нужно всё место.
+        let mut rig = Rig::sized(600.0);
+        rig.key(Key::K, CTRL);
+        assert!(rig.ctx.read_response(egui::Id::new(("anchor", "search-tip-0"))).is_none());
+        // А строки есть, и фокус в поле.
+        rig.type_text("night");
+        assert!(rig.ctx.read_response(egui::Id::new(("anchor", "search-row-0"))).is_some());
+    }
+
+    #[test]
+    fn the_header_has_the_field_wide_and_the_icon_narrow_and_a_click_opens_the_search() {
+        for width in [560.0, 640.0, 700.0, 900.0, 1300.0] {
+            let mut rig = Rig::sized(width);
+            rig.app.settings.profiles = vec![Profile::new("Работа"), Profile::new("Игры"), Profile::new("Кино")];
+            rig.settle();
+            let button = rig.anchor("search-open");
+            let (_, right) = rig.app.header_edges;
+            assert!(button.left() >= right - 0.5, "{width}: поиск заходит на левую часть шапки: {button:?} / {right}");
+            assert!(button.right() <= width - 12.0 + 0.5, "{width}: поиск за краем панели: {button:?}");
+            let wide = button.width() > 100.0;
+            assert_eq!(button.width(), if wide { search_ui::FIELD_W } else { 30.0 }, "{width}: поле или значок");
+            // Три сцены и четыре кнопки справа занимают место: поле целиком — на 1300, а уже — только значок.
+            assert_eq!(wide, width >= 1300.0, "{width}");
+            for i in 0..3 {
+                assert!(rig.tab(i).right() <= right - 8.0, "{width}: вкладка {i} наезжает на правую часть");
+            }
+            rig.click(button.center());
+            assert!(rig.app.view == View::Search, "{width}: щелчок открывает поиск");
+        }
+    }
+
+    #[test]
+    fn the_search_header_replaces_the_tabs_and_scenes() {
+        let mut rig = Rig::new();
+        rig.app.settings.profiles = vec![Profile::new("Работа")];
+        rig.key(Key::K, CTRL);
+        let shown = painted(&rig);
+        let t = texts::tr(rig.app.lang());
+        assert!(shown.contains(t.search_keys) && shown.contains(t.search_field), "{shown}");
+        assert!(!shown.contains("Работа") && !shown.contains(t.scene), "сцен в шапке поиска нет");
+        assert!(rig.ctx.read_response(egui::Id::new(("shelf-tab", 0))).is_none(), "вкладок нет");
+        assert!(shown.contains("Antresol"), "на широкой панели слово есть");
+        // Узкая панель: подсказка (по-русски она длиннее) и слово «Antresol» уходят, поле и крестик остаются рядом.
+        let mut narrow = Rig::sized(560.0);
+        narrow.app.settings.common.language = Lang::Ru;
+        narrow.key(Key::K, CTRL);
+        let shown = painted(&narrow);
+        assert!(!shown.contains(texts::tr(Lang::Ru).search_keys) && !shown.contains("Antresol"), "{shown}");
+        let (field, close) = (narrow.rect(egui::Id::new("search-field")), narrow.anchor("search-close"));
+        assert!(field.right() <= close.left() && close.right() <= 560.0 - 12.0 + 0.5, "{field:?} {close:?}");
+        assert!(field.width() >= 150.0, "поле не схлопнулось: {field:?}");
+    }
+
+    #[test]
+    fn search_reads_every_card_on_every_shelf_and_the_search_forgets_itself_when_the_panel_hides() {
+        let mut rig = Rig::new();
+        let open_only = rig.app.refresh_set();
+        let all_cards: usize = rig.app.settings.shelves.iter().map(|s| s.cards.len()).sum();
+        assert!(open_only.len() < all_cards, "без поиска — открытая полка");
+        rig.app.view = View::Search;
+        assert_eq!(rig.app.refresh_set().len(), all_cards, "в поиске — все карточки с полок");
+        // Спряталась или нажали клавишу сцены — набранное забыто.
+        rig.app.search.query = "abc".into();
+        rig.app.close_search();
+        assert!(rig.app.view == View::Cards && rig.app.search.query.is_empty());
     }
 }

@@ -12,8 +12,8 @@ use anvil_ui::widgets::{self as w, Kind};
 use anvil_ui::{Icon, Palette, Tone};
 use eframe::egui::{self, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 
-use super::{Command, Ctx, Module, chips};
-use crate::config::{Profile, SceneRow};
+use super::{Action, Command, Ctx, Module, chips, mine};
+use crate::config::{Profile, SceneRow, Settings};
 use crate::sys::net::{self, Vpn, Wifi};
 use crate::sys::system;
 use crate::texts::{self, Tr};
@@ -252,8 +252,85 @@ impl Module for Quick {
                     self.save_scene(scene, rows);
                 }
             }
+            Command::RunAction(id) => {
+                if let Some(what) = mine(self.key(), id) {
+                    self.run_action(what, cx);
+                }
+            }
             Command::Dropped(_) | Command::Media(_) => {}
         }
+    }
+
+    /// Плитки («Не спать», «Тёмная тема», «Тишина», «Wi‑Fi») — включить или выключить по тому, что стоит; планы питания,
+    /// кроме стоящего; VPN — подключить или отключить (нет подключений в Windows — нет и действий). Плитка без значения
+    /// (не прочиталось, нет радио Wi‑Fi) — серая, с причиной.
+    fn actions(&self, t: &Tr, lang: anvil_ui::Lang, _settings: &Settings) -> Vec<Action> {
+        let (wifi, vpns) = {
+            let s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+            (s.wifi.clone(), s.vpns.clone())
+        };
+        let verb = |on: bool| if on { t.turn_off } else { t.turn_on };
+        let tile = |id: &str, label: &str, on: Option<bool>, icon: Icon, words: &str, why: &str| {
+            let title = match on {
+                Some(on) => format!("{label}: {}", verb(on)),
+                None => label.to_string(),
+            };
+            Action::new(id, title, t.quick, icon).words(words).off_if(on.is_none(), why)
+        };
+        let wifi_why = match &wifi {
+            Some(None) => t.scene_why_wifi,
+            _ => t.unavailable,
+        };
+        let mut out = vec![
+            tile(
+                "quick:awake",
+                t.keep_awake,
+                Some(self.awake),
+                Icon::Sun,
+                "сон экран не гасить sleep awake caffeine",
+                "",
+            ),
+            tile(
+                "quick:dark",
+                t.dark_theme_win,
+                self.dark,
+                Icon::Image,
+                "тема тёмная светлая dark light theme",
+                t.scene_why_read,
+            ),
+            tile(
+                "quick:quiet",
+                t.quiet,
+                self.quiet,
+                Icon::Pause,
+                "уведомления не беспокоить notifications silent",
+                t.scene_why_read,
+            ),
+            tile(
+                "quick:wifi",
+                t.wifi,
+                wifi.clone().flatten().map(|w| w.on),
+                Icon::Broadcast,
+                "вайфай сеть интернет wifi network",
+                wifi_why,
+            ),
+        ];
+        for plan in self.plans.iter().filter(|p| Some(p.guid) != self.plan) {
+            let id = format!("quick:plan:{}", system::guid_string(&plan.guid));
+            let title = format!("{}: {}", t.power_plan, plan.name);
+            out.push(
+                Action::new(id, title, t.quick, Icon::Gear).words("питание электропитание power plan performance"),
+            );
+        }
+        for v in &vpns {
+            let verb = if v.connected { t.disconnect } else { t.connect };
+            let title = format!("VPN {}: {}", texts::scene_quoted(lang, &v.name), verb.to_lowercase());
+            out.push(
+                Action::new(format!("quick:vpn:{}", v.name), title, t.quick, Icon::Lock)
+                    .words("впн туннель vpn tunnel"),
+            );
+        }
+        out
     }
 
     /// Совпадает ли то, что сцена отметила здесь, с тем, что стоит: «Не спать» — своё состояние, остальное — прочитанное при
@@ -359,10 +436,7 @@ impl Module for Quick {
                 if chips(ui, &mut want, &opts)
                     && let Some(g) = want
                 {
-                    match system::set_plan(&g) {
-                        Ok(()) => self.plan = Some(g),
-                        Err(e) => part_failed(cx, SceneRow::Plan, &e),
-                    }
+                    self.set_plan(g, cx);
                 }
             }
 
@@ -394,6 +468,39 @@ fn part_failed(cx: &mut Ctx, row: SceneRow, e: &str) {
 }
 
 impl Quick {
+    /// План питания: чип в карточке и действие поиска.
+    fn set_plan(&mut self, guid: windows::core::GUID, cx: &mut Ctx) {
+        match system::set_plan(&guid) {
+            Ok(()) => self.plan = Some(guid),
+            Err(e) => part_failed(cx, SceneRow::Plan, &e),
+        }
+    }
+
+    /// Действие поиска «Быстрых настроек»: то же, что щелчок по плитке, чипу плана или кнопке VPN.
+    fn run_action(&mut self, what: &str, cx: &mut Ctx) {
+        let (wifi, vpns) = {
+            let s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+            (s.wifi.clone().flatten(), s.vpns.clone())
+        };
+        match what {
+            "awake" => self.toggle(0, wifi.as_ref(), cx),
+            "dark" => self.toggle(1, wifi.as_ref(), cx),
+            "quiet" => self.toggle(2, wifi.as_ref(), cx),
+            "wifi" => self.toggle(3, wifi.as_ref(), cx),
+            other => {
+                if let Some(guid) = other.strip_prefix("plan:").and_then(system::guid_from)
+                    && self.plans.iter().any(|p| p.guid == guid)
+                {
+                    self.set_plan(guid, cx);
+                } else if let Some(name) = other.strip_prefix("vpn:")
+                    && let Some(v) = vpns.iter().find(|v| v.name == name)
+                {
+                    let _ = self.jobs.send(Job::Vpn(v.name.clone(), !v.connected));
+                }
+            }
+        }
+    }
+
     /// Поставить то, что сцена отметила у быстрых настроек. Перед сменой — запомнить, что было. Возврат прежней сцены
     /// пропадает; та же сцена ещё раз продолжает прежний «сеанс»: что уже помним, то и остаётся.
     fn apply_scene(&mut self, scene: &Profile, cx: &mut Ctx) {
@@ -862,5 +969,182 @@ mod tests {
         let screen_only = Profile::new("S");
         assert_eq!(q.scene_part(&screen_only), None);
         assert!(!q.scene_can_undo(&screen_only));
+    }
+}
+
+// ─── Действия поиска ────────────────────────────────────────────────────────
+//
+// Плитки, планы питания и VPN — то же, что щелчок в карточке. Выдуманный мир (тема, «Тишина», план, Wi‑Fi, VPN «Demo
+// Office») один на все тесты — под `WORLD_TEST`.
+
+#[cfg(test)]
+mod search_tests {
+    use std::sync::MutexGuard;
+    use std::time::{Duration, Instant};
+
+    use anvil_ui::Lang;
+    use windows::core::GUID;
+
+    use super::*;
+    use crate::sys;
+
+    const EN: Lang = Lang::En;
+
+    fn world() -> MutexGuard<'static, ()> {
+        let guard = sys::WORLD_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        sys::reset_fake_world();
+        guard
+    }
+
+    fn wait(what: &str, mut ok: impl FnMut() -> bool) {
+        let start = Instant::now();
+        while !ok() {
+            assert!(start.elapsed() < Duration::from_secs(3), "не дождались: {what}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn run(q: &mut Quick, id: &str) -> Vec<(String, Tone)> {
+        let mut toasts = Vec::new();
+        let mut settings = Settings::default();
+        let mut cx = Ctx {
+            t: texts::tr(EN),
+            lang: EN,
+            monitor: r"\\.\TEST-SEARCH-QUICK",
+            toasts: &mut toasts,
+            settings: &mut settings,
+        };
+        q.command(&Command::RunAction(id.to_string()), &mut cx);
+        toasts
+    }
+
+    fn titles(actions: &[Action]) -> Vec<&str> {
+        actions.iter().map(|a| a.title.as_str()).collect()
+    }
+
+    /// Карточка, опрошенная, как при показе панели; Wi‑Fi и VPN отвечают из потока модуля — ждём.
+    fn card() -> Quick {
+        let mut q = Quick::default();
+        q.refresh("");
+        wait("Wi‑Fi и VPN прочитаны", || {
+            q.scene_rows().contains(&(SceneRow::Wifi, true)) && !q.shared.lock().unwrap().vpns.is_empty()
+        });
+        q
+    }
+
+    #[test]
+    fn tiles_plans_and_vpn_are_offered() {
+        let _world = world();
+        let q = card();
+        let t = texts::tr(EN);
+        let actions = q.actions(t, EN, &Settings::default());
+        // Вначале: «Не спать» выключено, тема тёмная, «Тишина» выключена, Wi‑Fi включён, план «Balanced», VPN отключён.
+        assert_eq!(
+            titles(&actions),
+            [
+                "Keep awake: turn on",
+                "Dark mode: turn off",
+                "Quiet: turn on",
+                "Wi‑Fi: turn off",
+                "Power plan: High performance",
+                "Power plan: Power saver",
+                "VPN “Demo Office”: connect",
+            ]
+        );
+        assert!(actions.iter().all(|a| a.enabled && a.reason.is_none() && a.place == t.quick));
+        let ru = q.actions(texts::tr(Lang::Ru), Lang::Ru, &Settings::default());
+        assert_eq!(ru[0].title, "Не спать: включить");
+        assert_eq!(ru[6].title, "VPN «Demo Office»: подключить");
+        // Слова для поиска — оба языка.
+        assert!(actions[2].words.contains("уведомления") && actions[2].words.contains("notifications"));
+    }
+
+    #[test]
+    fn every_action_does_what_the_click_does() {
+        let _world = world();
+        let mut q = card();
+        let t = texts::tr(EN);
+        assert!(run(&mut q, "quick:awake").is_empty());
+        assert!(q.awake, "«Не спать» включено");
+        run(&mut q, "quick:dark");
+        assert_eq!(sys::system::dark_theme(), Some(false));
+        run(&mut q, "quick:quiet");
+        assert_eq!(sys::system::notifications_off(), Some(true));
+        run(&mut q, "quick:wifi");
+        wait("Wi‑Fi выключен", || sys::net::wifi().is_some_and(|w| !w.on));
+        let plan = format!("quick:plan:{}", system::guid_string(&GUID::from_u128(3)));
+        assert!(run(&mut q, &plan).is_empty());
+        assert_eq!(sys::system::plans().1, Some(GUID::from_u128(3)));
+        run(&mut q, "quick:vpn:Demo Office");
+        wait("VPN подключается", || {
+            sys::BLOCKED.lock().unwrap().iter().any(|w| w.contains("set_vpn Demo Office true"))
+        });
+        // Названия следуют за состоянием: включённое предлагается выключить, и наоборот; стоящий план не предлагается.
+        wait("карточка видит Wi‑Fi выключенным", || {
+            titles(&q.actions(t, EN, &Settings::default())).contains(&"Wi‑Fi: turn on")
+        });
+        let list = q.actions(t, EN, &Settings::default());
+        let list = titles(&list);
+        for want in ["Keep awake: turn off", "Dark mode: turn on", "Quiet: turn off", "Power plan: Balanced"] {
+            assert!(list.contains(&want), "нет «{want}»: {list:?}");
+        }
+        assert!(!list.contains(&"Power plan: Power saver"));
+        // Те же щелчки вторым разом возвращают.
+        run(&mut q, "quick:awake");
+        run(&mut q, "quick:dark");
+        run(&mut q, "quick:quiet");
+        assert!(!q.awake);
+        assert_eq!((sys::system::dark_theme(), sys::system::notifications_off()), (Some(true), Some(false)));
+        // Чужое действие и несуществующий план ничего не делают.
+        let before = sys::system::plans().1;
+        assert!(run(&mut q, "display:hdr").is_empty() && run(&mut q, "quick:plan:{nope}").is_empty());
+        assert_eq!(sys::system::plans().1, before);
+    }
+
+    #[test]
+    fn an_unavailable_tile_is_grey_with_the_reason_and_does_nothing() {
+        let _world = world();
+        let mut q = card();
+        let t = texts::tr(EN);
+        // Радио Wi‑Fi нет: плитка серая — «Нет радио Wi‑Fi», название без «включить / выключить».
+        q.shared.lock().unwrap().wifi = Some(None);
+        let actions = q.actions(t, EN, &Settings::default());
+        let wifi = actions.iter().find(|a| a.id == "quick:wifi").expect("плитка есть");
+        assert!(!wifi.enabled && wifi.reason.as_deref() == Some(t.scene_why_wifi) && wifi.title == t.wifi);
+        run(&mut q, "quick:wifi");
+        assert_eq!(sys::net::wifi().map(|w| w.on), Some(true), "серая плитка ничего не выключила");
+        // Ещё не прочиталось: «Недоступно».
+        q.shared.lock().unwrap().wifi = None;
+        let wifi = q.actions(t, EN, &Settings::default()).into_iter().find(|a| a.id == "quick:wifi").unwrap();
+        assert!(!wifi.enabled && wifi.reason.as_deref() == Some(t.unavailable));
+        // Windows не отдала тему и «Тишину»: серые, причина — «Windows не отдала значение».
+        q.dark = None;
+        q.quiet = None;
+        let actions = q.actions(t, EN, &Settings::default());
+        for id in ["quick:dark", "quick:quiet"] {
+            let a = actions.iter().find(|a| a.id == id).unwrap();
+            assert!(!a.enabled && a.reason.as_deref() == Some(t.scene_why_read), "{id}");
+        }
+        run(&mut q, "quick:dark");
+        run(&mut q, "quick:quiet");
+        assert_eq!((sys::system::dark_theme(), sys::system::notifications_off()), (Some(true), Some(false)));
+        // «Не спать» можно всегда.
+        assert!(actions.iter().find(|a| a.id == "quick:awake").unwrap().enabled);
+    }
+
+    #[test]
+    fn without_vpn_connections_there_are_no_vpn_actions_and_no_plans_when_none() {
+        let _world = world();
+        let q = card();
+        let t = texts::tr(EN);
+        q.shared.lock().unwrap().vpns.clear();
+        let actions = q.actions(t, EN, &Settings::default());
+        assert!(!actions.iter().any(|a| a.id.starts_with("quick:vpn:")), "VPN-подключений нет — и действий нет");
+        // Планов питания не прочиталось — их действий тоже нет (остаются плитки).
+        let mut q = card();
+        q.plans.clear();
+        let actions = q.actions(t, EN, &Settings::default());
+        assert_eq!(actions.len(), 5, "четыре плитки и VPN");
+        assert!(!actions.iter().any(|a| a.id.starts_with("quick:plan:")));
     }
 }

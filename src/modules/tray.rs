@@ -10,9 +10,10 @@ use anvil_ui::Icon;
 use anvil_ui::widgets as w;
 use eframe::egui::{self, Ui};
 
-use super::{Command, Ctx, Module, row};
+use super::{Action, Command, Ctx, Module, mine, row};
+use crate::config::Settings;
 use crate::sys;
-use crate::texts::Tr;
+use crate::texts::{self, Tr};
 
 /// Сколько файлов держит лоток.
 pub const KEEP: usize = 30;
@@ -32,6 +33,11 @@ pub fn add(tray: &mut Vec<String>, files: &[String]) {
         tray.insert(0, f.clone());
     }
     tray.truncate(KEEP);
+}
+
+/// Файлы лотка в демо-режиме (выдуманные).
+fn demo_files() -> Vec<String> {
+    [r"C:\Demo\report.pdf", r"C:\Demo\photo.png", r"C:\Demo\notes.txt"].map(String::from).to_vec()
 }
 
 fn file_name(path: &str) -> &str {
@@ -62,16 +68,44 @@ impl Module for Tray {
     }
 
     fn command(&mut self, cmd: &Command, cx: &mut Ctx) {
-        if let Command::Dropped(files) = cmd {
-            add(&mut cx.settings.tray, files);
+        match cmd {
+            Command::Dropped(files) => add(&mut cx.settings.tray, files),
+            // «Открыть «…»» из поиска — щелчок по строке лотка: файл открывается, как двойным щелчком; нет файла — ничего.
+            Command::RunAction(id) => {
+                let rest = mine(self.key(), id).and_then(|r| r.strip_prefix("open:"));
+                let Some(i) = rest.and_then(|n| n.parse::<usize>().ok()) else { return };
+                let Some(path) = cx.settings.tray.get(i).cloned().filter(|_| !sys::demo()) else { return };
+                if self.missing.lock().unwrap_or_else(|e| e.into_inner()).contains(&path) {
+                    return;
+                }
+                if let Err(e) = sys::launch(&path, "") {
+                    eprintln!("open from tray failed: {e}");
+                    cx.toasts.push((format!("{}: {}", cx.t.failed, file_name(&path)), anvil_ui::Tone::Danger));
+                }
+            }
+            _ => {}
         }
+    }
+
+    /// «Открыть «report.pdf»» у каждого файла лотка; нет файла на диске — серое, «нет файла».
+    fn actions(&self, t: &Tr, lang: anvil_ui::Lang, settings: &Settings) -> Vec<Action> {
+        let list = if sys::demo() { demo_files() } else { settings.tray.clone() };
+        let gone = self.missing.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        list.iter()
+            .enumerate()
+            .map(|(i, path)| {
+                let missing = !sys::demo() && gone.contains(path);
+                let title = texts::search_open(lang, file_name(path));
+                Action::new(format!("tray:open:{i}"), title, t.tray, Icon::File)
+                    .words(&format!("файл лоток file tray {path}"))
+                    .off_if(missing, t.tray_missing)
+            })
+            .collect()
     }
 
     fn ui(&mut self, ui: &mut Ui, cx: &mut Ctx) {
         let t = cx.t;
-        let demo: Vec<String> =
-            [r"C:\Demo\report.pdf", r"C:\Demo\photo.png", r"C:\Demo\notes.txt"].map(String::from).to_vec();
-        let list = if sys::demo() { demo } else { cx.settings.tray.clone() };
+        let list = if sys::demo() { demo_files() } else { cx.settings.tray.clone() };
         self.list = list.clone();
         let gone = self.missing.lock().unwrap_or_else(|e| e.into_inner()).clone();
         if list.is_empty() {
@@ -143,5 +177,52 @@ mod tests {
     fn names() {
         assert_eq!(file_name(r"C:\Demo\report.pdf"), "report.pdf");
         assert_eq!(file_name("x"), "x");
+    }
+
+    fn launched(what: &str) -> bool {
+        let want = format!("launch {what} ");
+        sys::BLOCKED.lock().unwrap_or_else(|e| e.into_inner()).contains(&want)
+    }
+
+    fn run(tray: &mut Tray, settings: &mut Settings, id: &str) -> Vec<(String, anvil_ui::Tone)> {
+        let mut toasts = Vec::new();
+        let mut cx = Ctx {
+            t: texts::tr(anvil_ui::Lang::En),
+            lang: anvil_ui::Lang::En,
+            monitor: "",
+            toasts: &mut toasts,
+            settings,
+        };
+        tray.command(&Command::RunAction(id.to_string()), &mut cx);
+        toasts
+    }
+
+    #[test]
+    fn tray_files_are_offered_and_opened_like_a_click_on_the_row() {
+        let (a, b) = (r"C:\search-test\report-4412.pdf", r"C:\search-test\gone-4412.txt");
+        let mut settings = Settings { tray: vec![a.into(), b.into()], ..Default::default() };
+        let mut tray = Tray::default();
+        let en = texts::tr(anvil_ui::Lang::En);
+        let actions = tray.actions(en, anvil_ui::Lang::En, &settings);
+        let titles: Vec<&str> = actions.iter().map(|a| a.title.as_str()).collect();
+        assert_eq!(titles, ["Open “report-4412.pdf”", "Open “gone-4412.txt”"]);
+        assert_eq!(
+            tray.actions(texts::tr(anvil_ui::Lang::Ru), anvil_ui::Lang::Ru, &settings)[0].title,
+            "Открыть «report-4412.pdf»"
+        );
+        assert!(actions.iter().all(|x| x.enabled && x.place == en.tray && x.words.contains("search-test")));
+        // Файл открывается, как двойным щелчком (запуск — за заслоном: в тестах ничего не открывается).
+        assert!(run(&mut tray, &mut settings, "tray:open:0").is_empty());
+        assert!(launched(a), "файл не открылся");
+        // Нет файла на диске (его проверяет поток карточки): серое «нет файла», и не открывается.
+        tray.missing.lock().unwrap().insert(b.to_string());
+        let actions = tray.actions(en, anvil_ui::Lang::En, &settings);
+        assert!(actions[0].enabled && !actions[1].enabled && actions[1].reason.as_deref() == Some(en.tray_missing));
+        run(&mut tray, &mut settings, "tray:open:1");
+        assert!(!launched(b), "нет файла — нечего открывать");
+        // Номер за списком, чужое действие и пустой лоток — ничего.
+        run(&mut tray, &mut settings, "tray:open:9");
+        run(&mut tray, &mut settings, "quick:wifi");
+        assert!(Tray::default().actions(en, anvil_ui::Lang::En, &Settings::default()).is_empty());
     }
 }

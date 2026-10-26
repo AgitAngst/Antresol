@@ -19,7 +19,7 @@ pub mod tray;
 use anvil_ui::{Icon, Tone};
 use eframe::egui::{self, Ui};
 
-use crate::config::{Profile, SceneRow};
+use crate::config::{Profile, SceneRow, Settings};
 use crate::texts::Tr;
 
 /// Что модуль получает от панели на кадр.
@@ -48,6 +48,73 @@ pub enum Command {
     Dropped(Vec<String>),
     /// Кнопка плеера на спрятанной полоске.
     Media(crate::sys::media::Action),
+    /// Выполнить действие из поиска (`Action::id`): его берёт модуль, чей это ключ (`<ключ модуля>:…`), остальные пропускают.
+    /// Делает то же, что щелчок по этому месту в карточке: те же функции, те же уведомления и «Оставить?».
+    RunAction(String),
+}
+
+/// Действие, которое можно найти и выполнить с клавиатуры (поиск в шапке): то же, что щелчок в карточке.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Action {
+    /// `<ключ модуля>:<что>` — по нему модуль узнаёт своё действие в `Command::RunAction`.
+    pub id: String,
+    /// Что написано в строке: «Ночной свет: включить».
+    pub title: String,
+    /// Где это в панели — карточка; полку допишет панель («Яркость · Экран и звук»).
+    pub place: String,
+    pub icon: Icon,
+    /// Слова для поиска, кроме названия: оба языка сразу (по «night» находится «Ночной свет» и при русском интерфейсе).
+    pub words: String,
+    /// Можно ли сейчас. Нельзя — строка серая, с причиной, и Enter её не выполняет.
+    pub enabled: bool,
+    /// Почему нельзя (вторая строка серой строки).
+    pub reason: Option<String>,
+    /// Действию нужна мышь вне панели («Пипетка» берёт цвет под ней): пока мышь над панелью, оно серое.
+    pub needs_free_pointer: bool,
+}
+
+impl Action {
+    pub fn new(id: impl Into<String>, title: impl Into<String>, place: impl Into<String>, icon: Icon) -> Action {
+        Action {
+            id: id.into(),
+            title: title.into(),
+            place: place.into(),
+            icon,
+            words: String::new(),
+            enabled: true,
+            reason: None,
+            needs_free_pointer: false,
+        }
+    }
+
+    /// Слова для поиска (оба языка), через пробел.
+    pub fn words(mut self, words: &str) -> Action {
+        self.words = words.to_string();
+        self
+    }
+
+    /// Недоступно сейчас: серая строка с причиной.
+    pub fn off(mut self, reason: &str) -> Action {
+        self.enabled = false;
+        self.reason = Some(reason.to_string());
+        self
+    }
+
+    /// Недоступно, если `cond`.
+    pub fn off_if(self, cond: bool, reason: &str) -> Action {
+        if cond { self.off(reason) } else { self }
+    }
+
+    /// Нужна мышь вне панели.
+    pub fn free_pointer(mut self) -> Action {
+        self.needs_free_pointer = true;
+        self
+    }
+}
+
+/// Остаток `id` после ключа модуля: `mine("quick", "quick:wifi")` — `Some("wifi")`. Чужое действие — `None`.
+pub fn mine<'a>(key: &str, id: &'a str) -> Option<&'a str> {
+    id.strip_prefix(key)?.strip_prefix(':')
 }
 
 /// Что играет — для спрятанной полоски.
@@ -87,6 +154,13 @@ pub trait Module {
         false
     }
     fn command(&mut self, _cmd: &Command, _cx: &mut Ctx) {}
+    /// Что из этой карточки можно найти и выполнить из поиска: каждое — то же, что щелчок в карточке (`Command::RunAction`).
+    /// Только по уже прочитанному (`refresh`), без обращений к Windows: список строится каждый кадр, пока поиск открыт.
+    /// Недоступное отдаётся серым, с причиной; чего у системы нет совсем (нет VPN) — не отдаётся. У модуля без действий —
+    /// пустой список.
+    fn actions(&self, _t: &Tr, _lang: anvil_ui::Lang, _settings: &Settings) -> Vec<Action> {
+        Vec::new()
+    }
     /// Каждый кадр панели, даже спрятанной: дешёвая слежка (номер копирования буфера).
     fn background(&mut self, _settings: &crate::config::Settings) {}
     /// Программа закрывается (кнопка «Закрыть», Alt+F4, выход из сеанса): вернуть то, что держали на время, —

@@ -230,6 +230,33 @@ pub struct Tr {
     pub scene_why_wifi: &'static str,
     pub scene_why_read: &'static str,
     pub scenes_none: &'static str,
+    // Поиск действий (2.2.0): один блок.
+    pub search_field: &'static str,
+    pub search_tip: &'static str,
+    pub search_clear: &'static str,
+    pub search_close: &'static str,
+    pub search_keys: &'static str,
+    pub search_found: &'static str,
+    pub search_recent: &'static str,
+    pub search_start: &'static str,
+    pub search_try: &'static str,
+    pub search_none: &'static str,
+    pub search_calc: &'static str,
+    pub search_pointer: &'static str,
+    pub search_hide: &'static str,
+    pub search_undo: &'static str,
+    pub search_pick: &'static str,
+    pub search_play: &'static str,
+    pub search_pause: &'static str,
+    pub search_next: &'static str,
+    pub search_previous: &'static str,
+    pub turn_on: &'static str,
+    pub turn_off: &'static str,
+    pub scale_word: &'static str,
+    /// Таймер со своим именем дошёл; `{}` — имя.
+    pub timer_named_done: &'static str,
+    /// Примеры запросов справа в поиске: запрос и что он делает.
+    pub tips: [(&'static str, &'static str); 6],
     pub wifi: &'static str,
     pub accents: [&'static str; 5],
 }
@@ -457,6 +484,37 @@ const RU: Tr = Tr {
     scene_why_wifi: "Нет радио Wi‑Fi",
     scene_why_read: "Windows не отдала значение",
     scenes_none: "Сцен пока нет — «+» в шапке создаёт сцену из текущих настроек.",
+    search_field: "Найти действие",
+    search_tip: "Или просто начните печатать, пока панель открыта",
+    search_clear: "Стереть",
+    search_close: "Закрыть поиск (Esc)",
+    search_keys: "↑↓ — выбрать · Enter — выполнить · Esc — назад",
+    search_found: "Найдено",
+    search_recent: "Недавние",
+    search_start: "Начните печатать",
+    search_try: "Можно так",
+    search_none: "Ничего не нашлось — попробуйте другое слово",
+    search_calc: "Посчитать · Enter — скопировать результат",
+    search_pointer: "Наведите мышь на цвет вне панели",
+    search_hide: "Спрятать панель",
+    search_undo: "вернуть как было",
+    search_pick: "цвет под мышью",
+    search_play: "играть",
+    search_pause: "пауза",
+    search_next: "следующий трек",
+    search_previous: "предыдущий трек",
+    turn_on: "включить",
+    turn_off: "выключить",
+    scale_word: "Масштаб",
+    timer_named_done: "Таймер «{}» дошёл",
+    tips: [
+        ("ночн", "ночной свет"),
+        ("1080", "режим экрана"),
+        ("чай 5", "таймер на 5 минут"),
+        ("2*3,5", "посчитать"),
+        ("кино", "сцена"),
+        ("тишина", "уведомления"),
+    ],
     wifi: "Wi‑Fi",
     accents: ["Лайм", "Фиолетовый", "Индиго", "Фуксия", "Лазурь"],
 };
@@ -684,6 +742,37 @@ const EN: Tr = Tr {
     scene_why_wifi: "No Wi‑Fi radio",
     scene_why_read: "Windows did not give the value",
     scenes_none: "No scenes yet — “+” in the header makes one from the current settings.",
+    search_field: "Find an action",
+    search_tip: "Or just start typing while the panel is open",
+    search_clear: "Clear",
+    search_close: "Close search (Esc)",
+    search_keys: "↑↓ select · Enter run · Esc back",
+    search_found: "Results",
+    search_recent: "Recent",
+    search_start: "Start typing",
+    search_try: "Try",
+    search_none: "Nothing found — try another word",
+    search_calc: "Calculate · Enter copies the result",
+    search_pointer: "Point the mouse at a color outside the panel",
+    search_hide: "Hide the panel",
+    search_undo: "undo",
+    search_pick: "color under the mouse",
+    search_play: "play",
+    search_pause: "pause",
+    search_next: "next track",
+    search_previous: "previous track",
+    turn_on: "turn on",
+    turn_off: "turn off",
+    scale_word: "Scale",
+    timer_named_done: "Timer “{}” is up",
+    tips: [
+        ("night", "night light"),
+        ("1080", "display mode"),
+        ("tea 5", "5 minute timer"),
+        ("2*3.5", "calculate"),
+        ("movie", "scene"),
+        ("quiet", "notifications"),
+    ],
     wifi: "Wi‑Fi",
     accents: ["Lime", "Violet", "Indigo", "Fuchsia", "Sky"],
 };
@@ -1027,6 +1116,42 @@ pub fn github_error(lang: Lang, e: &str) -> String {
         (Lang::En, "403" | "429") => "GitHub rate limit — later".into(),
         (Lang::Ru, other) => format!("Не прочитать: {other}"),
         (Lang::En, other) => format!("Cannot read: {other}"),
+    }
+}
+
+// ─── Поиск действий (2.2.0) ─────────────────────────────────────────────────
+
+/// Таймер из запроса: «Таймер «чай» на 5 мин»; без имени — «Таймер на 5 мин».
+pub fn search_timer(lang: Lang, name: Option<&str>, minutes: u32) -> String {
+    match (lang, name) {
+        (Lang::Ru, Some(n)) => format!("Таймер «{n}» на {minutes} мин"),
+        (Lang::Ru, None) => format!("Таймер на {minutes} мин"),
+        (Lang::En, Some(n)) => format!("Timer “{n}” for {minutes} min"),
+        (Lang::En, None) => format!("Timer for {minutes} min"),
+    }
+}
+
+/// «Открыть полку «Система»».
+pub fn search_open_shelf(lang: Lang, name: &str) -> String {
+    match lang {
+        Lang::Ru => format!("Открыть полку «{name}»"),
+        Lang::En => format!("Open the “{name}” shelf"),
+    }
+}
+
+/// «Открыть «report.pdf»» — файл лотка и репозиторий GitHub.
+pub fn search_open(lang: Lang, name: &str) -> String {
+    match lang {
+        Lang::Ru => format!("Открыть «{name}»"),
+        Lang::En => format!("Open “{name}”"),
+    }
+}
+
+/// «Скопировать «Спасибо, получил!»» — закреплённый текст буфера.
+pub fn search_copy(lang: Lang, text: &str) -> String {
+    match lang {
+        Lang::Ru => format!("Скопировать «{text}»"),
+        Lang::En => format!("Copy “{text}”"),
     }
 }
 

@@ -188,9 +188,39 @@ impl Module for Media {
     }
 
     fn command(&mut self, cmd: &super::Command, _cx: &mut Ctx) {
-        if let super::Command::Media(a) = cmd {
-            let _ = self.jobs.send(Job::Act(*a));
+        match cmd {
+            super::Command::Media(a) => {
+                let _ = self.jobs.send(Job::Act(*a));
+            }
+            // Те же кнопки, что в карточке: «назад», «играть / пауза», «вперёд».
+            super::Command::RunAction(id) => {
+                let action = match super::mine(self.key(), id) {
+                    Some("playpause") => Action::PlayPause,
+                    Some("next") => Action::Next,
+                    Some("previous") => Action::Previous,
+                    _ => return,
+                };
+                let _ = self.jobs.send(Job::Act(action));
+            }
+            _ => {}
         }
+    }
+
+    /// «Медиа: играть / пауза», «следующий трек», «предыдущий трек» — пока что-то играет; иначе серые («Ничего не играет»).
+    fn actions(&self, t: &Tr, _lang: anvil_ui::Lang, _settings: &crate::config::Settings) -> Vec<super::Action> {
+        let now = self.shared.lock().unwrap_or_else(|e| e.into_inner()).now.clone();
+        let playing = now.as_ref().is_some_and(|n| n.playing);
+        let verb = if playing { t.search_pause } else { t.search_play };
+        let words = "музыка плеер трек песня music player track song";
+        let item = |id: &str, what: &str, icon: Icon| {
+            let action = super::Action::new(id, format!("{}: {what}", t.media), t.media, icon).words(words);
+            action.off_if(now.is_none(), t.media_none)
+        };
+        vec![
+            item("media:playpause", verb, if playing { Icon::Pause } else { Icon::Play }),
+            item("media:next", t.search_next, Icon::ArrowRight),
+            item("media:previous", t.search_previous, Icon::ArrowLeft),
+        ]
     }
 
     /// Панель зовёт, только пока она спрятана и полоска с медиа у края: тогда и перечитываем — раз в секунду.
@@ -294,5 +324,71 @@ mod tests {
         assert_ne!(track_key(&a), track_key(&b));
         let paused = NowPlaying { playing: true, ..a.clone() };
         assert_eq!(track_key(&a), track_key(&paused), "пауза — не новый трек");
+    }
+
+    /// Карточка без потока Windows: команды уходят в наш канал, а не в настоящий плеер (`media::act` в тестах не за заслоном).
+    fn card() -> (Media, Receiver<Job>) {
+        let mut media = Media::default();
+        let (tx, rx) = mpsc::channel();
+        media.jobs = tx;
+        (media, rx)
+    }
+
+    fn run(media: &mut Media, id: &str) {
+        let mut toasts = Vec::new();
+        let mut settings = crate::config::Settings::default();
+        let mut cx = Ctx {
+            t: crate::texts::tr(anvil_ui::Lang::En),
+            lang: anvil_ui::Lang::En,
+            monitor: "",
+            toasts: &mut toasts,
+            settings: &mut settings,
+        };
+        media.command(&super::super::Command::RunAction(id.to_string()), &mut cx);
+    }
+
+    fn playing(on: Option<bool>) -> Option<NowPlaying> {
+        on.map(|playing| NowPlaying { title: "Track".into(), playing, ..Default::default() })
+    }
+
+    #[test]
+    fn search_offers_the_player_buttons_while_something_plays() {
+        let (media, _rx) = card();
+        let (en, ru) = (crate::texts::tr(anvil_ui::Lang::En), crate::texts::tr(anvil_ui::Lang::Ru));
+        let settings = crate::config::Settings::default();
+        let titles = |media: &Media| -> Vec<String> {
+            media.actions(en, anvil_ui::Lang::En, &settings).into_iter().map(|a| a.title).collect()
+        };
+        // Ничего не играет — серые, причина «Ничего не играет».
+        let actions = media.actions(en, anvil_ui::Lang::En, &settings);
+        assert_eq!(titles(&media), ["Media: play", "Media: next track", "Media: previous track"]);
+        assert!(actions.iter().all(|a| !a.enabled && a.reason.as_deref() == Some(en.media_none)));
+        // Играет — пауза; на паузе — играть.
+        media.shared.lock().unwrap().now = playing(Some(true));
+        assert_eq!(titles(&media)[0], "Media: pause");
+        assert!(media.actions(en, anvil_ui::Lang::En, &settings).iter().all(|a| a.enabled && a.reason.is_none()));
+        media.shared.lock().unwrap().now = playing(Some(false));
+        assert_eq!(titles(&media)[0], "Media: play");
+        let ru_titles: Vec<String> =
+            media.actions(ru, anvil_ui::Lang::Ru, &settings).into_iter().map(|a| a.title).collect();
+        assert_eq!(ru_titles, ["Медиа: играть", "Медиа: следующий трек", "Медиа: предыдущий трек"]);
+    }
+
+    #[test]
+    fn the_actions_press_the_same_player_buttons_as_the_card() {
+        let (mut media, rx) = card();
+        for (id, want) in
+            [("media:playpause", Action::PlayPause), ("media:next", Action::Next), ("media:previous", Action::Previous)]
+        {
+            run(&mut media, id);
+            match rx.try_recv() {
+                Ok(Job::Act(got)) => assert_eq!(got, want, "{id}"),
+                _ => panic!("{id}: плееру ничего не ушло"),
+            }
+        }
+        // Чужое и неизвестное — ничего.
+        run(&mut media, "quick:wifi");
+        run(&mut media, "media:rewind");
+        assert!(rx.try_recv().is_err());
     }
 }

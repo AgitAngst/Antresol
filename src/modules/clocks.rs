@@ -5,8 +5,8 @@ use anvil_ui::widgets::{self as w, Kind};
 use anvil_ui::{Icon, Palette};
 use eframe::egui::{self, Ui};
 
-use super::{Ctx, Module, row};
-use crate::config::{Clock, MAX_CLOCKS};
+use super::{Action, Command, Ctx, Module, mine, row};
+use crate::config::{Clock, MAX_CLOCKS, Settings};
 use crate::sys::{self, tz};
 use crate::texts::{self, Tr};
 
@@ -29,6 +29,18 @@ pub fn short_name(key: &str) -> String {
 }
 
 impl Clocks {
+    /// «Добавить пояс»: кнопка карточки и действие поиска — пояса Windows и поле поиска пояса.
+    fn start_adding(&mut self) {
+        self.keys = tz::keys()
+            .into_iter()
+            .map(|k| {
+                let label = tz::now_in(&k).map(|(_, _, off)| tz::utc_label(off)).unwrap_or_default();
+                (k, label)
+            })
+            .collect();
+        self.adding = Some(String::new());
+    }
+
     fn list_ui(&mut self, ui: &mut Ui, cx: &mut Ctx, list: &[Clock]) {
         let t = cx.t;
         let p = Palette::of(ui);
@@ -150,6 +162,21 @@ impl Module for Clocks {
         self.adding.is_some()
     }
 
+    /// «Добавить пояс»: открывает в карточке поиск пояса (панель покажет карточку). Часов уже предел — серое.
+    fn actions(&self, t: &Tr, _lang: anvil_ui::Lang, settings: &Settings) -> Vec<Action> {
+        let count = if sys::demo() { 2 } else { settings.clocks.len() };
+        let action = Action::new("clocks:add", t.clock_add, t.clocks, Icon::Plus);
+        vec![action.words("часы пояс время timezone time zone clock").off_if(count >= MAX_CLOCKS, t.unavailable)]
+    }
+
+    fn command(&mut self, cmd: &Command, cx: &mut Ctx) {
+        let Command::RunAction(id) = cmd else { return };
+        let count = if sys::demo() { 2 } else { cx.settings.clocks.len() };
+        if mine(self.key(), id) == Some("add") && count < MAX_CLOCKS {
+            self.start_adding();
+        }
+    }
+
     fn ui(&mut self, ui: &mut Ui, cx: &mut Ctx) {
         let t = cx.t;
         let demo = vec![
@@ -167,14 +194,7 @@ impl Module for Clocks {
             }
             self.list_ui(ui, cx, &list);
             if list.len() < MAX_CLOCKS && w::button(ui, Kind::Ghost, Some(Icon::Plus), t.clock_add).clicked() {
-                self.keys = tz::keys()
-                    .into_iter()
-                    .map(|k| {
-                        let label = tz::now_in(&k).map(|(_, _, off)| tz::utc_label(off)).unwrap_or_default();
-                        (k, label)
-                    })
-                    .collect();
-                self.adding = Some(String::new());
+                self.start_adding();
             }
         });
         // Минуты идут — перерисовать к следующей.
@@ -190,5 +210,49 @@ mod tests {
     fn names() {
         assert_eq!(short_name("Tokyo Standard Time"), "Tokyo");
         assert_eq!(short_name("UTC"), "UTC");
+    }
+
+    fn run(clocks: &mut Clocks, settings: &mut Settings, id: &str) {
+        let mut toasts = Vec::new();
+        let mut cx = Ctx {
+            t: crate::texts::tr(anvil_ui::Lang::En),
+            lang: anvil_ui::Lang::En,
+            monitor: "",
+            toasts: &mut toasts,
+            settings,
+        };
+        clocks.command(&Command::RunAction(id.to_string()), &mut cx);
+    }
+
+    #[test]
+    fn add_a_zone_is_offered_and_opens_the_zone_search_like_the_button() {
+        let en = crate::texts::tr(anvil_ui::Lang::En);
+        let mut settings = Settings::default();
+        let mut clocks = Clocks::default();
+        let actions = clocks.actions(en, anvil_ui::Lang::En, &settings);
+        assert_eq!(actions.len(), 1);
+        assert_eq!((actions[0].title.as_str(), actions[0].place.as_str()), ("Add time zone", en.clocks));
+        assert!(actions[0].enabled && actions[0].words.contains("timezone"));
+        // Поиск пояса открыт в карточке: поле пусто, пояса Windows прочитаны; карточке нужен ввод (панель покажет её).
+        assert!(!clocks.typing());
+        run(&mut clocks, &mut settings, "clocks:add");
+        assert_eq!(clocks.adding.as_deref(), Some(""));
+        assert!(clocks.typing());
+        // Чужое действие — ничего.
+        let mut other = Clocks::default();
+        run(&mut other, &mut settings, "quick:wifi");
+        assert!(other.adding.is_none());
+    }
+
+    #[test]
+    fn at_the_limit_the_action_is_grey_and_does_nothing() {
+        let en = crate::texts::tr(anvil_ui::Lang::En);
+        let clock = |n: usize| Clock { name: format!("C{n}"), zone: format!("Zone {n}") };
+        let mut settings = Settings { clocks: (0..MAX_CLOCKS).map(clock).collect(), ..Default::default() };
+        let mut clocks = Clocks::default();
+        let actions = clocks.actions(en, anvil_ui::Lang::En, &settings);
+        assert!(!actions[0].enabled && actions[0].reason.as_deref() == Some(en.unavailable));
+        run(&mut clocks, &mut settings, "clocks:add");
+        assert!(clocks.adding.is_none(), "часов уже предел — как и кнопки в карточке, поиска пояса нет");
     }
 }

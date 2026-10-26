@@ -14,8 +14,8 @@ use anvil_ui::widgets::{self as w, Kind};
 use anvil_ui::{Icon, Palette, Tone};
 use eframe::egui::{self, Pos2, Rect, Sense, Stroke, Ui, UiBuilder, Vec2};
 
-use super::{Command, Ctx, Module, chips};
-use crate::config::{Profile, SceneRow};
+use super::{Action, Command, Ctx, Module, chips, mine};
+use crate::config::{Profile, SceneRow, Settings};
 use crate::sys::ddc::{self, BRIGHTNESS, CONTRAST, Feature, INPUT, Physical};
 use crate::sys::{self, display, monitor, nightlight};
 use crate::texts::{self, Tr};
@@ -531,12 +531,29 @@ impl Brightness {
         if !known {
             r.on_disabled_hover_text(t.unavailable);
         } else if r.changed() {
-            match nightlight::set(on) {
-                Ok(()) => self.night = Some(on),
-                Err(e) => {
-                    eprintln!("night light failed: {e}");
-                    cx.toasts.push((texts::scene_failed(t, SceneRow::Night), Tone::Danger));
-                }
+            self.set_night(on, cx);
+        }
+    }
+
+    /// Ночной свет Windows: выключатель в карточке и действие поиска.
+    fn set_night(&mut self, on: bool, cx: &mut Ctx) {
+        match nightlight::set(on) {
+            Ok(()) => self.night = Some(on),
+            Err(e) => {
+                eprintln!("night light failed: {e}");
+                cx.toasts.push((texts::scene_failed(cx.t, SceneRow::Night), Tone::Danger));
+            }
+        }
+    }
+
+    /// Яркость всех мониторов, что отвечают по DDC/CI, в процентах: как ползунок, только сразу на нужное значение.
+    fn set_brightness(&mut self, percent: u32) {
+        let list = self.shared.lock().unwrap_or_else(|e| e.into_inner()).list.clone();
+        for p in list {
+            if let Some(b) = p.brightness
+                && b.max > 0
+            {
+                self.send_set(&p, BRIGHTNESS, (percent * b.max + 50) / 100);
             }
         }
     }
@@ -583,8 +600,46 @@ impl Module for Brightness {
                     self.save_scene(scene, rows);
                 }
             }
+            Command::RunAction(id) => match mine(self.key(), id) {
+                Some("night") => {
+                    if let Some(on) = self.night {
+                        self.set_night(!on, cx);
+                    }
+                }
+                Some(what) => {
+                    if let Some(percent) = what.strip_prefix("set:").and_then(|p| p.parse::<u32>().ok()) {
+                        self.set_brightness(percent.min(100));
+                    }
+                }
+                None => {}
+            },
             Command::Dropped(_) | Command::Media(_) => {}
         }
+    }
+
+    /// «Яркость: 25 %» … «100 %» (все мониторы, что отвечают по DDC/CI) и «Ночной свет: включить / выключить».
+    fn actions(&self, t: &Tr, lang: anvil_ui::Lang, _settings: &Settings) -> Vec<Action> {
+        let (answering, loaded) = {
+            let s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+            (s.list.iter().any(|p| p.brightness.is_some()), s.loaded)
+        };
+        // Нет ответа от мониторов: ещё опрашиваются или DDC/CI у них нет — серые, с причиной.
+        let why = if loaded { t.ddc_none } else { t.ddc_reading };
+        let mut out: Vec<Action> = [25u8, 50, 75, 100]
+            .into_iter()
+            .map(|p| {
+                let title = format!("{}: {}", t.brightness, texts::scene_percent(lang, p));
+                let action = Action::new(format!("brightness:set:{p}"), title, t.brightness, Icon::Sun);
+                action.words("яркость экран монитор brightness screen").off_if(!answering, why)
+            })
+            .collect();
+        let night = match self.night {
+            Some(on) => format!("{}: {}", t.night_light, if on { t.turn_off } else { t.turn_on }),
+            None => t.night_light.to_string(),
+        };
+        let action = Action::new("brightness:night", night, t.brightness, Icon::Moon);
+        out.push(action.words("ночь тёплый тепло night warm").off_if(self.night.is_none(), t.unavailable));
+        out
     }
 
     /// Совпадает ли то, что сцена отметила здесь, с тем, что стоит: «Ночной свет» и яркость всех отвечающих мониторов (±2 %
@@ -977,5 +1032,119 @@ mod scene_tests {
         assert_eq!(card.scene_rows(), vec![(SceneRow::Bright, false), (SceneRow::Night, false)]);
         card.refresh(dev);
         wait("прочитано", || card.scene_rows() == vec![(SceneRow::Bright, true), (SceneRow::Night, true)]);
+    }
+}
+
+// ─── Действия поиска ────────────────────────────────────────────────────────
+//
+// Яркость готовыми шагами и «Ночной свет» — то же, что ползунок и выключатель в карточке. Выдуманный монитор DDC/CI помнит
+// яркость (у каждого теста свой), ночной свет один на все тесты — под `WORLD_TEST`.
+
+#[cfg(test)]
+mod search_tests {
+    use std::sync::MutexGuard;
+    use std::time::{Duration, Instant};
+
+    use anvil_ui::Lang;
+
+    use super::*;
+
+    const EN: Lang = Lang::En;
+
+    fn world() -> MutexGuard<'static, ()> {
+        let guard = sys::WORLD_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        sys::reset_fake_world();
+        guard
+    }
+
+    fn wait(what: &str, mut ok: impl FnMut() -> bool) {
+        let start = Instant::now();
+        while !ok() {
+            assert!(start.elapsed() < Duration::from_secs(3), "не дождались: {what}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn run(card: &mut Brightness, dev: &str, id: &str) -> Vec<(String, Tone)> {
+        let mut toasts = Vec::new();
+        let mut settings = Settings::default();
+        let mut cx = Ctx { t: texts::tr(EN), lang: EN, monitor: dev, toasts: &mut toasts, settings: &mut settings };
+        card.command(&Command::RunAction(id.to_string()), &mut cx);
+        toasts
+    }
+
+    fn world_bright(dev: &str) -> u32 {
+        ddc::read(dev, 0, false)[0].brightness.unwrap().current
+    }
+
+    fn titles(actions: &[Action]) -> Vec<&str> {
+        actions.iter().map(|a| a.title.as_str()).collect()
+    }
+
+    /// Карточка на выдуманном мониторе: опрошена, ответила и знает про ночной свет.
+    fn card(dev: &str) -> Brightness {
+        let mut card = Brightness::default();
+        card.refresh(dev);
+        wait("монитор ответил", || {
+            card.scene_rows() == vec![(SceneRow::Bright, true), (SceneRow::Night, true)]
+        });
+        card
+    }
+
+    #[test]
+    fn steps_and_night_light_are_offered_and_do_what_the_card_does() {
+        let _world = world();
+        let dev = r"\\.\TEST-BRIGHT-SEARCH";
+        let mut card = card(dev);
+        let t = texts::tr(EN);
+        let actions = card.actions(t, EN, &Settings::default());
+        assert_eq!(
+            titles(&actions),
+            ["Brightness: 25%", "Brightness: 50%", "Brightness: 75%", "Brightness: 100%", "Night light: turn on"]
+        );
+        assert!(actions.iter().all(|a| a.enabled && a.reason.is_none() && a.place == t.brightness));
+        // Готовый шаг ставит яркость монитора, как ползунок (выдуманный монитор вначале — 70 %).
+        assert_eq!(world_bright(dev), 70);
+        assert!(run(&mut card, dev, "brightness:set:25").is_empty());
+        wait("яркость 25 %", || world_bright(dev) == 25);
+        run(&mut card, dev, "brightness:set:100");
+        wait("яркость 100 %", || world_bright(dev) == 100);
+        // Не больше 100: чужое значение обрезается, а не уходит монитору как есть.
+        run(&mut card, dev, "brightness:set:250");
+        wait("яркость 100 %", || world_bright(dev) == 100);
+        // «Ночной свет» — как выключатель: включает, потом выключает; название следует за состоянием.
+        assert_eq!(nightlight::state(), Some(false));
+        assert!(run(&mut card, dev, "brightness:night").is_empty());
+        assert_eq!(nightlight::state(), Some(true));
+        assert!(titles(&card.actions(t, EN, &Settings::default())).contains(&"Night light: turn off"));
+        run(&mut card, dev, "brightness:night");
+        assert_eq!(nightlight::state(), Some(false));
+        // Чужое действие ничего не делает.
+        run(&mut card, dev, "quick:quiet");
+        assert_eq!((nightlight::state(), world_bright(dev)), (Some(false), 100));
+    }
+
+    #[test]
+    fn without_an_answer_from_the_monitors_the_steps_are_grey_with_the_reason() {
+        let _world = world();
+        let t = texts::tr(EN);
+        // Ещё опрашивается: причина — «Опрашиваю мониторы…».
+        let card = Brightness::default();
+        let actions = card.actions(t, EN, &Settings::default());
+        assert_eq!(actions.len(), 5);
+        for a in &actions[..4] {
+            assert!(!a.enabled && a.reason.as_deref() == Some(t.ddc_reading), "{a:?}");
+        }
+        // Ночной свет не прочитан: серый, без «включить / выключить» в названии.
+        let night = &actions[4];
+        assert!(!night.enabled && night.title == t.night_light && night.reason.as_deref() == Some(t.unavailable));
+        // Прочитали, а по DDC/CI никто не ответил (встроенный экран): причина — про DDC/CI.
+        {
+            let mut shared = card.shared.lock().unwrap();
+            shared.loaded = true;
+            shared.list.clear();
+        }
+        let actions = card.actions(t, EN, &Settings::default());
+        assert!(actions[..4].iter().all(|a| !a.enabled && a.reason.as_deref() == Some(t.ddc_none)));
     }
 }

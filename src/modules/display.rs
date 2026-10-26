@@ -14,11 +14,11 @@
 use std::time::{Duration, Instant};
 
 use anvil_ui::widgets::{self as w, Kind};
-use anvil_ui::{Palette, Tone};
+use anvil_ui::{Icon, Lang, Palette, Tone};
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 
-use super::{Command, Ctx, Module, chip_grid, row};
-use crate::config::{Profile, ProfileMonitor, SceneRow};
+use super::{Action, Command, Ctx, Module, chip_grid, mine, row};
+use crate::config::{Profile, ProfileMonitor, SceneRow, Settings};
 use crate::sys::display::{self, Mode, Scale};
 use crate::sys::monitor;
 use crate::texts::{self, Tr};
@@ -131,6 +131,14 @@ fn hdr_usable(hdr: display::Hdr) -> bool {
 /// HDR монитора для сцен: `Some(включён)`, если монитор его умеет.
 fn hdr_state(device: &str) -> Option<bool> {
     display::hdr(device).filter(|h| h.supported).map(|h| h.enabled)
+}
+
+/// «125 %» / «125%» — масштаб в названии действия.
+fn percent_text(lang: Lang, percent: u32) -> String {
+    match lang {
+        Lang::Ru => format!("{percent} %"),
+        Lang::En => format!("{percent}%"),
+    }
 }
 
 /// Что сказать об отказе смены HDR: своим текстом программы, а английский служебный — только в журнал. Windows не даёт
@@ -555,6 +563,81 @@ impl Display {
         }
     }
 
+    /// Масштаб монитора: чип в карточке и действие поиска. Windows запоминает его сама, «Оставить?» нет.
+    fn change_scale(&mut self, device: &str, want: u32, cx: &mut Ctx) {
+        match display::set_scale(device, want) {
+            Ok(()) => {
+                self.scale = display::scale(device);
+                self.read_states();
+                cx.toasts.push((cx.t.scale_note.to_string(), Tone::Neutral));
+            }
+            Err(e) => {
+                eprintln!("scale change failed: {e}");
+                cx.toasts.push((format!("{}: {e}", cx.t.failed), Tone::Danger));
+            }
+        }
+    }
+
+    /// Режимы монитора для поиска: сперва избранное (с запомненной частотой, как в карточке), дальше все остальные от
+    /// большего разрешения к меньшему и от большей частоты к меньшей; стоящий сейчас не в счёт.
+    fn modes_for_search(&self, device: &str, cur: Mode, settings: &Settings) -> Vec<(Mode, bool)> {
+        let mut out: Vec<(Mode, bool)> = Vec::new();
+        for (fw, fh) in settings.favorites_of(device) {
+            let hz = settings.remembered_hz(device, fw, fh).unwrap_or(cur.hz);
+            if let Some(m) = mode_for(&self.modes, fw, fh, hz)
+                && m != cur
+                && !out.iter().any(|(o, _)| *o == m)
+            {
+                out.push((m, true));
+            }
+        }
+        let mut rest: Vec<Mode> = self.modes.iter().copied().filter(|m| *m != cur).collect();
+        rest.sort_by_key(|m| std::cmp::Reverse((m.width * m.height, m.width, m.hz)));
+        for m in rest {
+            if !out.iter().any(|(o, _)| (o.width, o.height, o.hz) == (m.width, m.height, m.hz)) {
+                out.push((m, false));
+            }
+        }
+        out
+    }
+
+    /// Действие поиска «Экрана»: то же, что щелчок в карточке. Висит «Оставить?» — сначала ответ, как у сцен.
+    fn run_action(&mut self, what: &str, cx: &mut Ctx) {
+        let t = cx.t;
+        if self.pending.is_some() {
+            cx.toasts.push((t.answer_first.to_string(), Tone::Warning));
+            return;
+        }
+        let device = self.device(&self.panel).to_string();
+        let mut parts = what.split(':');
+        match (parts.next(), parts.next()) {
+            (Some("mode"), Some(mode)) => {
+                let found = self.modes.iter().copied().find(|m| format!("{}x{}@{}", m.width, m.height, m.hz) == mode);
+                if let Some(m) = found {
+                    self.apply(&device, m, cx);
+                }
+            }
+            (Some("scale"), Some(percent)) => {
+                if let Ok(want) = percent.parse::<u32>()
+                    && self.scale.as_ref().is_some_and(|s| s.current != want && s.options.contains(&want))
+                {
+                    self.change_scale(&device, want, cx);
+                }
+            }
+            (Some("hdr"), None) => {
+                if let Some(h) = self.hdr.filter(|h| h.supported) {
+                    if hdr_usable(h) {
+                        self.toggle_hdr(&device, !h.enabled, cx);
+                    } else {
+                        cx.toasts.push((t.hdr_blocked.to_string(), Tone::Warning));
+                    }
+                }
+            }
+            (Some("primary"), None) => self.make_primary(&device, cx),
+            _ => {}
+        }
+    }
+
     fn keep_ui(&mut self, ui: &mut Ui, t: &Tr, lang: anvil_ui::Lang) {
         let Some(at) = self.pending.as_ref().map(|p| p.at) else { return };
         let left = REVERT_AFTER.saturating_sub(at.elapsed());
@@ -834,8 +917,55 @@ impl Module for Display {
                     }
                 }
             }
+            Command::RunAction(id) => {
+                if let Some(what) = mine(self.key(), id) {
+                    self.run_action(what, cx);
+                }
+            }
             Command::Dropped(_) | Command::Media(_) => {}
         }
+    }
+
+    /// Режимы монитора (избранные первыми), масштабы, HDR и «Сделать основным» — то, что в карточке. Пока висит «Оставить
+    /// этот режим?», карточка отвечает только ему, и действия серые.
+    fn actions(&self, t: &Tr, lang: Lang, settings: &Settings) -> Vec<Action> {
+        let Some(cur) = self.current else { return Vec::new() };
+        let device = self.device(&self.panel).to_string();
+        let waiting = self.pending.is_some();
+        let mut out = Vec::new();
+        for (m, favorite) in self.modes_for_search(&device, cur, settings) {
+            let mode = texts::scene_mode(lang, m.width, m.height, m.hz, None, None);
+            let size = format!("{}x{}", m.width, m.height);
+            let mut words =
+                format!("разрешение режим частота resolution mode refresh {size} {size}@{} {}p", m.hz, m.height);
+            if (m.width, m.height) == (3840, 2160) {
+                words += " 4k uhd";
+            }
+            if favorite {
+                words += " избранное favorite";
+            }
+            let title = format!("{}: {mode}", t.display);
+            let action = Action::new(format!("display:mode:{size}@{}", m.hz), title, t.display, Icon::Monitor);
+            out.push(action.words(&words).off_if(waiting, t.answer_first));
+        }
+        if let Some(scale) = &self.scale {
+            for &percent in scale.options.iter().filter(|&&p| p != scale.current) {
+                let title = format!("{}: {}", t.scale_word, percent_text(lang, percent));
+                let action = Action::new(format!("display:scale:{percent}"), title, t.display, Icon::Monitor);
+                out.push(action.words("масштаб увеличение dpi scale zoom").off_if(waiting, t.answer_first));
+            }
+        }
+        if let Some(h) = self.hdr.filter(|h| h.supported) {
+            let title = format!("{}: {}", t.hdr, if h.enabled { t.turn_off } else { t.turn_on });
+            let action = Action::new("display:hdr", title, t.display, Icon::Monitor).words("hdr цвет color");
+            out.push(action.off_if(!hdr_usable(h), t.hdr_blocked).off_if(waiting, t.answer_first));
+        }
+        let primary = self.monitors.iter().find(|m| m.device == device).is_some_and(|m| m.primary);
+        if self.monitors.len() > 1 && !primary {
+            let action = Action::new("display:primary", t.make_primary, t.display, Icon::Monitor);
+            out.push(action.words("основной монитор primary main").off_if(waiting, t.answer_first));
+        }
+        out
     }
 
     fn ui(&mut self, ui: &mut Ui, cx: &mut Ctx) {
@@ -992,17 +1122,7 @@ impl Module for Display {
                         let mut want = scale.current;
                         chip_grid(ui, &mut want, &opts, 3);
                         if want != scale.current {
-                            match display::set_scale(&device, want) {
-                                Ok(()) => {
-                                    self.scale = display::scale(&device);
-                                    self.read_states();
-                                    cx.toasts.push((t.scale_note.to_string(), Tone::Neutral));
-                                }
-                                Err(e) => {
-                                    eprintln!("scale change failed: {e}");
-                                    cx.toasts.push((format!("{}: {e}", t.failed), Tone::Danger));
-                                }
-                            }
+                            self.change_scale(&device, want, cx);
                         }
                         w::note(ui, format!("{}: {}%", t.recommended, scale.recommended));
                     } else {
@@ -1735,5 +1855,201 @@ mod revert_tests {
         assert_eq!(display.meta(texts::tr(Lang::En)), "Monitor 27");
         assert_eq!(display.meta_hint(), "Monitor 27 · TEST-ALONE", "в подсказке — полное имя и устройство");
         assert_eq!(Display::default().meta_hint(), "", "пока не опрашивали — подсказки нет");
+    }
+}
+
+// ─── Действия поиска ────────────────────────────────────────────────────────
+//
+// «Экран» отдаёт режимы, масштабы, HDR и «Сделать основным»; выполнение — те же функции, что щелчок в карточке. У каждого
+// теста свой выдуманный монитор.
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    const EN: Lang = Lang::En;
+
+    fn card(device: &str) -> Display {
+        let mut display = Display::default();
+        display.refresh(device);
+        display
+    }
+
+    fn titles(actions: &[Action]) -> Vec<&str> {
+        actions.iter().map(|a| a.title.as_str()).collect()
+    }
+
+    /// Выполнить действие; ответ — уведомления.
+    fn run(display: &mut Display, settings: &mut Settings, dev: &str, id: &str) -> Vec<(String, Tone)> {
+        let mut toasts = Vec::new();
+        let mut cx = Ctx { t: texts::tr(EN), lang: EN, monitor: dev, toasts: &mut toasts, settings };
+        display.command(&Command::RunAction(id.to_string()), &mut cx);
+        toasts
+    }
+
+    #[test]
+    fn modes_scales_and_hdr_are_offered_and_the_standing_mode_is_not() {
+        let dev = r"\\.\TEST-SEARCH-LIST";
+        let display = card(dev);
+        let t = texts::tr(EN);
+        let actions = display.actions(t, EN, &Settings::default());
+        let list = titles(&actions);
+        // Выдуманный монитор стоит на 4K 120 Гц: этот режим не предлагается, остальные — от большего к меньшему.
+        assert_eq!(
+            list[..4],
+            [
+                "Display: 3840 × 2160 · 60 Hz",
+                "Display: 2560 × 1440 · 144 Hz",
+                "Display: 2560 × 1440 · 120 Hz",
+                "Display: 2560 × 1440 · 60 Hz"
+            ]
+        );
+        assert_eq!(actions.iter().filter(|a| a.id.starts_with("display:mode:")).count(), 9);
+        assert!(!list.contains(&"Display: 3840 × 2160 · 120 Hz"));
+        // Масштабы, кроме стоящего (150 %), и HDR; монитор один — «Сделать основным» нет.
+        assert!(list.contains(&"Scale: 100%") && list.contains(&"Scale: 225%") && !list.contains(&"Scale: 150%"));
+        assert!(list.contains(&"HDR: turn on"));
+        assert!(!list.contains(&t.make_primary));
+        assert!(actions.iter().all(|a| a.enabled && a.reason.is_none() && a.place == t.display));
+        // Русский: единицы переводятся.
+        let ru = display.actions(texts::tr(Lang::Ru), Lang::Ru, &Settings::default());
+        assert!(titles(&ru).contains(&"Экран: 1920 × 1080 · 144 Гц"));
+        assert!(titles(&ru).contains(&"Масштаб: 125 %"));
+        assert!(titles(&ru).contains(&"HDR: включить"));
+        // Слова для поиска — оба языка и размер в одном виде («1080p», «1920x1080»).
+        let mode = actions.iter().find(|a| a.id == "display:mode:1920x1080@144").expect("режим есть");
+        for word in ["разрешение", "resolution", "1920x1080", "1080p"] {
+            assert!(mode.words.contains(word), "нет слова «{word}»: {}", mode.words);
+        }
+        let uhd = actions.iter().find(|a| a.id == "display:mode:3840x2160@60").expect("режим есть");
+        assert!(uhd.words.contains("4k"));
+    }
+
+    #[test]
+    fn favorites_come_first_with_their_remembered_rate() {
+        let dev = r"\\.\TEST-SEARCH-FAVORITES";
+        let display = card(dev);
+        let mut settings = Settings::default();
+        settings.toggle_favorite(dev, 1920, 1080).unwrap();
+        settings.toggle_favorite(dev, 1280, 720).unwrap();
+        settings.remember_hz(dev, 1920, 1080, 120);
+        let actions = display.actions(texts::tr(EN), EN, &settings);
+        let list = titles(&actions);
+        assert_eq!(list[..2], ["Display: 1920 × 1080 · 120 Hz", "Display: 1280 × 720 · 60 Hz"]);
+        assert!(actions[0].words.contains("favorite") && actions[1].words.contains("избранное"));
+        // Остальные режимы идут после избранного, и ни один режим не повторяется.
+        assert!(list.contains(&"Display: 1920 × 1080 · 144 Hz"));
+        let mut ids: Vec<&str> = actions.iter().map(|a| a.id.as_str()).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), actions.len());
+    }
+
+    #[test]
+    fn a_mode_action_does_what_the_click_does_and_asks_keep() {
+        let dev = r"\\.\TEST-SEARCH-MODE";
+        let mut display = card(dev);
+        let t = texts::tr(EN);
+        let start = display::current(dev).unwrap();
+        let mut settings = Settings::default();
+        let toasts = run(&mut display, &mut settings, dev, "display:mode:1920x1080@144");
+        assert!(toasts.is_empty(), "{toasts:?}");
+        assert_eq!(display::current(dev).map(|m| (m.width, m.height, m.hz)), Some((1920, 1080, 144)));
+        assert_eq!(display::saved(dev), start, "до «Оставить» режим стоит только на время, в реестре прежний");
+        assert!(display.busy(), "и спрашивает «Оставить этот режим?»");
+        // Пока вопрос висит, карточка отвечает только ему: действия серые, новое не выполняется.
+        let actions = display.actions(t, EN, &settings);
+        assert!(
+            !actions.is_empty() && actions.iter().all(|a| !a.enabled && a.reason.as_deref() == Some(t.answer_first))
+        );
+        let toasts = run(&mut display, &mut settings, dev, "display:mode:1280x720@60");
+        assert_eq!(toasts, vec![(t.answer_first.to_string(), Tone::Warning)]);
+        assert_eq!(display::current(dev).map(|m| (m.width, m.hz)), Some((1920, 144)));
+        // «Оставить» — режим в реестре; стоящий режим больше не предлагается, прежний — предлагается.
+        display.keep();
+        assert_eq!(display::saved(dev).hz, 144);
+        let list = display.actions(t, EN, &settings);
+        assert!(!titles(&list).contains(&"Display: 1920 × 1080 · 144 Hz"));
+        assert!(titles(&list).contains(&"Display: 3840 × 2160 · 120 Hz"));
+        // Режима, которого нет у монитора, не бывает: ничего не меняется.
+        let before = display::current(dev);
+        assert!(run(&mut display, &mut settings, dev, "display:mode:123x456@60").is_empty());
+        assert_eq!(display::current(dev), before);
+        assert!(!display.busy());
+    }
+
+    #[test]
+    fn a_scale_action_does_what_the_chip_does() {
+        let dev = r"\\.\TEST-SEARCH-SCALE";
+        let mut display = card(dev);
+        let t = texts::tr(EN);
+        let mut settings = Settings::default();
+        let toasts = run(&mut display, &mut settings, dev, "display:scale:125");
+        assert_eq!(toasts, vec![(t.scale_note.to_string(), Tone::Neutral)]);
+        assert_eq!(display::scale(dev).map(|s| s.current), Some(125));
+        assert!(!display.busy(), "масштаб «Оставить?» не спрашивает");
+        let list = display.actions(t, EN, &settings);
+        assert!(titles(&list).contains(&"Scale: 150%") && !titles(&list).contains(&"Scale: 125%"));
+        // Такого масштаба нет, или он уже стоит — ничего.
+        assert!(run(&mut display, &mut settings, dev, "display:scale:130").is_empty());
+        assert!(run(&mut display, &mut settings, dev, "display:scale:125").is_empty());
+        assert_eq!(display::scale(dev).map(|s| s.current), Some(125));
+    }
+
+    #[test]
+    fn the_hdr_action_flips_this_monitor_and_obeys_windows() {
+        let dev = r"\\.\TEST-SEARCH-HDR";
+        let mut display = card(dev);
+        let t = texts::tr(EN);
+        let mut settings = Settings::default();
+        assert!(run(&mut display, &mut settings, dev, "display:hdr").is_empty());
+        assert_eq!(display::hdr(dev).map(|h| h.enabled), Some(true));
+        assert!(!display.busy(), "HDR без «Оставить?»: обратим тем же щелчком");
+        let list = display.actions(t, EN, &settings);
+        assert!(titles(&list).contains(&"HDR: turn off"));
+        run(&mut display, &mut settings, dev, "display:hdr");
+        assert_eq!(display::hdr(dev).map(|h| h.enabled), Some(false));
+        // Windows не даёт включить: действие серое, с причиной; выполнение — предупреждение, HDR не тронут.
+        display::fake_hdr(dev, display::Hdr { supported: true, enabled: false, force_disabled: true });
+        display.refresh(dev);
+        let list = display.actions(t, EN, &settings);
+        let hdr = list.iter().find(|a| a.id == "display:hdr").expect("действие есть");
+        assert!(!hdr.enabled && hdr.reason.as_deref() == Some(t.hdr_blocked));
+        let toasts = run(&mut display, &mut settings, dev, "display:hdr");
+        assert_eq!(toasts, vec![(t.hdr_blocked.to_string(), Tone::Warning)]);
+        assert_eq!(display::hdr(dev).map(|h| h.enabled), Some(false));
+        // У монитора нет HDR — и действия нет.
+        display::fake_hdr(dev, display::Hdr { supported: false, enabled: false, force_disabled: false });
+        display.refresh(dev);
+        assert!(!display.actions(t, EN, &settings).iter().any(|a| a.id == "display:hdr"));
+    }
+
+    #[test]
+    fn make_primary_is_offered_only_for_a_second_monitor_that_is_not_primary() {
+        let dev = r"\\.\TEST-SEARCH-PRIMARY";
+        let mut display = card(dev);
+        let t = texts::tr(EN);
+        let rect = monitor::PxRect { left: 0, top: 0, right: 1, bottom: 1 };
+        let mon = |device: &str, primary| monitor::Monitor { device: device.into(), rect, primary, handle: 0 };
+        // Мониторов два и этот основной — не предлагается; не основной — да.
+        display.monitors = vec![mon(dev, true), mon("B", false)];
+        assert!(!titles(&display.actions(t, EN, &Settings::default())).contains(&t.make_primary));
+        display.monitors = vec![mon("B", true), mon(dev, false)];
+        let list = display.actions(t, EN, &Settings::default());
+        assert!(titles(&list).contains(&t.make_primary));
+        // Карточку ещё не опрашивали — действий нет.
+        assert!(Display::default().actions(t, EN, &Settings::default()).is_empty());
+    }
+
+    #[test]
+    fn other_modules_actions_are_not_ours() {
+        let dev = r"\\.\TEST-SEARCH-FOREIGN";
+        let mut display = card(dev);
+        let start = display::current(dev);
+        let mut settings = Settings::default();
+        assert!(run(&mut display, &mut settings, dev, "quick:wifi").is_empty());
+        assert!(run(&mut display, &mut settings, dev, "displayx:mode:1920x1080@144").is_empty());
+        assert_eq!(display::current(dev), start);
+        assert!(!display.busy());
     }
 }

@@ -9,7 +9,8 @@ use anvil_ui::widgets::{self as w, Kind};
 use anvil_ui::{Icon, Palette, Tone};
 use eframe::egui::{self, Ui};
 
-use super::{Ctx, Module};
+use super::{Action, Command, Ctx, Module, mine};
+use crate::config::Settings;
 use crate::sys::{self, gh};
 use crate::texts::{self, Tr};
 
@@ -123,6 +124,33 @@ impl Module for Github {
         }
         if self.asked.is_none_or(|at| at.elapsed() >= EVERY) || self.asked_for != self.wanted {
             self.fetch();
+        }
+    }
+
+    /// «Открыть «владелец/имя»» у каждого репозитория: щелчок по его имени — страница Actions в браузере.
+    fn actions(&self, t: &Tr, lang: anvil_ui::Lang, settings: &Settings) -> Vec<Action> {
+        let names: Vec<String> =
+            if sys::demo() { demo().into_iter().map(|r| r.name).collect() } else { settings.github.clone() };
+        names
+            .iter()
+            .map(|name| {
+                let title = texts::search_open(lang, name);
+                Action::new(format!("github:open:{name}"), title, t.github, Icon::Branch)
+                    .words("репозиторий прогон ci actions pull request repo github")
+            })
+            .collect()
+    }
+
+    fn command(&mut self, cmd: &Command, cx: &mut Ctx) {
+        let Command::RunAction(id) = cmd else { return };
+        let Some(name) = mine(self.key(), id).and_then(|r| r.strip_prefix("open:")) else { return };
+        // Только то, что записано в настройках: адрес собирается из имени репозитория, а не из чего попало.
+        if sys::demo() || !cx.settings.github.iter().any(|g| g == name) {
+            return;
+        }
+        if let Err(e) = sys::launch(&format!("https://github.com/{name}/actions"), "") {
+            eprintln!("open repository failed: {e}");
+            cx.toasts.push((format!("{}: {name}", cx.t.failed), Tone::Danger));
         }
     }
 
@@ -247,5 +275,46 @@ mod tests {
         for t in [0i64, 951_868_800, 1_792_645_920, 1_700_000_123] {
             assert_eq!(gh::iso_to_unix(&unix_iso(t)), Some(t));
         }
+    }
+
+    fn launched(url: &str) -> bool {
+        let want = format!("launch {url} ");
+        sys::BLOCKED.lock().unwrap_or_else(|e| e.into_inner()).contains(&want)
+    }
+
+    fn run(github: &mut Github, settings: &mut Settings, id: &str) -> Vec<(String, Tone)> {
+        let mut toasts = Vec::new();
+        let mut cx = Ctx {
+            t: crate::texts::tr(anvil_ui::Lang::En),
+            lang: anvil_ui::Lang::En,
+            monitor: "",
+            toasts: &mut toasts,
+            settings,
+        };
+        github.command(&Command::RunAction(id.to_string()), &mut cx);
+        toasts
+    }
+
+    #[test]
+    fn repositories_are_offered_and_opened_like_a_click_on_the_name() {
+        let mut settings =
+            Settings { github: vec!["search-test/alpha".into(), "search-test/beta".into()], ..Default::default() };
+        let mut github = Github::default();
+        let en = crate::texts::tr(anvil_ui::Lang::En);
+        let actions = github.actions(en, anvil_ui::Lang::En, &settings);
+        let titles: Vec<&str> = actions.iter().map(|a| a.title.as_str()).collect();
+        assert_eq!(titles, ["Open “search-test/alpha”", "Open “search-test/beta”"]);
+        let ru = github.actions(crate::texts::tr(anvil_ui::Lang::Ru), anvil_ui::Lang::Ru, &settings);
+        assert_eq!(ru[0].title, "Открыть «search-test/alpha»");
+        assert!(actions.iter().all(|a| a.enabled && a.place == en.github));
+        // Страница Actions репозитория в браузере.
+        assert!(run(&mut github, &mut settings, "github:open:search-test/beta").is_empty());
+        assert!(launched("https://github.com/search-test/beta/actions"));
+        // Чего нет в настройках, то не открывается: адрес не собирается из чего попало.
+        run(&mut github, &mut settings, "github:open:evil/repo");
+        assert!(!launched("https://github.com/evil/repo/actions"));
+        run(&mut github, &mut settings, "quick:wifi");
+        // Репозиториев нет — и действий нет.
+        assert!(Github::default().actions(en, anvil_ui::Lang::En, &Settings::default()).is_empty());
     }
 }
