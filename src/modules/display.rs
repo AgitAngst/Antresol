@@ -6,7 +6,8 @@
 // Сцены — экран (режим, масштаб и HDR всех мониторов разом) и системные настройки: экранную часть ставит эта карточка
 // (из app.rs через `Command`), откат — тот же «Оставить?» для всех изменённых мониторов. Перед сменой карточка помнит,
 // что было (`before`): второй щелчок по стоящей сцене возвращает это сразу, в реестр и без «Оставить?» — прежний режим
-// был рабочим.
+// был рабочим. Отказ от режима, что поставила сцена («Вернуть», 15 секунд, закрытие), — отказ от сцены целиком: карточка
+// отдаёт её номер (`take_refused_scene`), и панель возвращает остальное из сцены, как вторым щелчком.
 // Режим до «Оставить» стоит только на время (`display::apply` без записи в реестр) и в реестр попадает после ответа
 // (`display::commit`): не ответили, закрыли программу (`shutdown`), она упала — настоящий режим остаётся прежним.
 
@@ -62,14 +63,16 @@ struct Change {
 struct Pending {
     changes: Vec<Change>,
     at: Instant,
-    /// Имя сцены, что поставила этот режим (щелчок по чипу, клавиша); `None` — режим меняли в самой карточке.
-    scene: Option<String>,
+    /// Номер сцены ([`Profile::id`]), что поставила этот режим (щелчок по чипу, клавиша); `None` — режим меняли в самой
+    /// карточке.
+    scene: Option<u64>,
 }
 
 /// Как было до сцены (экран): монитор — режим, масштаб и HDR, что стояли. Живёт, пока не вернули, не поставили другую
 /// сцену или не отказались от режима («Вернуть», 15 секунд); перезапуск программы его забывает.
 struct SceneBefore {
-    scene: String,
+    /// Номер сцены: переименование возврат не теряет, новая сцена с тем же именем чужой не наследует.
+    scene: u64,
     changes: Vec<Change>,
 }
 
@@ -101,6 +104,8 @@ pub struct Display {
     pending: Option<Pending>,
     /// Как было до сцены, что стоит сейчас, — на второй щелчок по ней.
     before: Option<SceneBefore>,
+    /// Отказались от режима, что поставила эта сцена: ждёт, пока панель заберёт (`take_refused_scene`).
+    refused: Option<u64>,
     /// Показан полный список разрешений, а не избранное.
     all_res: bool,
 }
@@ -305,7 +310,7 @@ impl Display {
     /// Запомнить, как было до сцены `scene`: что она только что поменяла. Та же сцена ещё раз (поставили, а потом
     /// поставили снова) продолжает прежний «сеанс»: у монитора, что уже помним, остаётся то, что было до первой постановки;
     /// возврат вернёт всё к тому, что было до сцены, а не до её второго раза.
-    fn remember(&mut self, scene: &str, changes: &[Change]) {
+    fn remember(&mut self, scene: u64, changes: &[Change]) {
         let mut kept = self.before.take().filter(|b| b.scene == scene).map(|b| b.changes).unwrap_or_default();
         for c in changes {
             match kept.iter_mut().find(|k| k.device.eq_ignore_ascii_case(&c.device)) {
@@ -317,7 +322,7 @@ impl Display {
                 None => kept.push(c.clone()),
             }
         }
-        self.before = (!kept.is_empty()).then(|| SceneBefore { scene: scene.to_string(), changes: kept });
+        self.before = (!kept.is_empty()).then_some(SceneBefore { scene, changes: kept });
     }
 
     /// Поставить экранную часть сцены на все её мониторы; изменённое — в откат и в `before`. Что поставить сцена не
@@ -328,7 +333,7 @@ impl Display {
             cx.toasts.push((t.answer_first.to_string(), Tone::Warning));
             return;
         }
-        if self.before.as_ref().is_some_and(|b| b.scene != scene.name) {
+        if self.before.as_ref().is_some_and(|b| b.scene != scene.id) {
             self.before = None;
         }
         if scene.monitors.is_empty() {
@@ -361,7 +366,7 @@ impl Display {
                     }
                     Err(e) => {
                         eprintln!("scene mode change failed on {dev}: {e}");
-                        cx.toasts.push((format!("{}: {e}", t.failed), Tone::Danger));
+                        cx.toasts.push((texts::scene_failed(t, SceneRow::Screen), Tone::Danger));
                     }
                 }
             }
@@ -372,7 +377,7 @@ impl Display {
                     Ok(()) => change.scale = Some(old),
                     Err(e) => {
                         eprintln!("scene scale change failed on {dev}: {e}");
-                        cx.toasts.push((format!("{}: {e}", t.failed), Tone::Danger));
+                        cx.toasts.push((texts::scene_failed(t, SceneRow::Screen), Tone::Danger));
                     }
                 }
             }
@@ -403,21 +408,22 @@ impl Display {
         if changes.is_empty() {
             return;
         }
-        self.remember(&scene.name, &changes);
-        self.pending = Some(Pending { changes, at: Instant::now(), scene: Some(scene.name.clone()) });
+        self.remember(scene.id, &changes);
+        self.pending = Some(Pending { changes, at: Instant::now(), scene: Some(scene.id) });
         self.after_change();
     }
 
     /// Вернуть экран, как был до сцены: режим — сразу и в реестр (это прежний рабочий режим, «Оставить?» не нужен),
-    /// масштаб и HDR — как были. Висит «Оставить?» от этой же сцены — это тот же откат, что «Вернуть». Чужой вопрос висит —
-    /// сначала на него ответить, и возврат остаётся.
+    /// масштаб и HDR — как были. Висит «Оставить?» от этой же сцены — это тот же откат, что «Вернуть», только панель сама
+    /// возвращает и остальное из сцены, так что отказом это не считается. Чужой вопрос висит — сначала на него ответить,
+    /// и возврат остаётся (панель до этого не доводит: `blocks_undo`).
     fn undo_scene(&mut self, scene: &Profile, cx: &mut Ctx) {
         if !self.scene_can_undo(scene) {
             return;
         }
         match &self.pending {
-            Some(p) if p.scene.as_deref() == Some(scene.name.as_str()) => {
-                self.revert();
+            Some(p) if p.scene == Some(scene.id) => {
+                self.roll_back();
                 return;
             }
             Some(_) => {
@@ -439,13 +445,13 @@ impl Display {
                 && let Err(e) = display::apply(&c.device, m).and_then(|()| display::commit(&c.device, m))
             {
                 eprintln!("display mode undo failed on {}: {e}", c.device);
-                cx.toasts.push((format!("{}: {e}", cx.t.failed), Tone::Danger));
+                cx.toasts.push((texts::scene_failed(cx.t, SceneRow::Screen), Tone::Danger));
             }
             if let Some(s) = c.scale
                 && let Err(e) = display::set_scale(&c.device, s)
             {
                 eprintln!("scale undo failed on {}: {e}", c.device);
-                cx.toasts.push((format!("{}: {e}", cx.t.failed), Tone::Danger));
+                cx.toasts.push((texts::scene_failed(cx.t, SceneRow::Screen), Tone::Danger));
             }
         }
         self.after_change();
@@ -475,14 +481,24 @@ impl Display {
         self.after_change();
     }
 
+    /// Отказ: «Вернуть», 15 секунд без ответа, закрытие программы. Всё, что ждало «Оставить?», возвращается как было. Если
+    /// режим поставила сцена, это отказ от сцены целиком: номер ждёт панель (`take_refused_scene`), она вернёт остальное.
     fn revert(&mut self) {
-        let Some(pending) = self.pending.take() else { return };
-        // Отказались от режима, что поставила сцена: по экрану её уже нет, возвращать нечего.
-        if let Some(name) = &pending.scene
-            && self.before.as_ref().is_some_and(|b| &b.scene == name)
+        if let Some(scene) = self.roll_back() {
+            self.refused = Some(scene);
+        }
+    }
+
+    /// Вернуть всё, что ждало «Оставить?», как было. Ответ — номер сцены, если режим поставила она (экран ей уже
+    /// возвращён, так что «как было» по экрану забывается).
+    fn roll_back(&mut self) -> Option<u64> {
+        let pending = self.pending.take()?;
+        if let Some(scene) = pending.scene
+            && self.before.as_ref().is_some_and(|b| b.scene == scene)
         {
             self.before = None;
         }
+        let scene = pending.scene;
         for c in pending.changes {
             // HDR ставился последним — возвращается первым; дальше режим и масштаб.
             if let Some(on) = c.hdr
@@ -507,6 +523,7 @@ impl Display {
             }
         }
         self.after_change();
+        scene
     }
 
     /// Сделать монитор основным — с тем же «Оставить?» и откатом через 15 с.
@@ -548,10 +565,14 @@ impl Display {
         ui.ctx().request_repaint_after(Duration::from_millis(250));
         let secs = left.as_secs() + 1;
         w::banner(ui, Tone::Warning, t.keep_title, &texts::revert_in(lang, secs), |ui| {
-            if w::button(ui, Kind::Primary, None, t.keep).clicked() {
+            let keep = w::button(ui, Kind::Primary, None, t.keep);
+            super::anchor(ui, keep.rect, "keep-yes");
+            if keep.clicked() {
                 self.keep();
             }
-            if w::button(ui, Kind::Secondary, None, t.revert).clicked() {
+            let revert = w::button(ui, Kind::Secondary, None, t.revert);
+            super::anchor(ui, revert.rect, "keep-revert");
+            if revert.clicked() {
                 self.revert();
             }
         });
@@ -747,7 +768,7 @@ impl Module for Display {
     }
 
     fn scene_can_undo(&self, scene: &Profile) -> bool {
-        self.before.as_ref().is_some_and(|b| b.scene == scene.name)
+        self.before.as_ref().is_some_and(|b| b.scene == scene.id)
     }
 
     /// «Экран»: строка сцены есть, если хоть один монитор прочитан.
@@ -758,6 +779,16 @@ impl Module for Display {
     /// «Оставить этот режим?» ждёт ответа — новую сцену не ставят.
     fn blocks_scene(&self) -> bool {
         self.pending.is_some()
+    }
+
+    /// Вопрос висит не от этой сцены (режим поменяли в самой карточке, «Сделать основным», другая сцена): возврат сцены
+    /// ждёт ответа и не начинается ни у кого. Вопрос от самой сцены возврату не мешает — это тот же откат.
+    fn blocks_undo(&self, scene: &Profile) -> bool {
+        self.pending.as_ref().is_some_and(|p| p.scene != Some(scene.id))
+    }
+
+    fn take_refused_scene(&mut self) -> Option<u64> {
+        self.refused.take()
     }
 
     fn ticking(&self) -> bool {
@@ -1549,16 +1580,71 @@ mod revert_tests {
     }
 
     #[test]
-    fn declining_the_mode_forgets_the_return() {
+    fn declining_the_mode_forgets_the_return_and_hands_the_scene_to_the_panel() {
         let dev = r"\\.\TEST-SCENE-DECLINE";
         let mut display = card(dev);
         let mut settings = crate::config::Settings::default();
         settings.profiles.push(movie(dev));
+        let id = settings.profiles[0].id;
         toasts_of(dev, &mut settings, |cx| display.command(&Command::ApplyScene(0), cx));
         assert!(display.scene_can_undo(&settings.profiles[0]));
-        // «Вернуть» (и 15 секунд, и закрытие программы — тот же `revert`): по экрану сцены нет, возвращать нечего.
+        assert_eq!(display.take_refused_scene(), None, "пока вопрос висит, отказа нет");
+        // «Вернуть»: по экрану сцены нет, возвращать нечего; а остальное из сцены вернёт панель — ей отдан номер сцены.
         display.revert();
         assert!(!display.scene_can_undo(&settings.profiles[0]));
+        assert_eq!(display.take_refused_scene(), Some(id));
+        assert_eq!(display.take_refused_scene(), None, "номер отдаётся один раз");
+    }
+
+    /// Отказ от сцены — «Вернуть», 15 секунд без ответа и закрытие программы; не отказ — второй щелчок по сцене (панель сама
+    /// возвращает всё) и режим, что поменяли в самой карточке.
+    #[test]
+    fn refusal_comes_from_the_button_the_timeout_and_the_shutdown_only() {
+        let dev = r"\\.\TEST-SCENE-REFUSAL";
+        let mut display = card(dev);
+        let mut settings = crate::config::Settings::default();
+        settings.profiles.push(movie(dev));
+        let id = settings.profiles[0].id;
+        let apply = |display: &mut Display, settings: &mut crate::config::Settings| {
+            toasts_of(dev, settings, |cx| display.command(&Command::ApplyScene(0), cx));
+            assert!(display.busy());
+        };
+        apply(&mut display, &mut settings);
+        let late = Instant::now() - REVERT_AFTER - Duration::from_secs(1);
+        display.pending.as_mut().unwrap().at = late;
+        display.background(&settings);
+        assert!(!display.busy());
+        assert_eq!(display.take_refused_scene(), Some(id), "15 секунд без ответа");
+        apply(&mut display, &mut settings);
+        display.shutdown();
+        assert_eq!(display.take_refused_scene(), Some(id), "закрытие программы");
+        apply(&mut display, &mut settings);
+        toasts_of(dev, &mut settings, |cx| display.command(&Command::UndoScene(0), cx));
+        assert!(!display.busy());
+        assert_eq!(display.take_refused_scene(), None, "второй щелчок — не отказ: панель возвращает сцену сама");
+        change(&mut display, dev, mode(1920, 1080, 60));
+        display.revert();
+        assert_eq!(display.take_refused_scene(), None, "режим из самой карточки — не сцена");
+    }
+
+    /// Возврат сцены ждёт, пока висит чужой вопрос; свой вопрос сцены ему не мешает.
+    #[test]
+    fn a_foreign_question_blocks_the_return_but_the_scenes_own_does_not() {
+        let dev = r"\\.\TEST-SCENE-BLOCKS-UNDO";
+        let mut display = card(dev);
+        let mut settings = crate::config::Settings::default();
+        settings.profiles.push(movie(dev));
+        settings.profiles.push(Profile::new("Other"));
+        let (scene, other) = (settings.profiles[0].clone(), settings.profiles[1].clone());
+        assert!(!display.blocks_undo(&scene), "вопроса нет — не мешает");
+        toasts_of(dev, &mut settings, |cx| display.command(&Command::ApplyScene(0), cx));
+        assert!(!display.blocks_undo(&scene), "вопрос от самой сцены");
+        assert!(display.blocks_undo(&other), "а для другой сцены он чужой");
+        display.keep();
+        change(&mut display, dev, mode(1920, 1080, 60));
+        assert!(display.blocks_undo(&scene), "режим из карточки — чужой вопрос");
+        display.keep();
+        assert!(!display.blocks_undo(&scene));
     }
 
     #[test]

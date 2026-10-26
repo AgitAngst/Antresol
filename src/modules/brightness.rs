@@ -50,19 +50,41 @@ enum Job {
 /// Ключ значения: монитор, физический номер, код VCP.
 type Key = (String, usize, u8);
 
+/// Что не вышло в потоке модуля: слова программы скажет `Module::problems`, английский текст ошибки остаётся в журнале.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Problem {
+    /// Монитор не принял значение ползунка.
+    NotAccepted,
+    /// Яркость сцены не поставилась: монитор не ответил по DDC/CI даже после повторов.
+    SceneBright,
+}
+
 #[derive(Default)]
 struct Shared {
     list: Vec<Physical>,
     /// Прочитали хотя бы раз — до этого карточка показывает «опрашиваю».
     loaded: bool,
-    errors: Vec<String>,
+    /// Что не вышло с прошлого раза — панель скажет уведомлением, даже если карточку не рисуют.
+    problems: Vec<Problem>,
+    /// Мониторы, что хоть раз отвечали яркостью по DDC/CI: их молчание после смены режима — повод подождать и сказать.
+    /// Пока не отвечал никто, ждут все мониторы, у которых есть что опрашивать.
+    answered: Vec<String>,
     /// Яркость до сцены: монитор, физический номер, «ручка» и значение, как его отдал монитор.
     bright_before: Vec<(String, usize, usize, u32)>,
 }
 
+impl Shared {
+    fn report(&mut self, problem: Problem) {
+        if !self.problems.contains(&problem) {
+            self.problems.push(problem);
+        }
+    }
+}
+
 /// Как было до сцены: что стояло в тех настройках, которые она поменяла (`None` / `false` — не меняла).
 struct SceneBefore {
-    scene: String,
+    /// Номер сцены ([`Profile::id`]): переименование возврат не теряет, новая сцена с тем же именем чужой не наследует.
+    scene: u64,
     night: Option<bool>,
     /// Яркость сцена трогала: прежняя лежит у потока (`Shared::bright_before`).
     bright: bool,
@@ -150,6 +172,11 @@ fn worker(rx: Receiver<Job>, shared: Arc<Mutex<Shared>>) {
                 eprintln!("ddc: {} monitors, {} physical: {:?}", monitors.len(), list.len(), list);
             }
             let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
+            for p in list.iter().filter(|p| p.brightness.is_some()) {
+                if !s.answered.contains(&p.device) {
+                    s.answered.push(p.device.clone());
+                }
+            }
             s.list = list;
             s.loaded = true;
         }
@@ -161,28 +188,84 @@ fn flush(sets: &mut Vec<(usize, usize, u8, u32)>, shared: &Arc<Mutex<Shared>>) {
     for (handle, index, code, value) in std::mem::take(sets) {
         if let Err(e) = ddc::set(handle, index, code, value) {
             eprintln!("ddc set failed: {e}");
-            shared.lock().unwrap_or_else(|e| e.into_inner()).errors.push(e);
+            shared.lock().unwrap_or_else(|e| e.into_inner()).report(Problem::NotAccepted);
         }
     }
 }
 
+/// Сколько ждать ответа монитора по DDC/CI после смены режима или HDR: он пересинхронизируется 1–3 с и пока молчит.
+const SILENT_FOR: Duration = if cfg!(test) { Duration::from_millis(600) } else { Duration::from_secs(3) };
+/// Как часто спрашивать молчащий монитор снова.
+const RETRY_EVERY: Duration = if cfg!(test) { Duration::from_millis(40) } else { Duration::from_millis(300) };
+
+/// Чем кончилась попытка поставить яркость монитору.
+enum Attempt {
+    /// Поставлена (или уже такая).
+    Done,
+    /// Монитор есть, но молчит или не принял значение: подождать и спросить снова.
+    Silent,
+    /// Нечего ставить: DDC/CI у такого монитора нет (встроенный экран) или он и раньше не отвечал.
+    Skipped,
+}
+
+/// Одна попытка: прочитать яркость монитора, запомнить прежнюю (один раз на монитор) и поставить `percent` %.
+fn bright_attempt(
+    shared: &Arc<Mutex<Shared>>,
+    device: &str,
+    handle: usize,
+    percent: u8,
+    was: &mut Vec<(String, usize, usize, u32)>,
+) -> Attempt {
+    let physical = ddc::read(device, handle, false);
+    if physical.is_empty() {
+        return Attempt::Skipped;
+    }
+    let (mut answered, mut failed) = (false, false);
+    for p in &physical {
+        let Some(b) = p.brightness else { continue };
+        answered = true;
+        if !was.iter().any(|w| w.0 == device && w.1 == p.index) {
+            was.push((device.to_string(), p.index, handle, b.current));
+        }
+        let want = (u32::from(percent) * b.max + 50) / 100;
+        if want != b.current
+            && let Err(e) = ddc::set(handle, p.index, BRIGHTNESS, want)
+        {
+            eprintln!("ddc scene set failed: {e}");
+            failed = true;
+        }
+    }
+    let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
+    if answered && !s.answered.iter().any(|d| d == device) {
+        s.answered.push(device.to_string());
+    }
+    // Молчащий монитор ждём, только если он уже отвечал (или не отвечал ещё никто): не по DDC/CI управляемому
+    // второму монитору предупреждение при каждой сцене ни к чему.
+    let expected = s.answered.is_empty() || s.answered.iter().any(|d| d == device);
+    match (answered, failed) {
+        (true, false) => Attempt::Done,
+        (true, true) => Attempt::Silent,
+        (false, _) if expected => Attempt::Silent,
+        (false, _) => Attempt::Skipped,
+    }
+}
+
 /// Сцена: запомнить яркость каждого отвечающего монитора и поставить `percent` %. Прежнее запоминается один раз за «сеанс»
-/// сцены: при `keep` у монитора, что уже помним, остаётся то, что было до первой постановки.
+/// сцены: при `keep` у монитора, что уже помним, остаётся то, что было до первой постановки. Монитор, что только что
+/// сменил режим или HDR, молчит по DDC/CI секунду-другую — его спрашивают снова до `SILENT_FOR`; не ответил — модуль
+/// скажет, что яркость не поставилась (`Problem::SceneBright`).
 fn scene_bright(shared: &Arc<Mutex<Shared>>, monitors: &[(String, usize)], percent: u8, keep: bool) {
     let mut was: Vec<(String, usize, usize, u32)> = Vec::new();
-    let mut errors: Vec<String> = Vec::new();
-    for (device, handle) in monitors {
-        for p in ddc::read(device, *handle, false) {
-            let Some(b) = p.brightness else { continue };
-            was.push((device.clone(), p.index, *handle, b.current));
-            let want = (u32::from(percent) * b.max + 50) / 100;
-            if want != b.current
-                && let Err(e) = ddc::set(*handle, p.index, BRIGHTNESS, want)
-            {
-                eprintln!("ddc scene set failed: {e}");
-                errors.push(e);
-            }
+    let mut waiting: Vec<&(String, usize)> = monitors.iter().collect();
+    let deadline = Instant::now() + SILENT_FOR;
+    loop {
+        waiting.retain(|(device, handle)| {
+            matches!(bright_attempt(shared, device, *handle, percent, &mut was), Attempt::Silent)
+        });
+        if waiting.is_empty() || Instant::now() >= deadline {
+            break;
         }
+        std::thread::sleep(RETRY_EVERY);
     }
     let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
     let mut before = if keep { std::mem::take(&mut s.bright_before) } else { Vec::new() };
@@ -192,21 +275,38 @@ fn scene_bright(shared: &Arc<Mutex<Shared>>, monitors: &[(String, usize)], perce
         }
     }
     s.bright_before = before;
-    s.errors.extend(errors);
+    if !waiting.is_empty() {
+        s.report(Problem::SceneBright);
+    }
 }
 
-/// Сцена: вернуть яркость, как была. Ответ — мониторы, что трогали (их перечитать).
+/// Сцена: вернуть яркость, как была — с теми же повторами: возврат режима только что сбил монитор с шины. Ответ —
+/// мониторы, что трогали (их перечитать).
 fn scene_bright_undo(shared: &Arc<Mutex<Shared>>) -> Vec<(String, usize)> {
     let before = std::mem::take(&mut shared.lock().unwrap_or_else(|e| e.into_inner()).bright_before);
     let mut monitors: Vec<(String, usize)> = Vec::new();
-    for (device, index, handle, old) in before {
-        if let Err(e) = ddc::set(handle, index, BRIGHTNESS, old) {
-            eprintln!("ddc scene undo failed: {e}");
-            shared.lock().unwrap_or_else(|e| e.into_inner()).errors.push(e);
+    for (device, _, handle, _) in &before {
+        if !monitors.iter().any(|m| &m.0 == device) {
+            monitors.push((device.clone(), *handle));
         }
-        if !monitors.iter().any(|m| m.0 == device) {
-            monitors.push((device, handle));
+    }
+    let mut left = before;
+    let deadline = Instant::now() + SILENT_FOR;
+    loop {
+        left.retain(|(_, index, handle, old)| match ddc::set(*handle, *index, BRIGHTNESS, *old) {
+            Ok(()) => false,
+            Err(e) => {
+                eprintln!("ddc scene undo failed: {e}");
+                true
+            }
+        });
+        if left.is_empty() || Instant::now() >= deadline {
+            break;
         }
+        std::thread::sleep(RETRY_EVERY);
+    }
+    if !left.is_empty() {
+        shared.lock().unwrap_or_else(|e| e.into_inner()).report(Problem::SceneBright);
     }
     monitors
 }
@@ -281,8 +381,8 @@ impl Brightness {
     fn apply_scene(&mut self, scene: &Profile, cx: &mut Ctx) {
         let s = &scene.system;
         let mut before = match self.before.take() {
-            Some(b) if b.scene == scene.name => b,
-            _ => SceneBefore { scene: scene.name.clone(), night: None, bright: false },
+            Some(b) if b.scene == scene.id => b,
+            _ => SceneBefore { scene: scene.id, night: None, bright: false },
         };
         if let Some(want) = s.night
             && let Some(now) = nightlight::state()
@@ -293,7 +393,7 @@ impl Brightness {
                     Ok(()) => self.night = Some(want),
                     Err(e) => {
                         eprintln!("scene night light failed: {e}");
-                        cx.toasts.push((format!("{}: {e}", cx.t.failed), Tone::Danger));
+                        cx.toasts.push((texts::scene_failed(cx.t, SceneRow::Night), Tone::Danger));
                     }
                 }
             }
@@ -319,7 +419,7 @@ impl Brightness {
                 Ok(()) => self.night = Some(night),
                 Err(e) => {
                     eprintln!("scene night light undo failed: {e}");
-                    cx.toasts.push((format!("{}: {e}", cx.t.failed), Tone::Danger));
+                    cx.toasts.push((texts::scene_failed(cx.t, SceneRow::Night), Tone::Danger));
                 }
             }
         }
@@ -435,7 +535,7 @@ impl Brightness {
                 Ok(()) => self.night = Some(on),
                 Err(e) => {
                     eprintln!("night light failed: {e}");
-                    cx.toasts.push((format!("{}: {e}", t.failed), Tone::Danger));
+                    cx.toasts.push((texts::scene_failed(t, SceneRow::Night), Tone::Danger));
                 }
             }
         }
@@ -506,7 +606,19 @@ impl Module for Brightness {
     }
 
     fn scene_can_undo(&self, scene: &Profile) -> bool {
-        self.before.as_ref().is_some_and(|b| b.scene == scene.name)
+        self.before.as_ref().is_some_and(|b| b.scene == scene.id)
+    }
+
+    /// Монитор не принял значение или не ответил по DDC/CI: слова программы; английский текст — в журнале.
+    fn problems(&mut self, t: &Tr) -> Vec<(String, Tone)> {
+        let problems = std::mem::take(&mut self.shared.lock().unwrap_or_else(|e| e.into_inner()).problems);
+        problems
+            .into_iter()
+            .map(|p| match p {
+                Problem::NotAccepted => (t.ddc_failed.to_string(), Tone::Danger),
+                Problem::SceneBright => (t.scene_bright_failed.to_string(), Tone::Warning),
+            })
+            .collect()
     }
 
     /// «Яркость» — если хоть один монитор отвечает по DDC/CI; «Ночной свет» — если прочитался.
@@ -517,14 +629,10 @@ impl Module for Brightness {
     }
 
     fn ui(&mut self, ui: &mut Ui, cx: &mut Ctx) {
-        let t = cx.t;
-        let (list, loaded, errors) = {
-            let mut s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
-            (s.list.clone(), s.loaded, std::mem::take(&mut s.errors))
+        let (list, loaded) = {
+            let s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+            (s.list.clone(), s.loaded)
         };
-        if !errors.is_empty() {
-            cx.toasts.push((t.ddc_failed.to_string(), Tone::Danger));
-        }
         for p in &list {
             if !p.inputs.is_empty() {
                 self.inputs.insert((p.device.clone(), p.index), p.inputs.clone());
@@ -767,6 +875,98 @@ mod scene_tests {
         // Не просили — не трогаем.
         run(&mut card, &mut settings, dev, Command::SaveScene(0, vec![SceneRow::Night]));
         assert_eq!(settings.profiles[0].system.bright, Some(40));
+    }
+
+    /// Монитор после смены режима молчит секунду-другую: яркость сцены ждёт его повторами, а не пропускает.
+    #[test]
+    fn a_monitor_that_is_silent_for_a_moment_is_waited_for() {
+        let _world = world();
+        let dev = r"\\.\TEST-BRIGHT-SILENT";
+        let t = texts::tr(Lang::En);
+        let mut card = card(dev);
+        let mut settings = Settings::default();
+        settings.profiles.push(scene("Dim", SceneSystem { bright: Some(30), ..Default::default() }));
+        let dim = settings.profiles[0].clone();
+        // На три ближайших обращения (читать или ставить) монитор не ответит.
+        ddc::fake_silence(dev, 3);
+        let toasts = run(&mut card, &mut settings, dev, Command::ApplyScene(0));
+        assert!(toasts.is_empty(), "{toasts:?}");
+        wait("яркость поставлена после повторов", || ddc::fake_peek(dev) == 30);
+        assert!(card.problems(t).is_empty(), "справились — сказать нечего");
+        assert!(card.scene_can_undo(&dim));
+        // Возврат сразу после возврата режима: монитор снова молчит — повторы и тут.
+        ddc::fake_silence(dev, 3);
+        run(&mut card, &mut settings, dev, Command::UndoScene(0));
+        wait("яркость вернулась после повторов", || ddc::fake_peek(dev) == 70);
+        assert!(card.problems(t).is_empty());
+    }
+
+    /// Монитор так и не ответил — модуль говорит это своими словами (предупреждением), яркость не тронута; ответит позже —
+    /// следующая постановка работает.
+    #[test]
+    fn a_monitor_that_stays_silent_gets_a_warning() {
+        let _world = world();
+        let dev = r"\\.\TEST-BRIGHT-MUTE";
+        let t = texts::tr(Lang::En);
+        let mut card = card(dev);
+        let mut settings = Settings::default();
+        settings.profiles.push(scene("Dim", SceneSystem { bright: Some(30), ..Default::default() }));
+        ddc::fake_silence(dev, u32::MAX);
+        run(&mut card, &mut settings, dev, Command::ApplyScene(0));
+        let mut told = Vec::new();
+        wait("предупреждение", || {
+            told.extend(card.problems(t));
+            !told.is_empty()
+        });
+        assert_eq!(told, vec![(t.scene_bright_failed.to_string(), Tone::Warning)]);
+        assert_eq!(ddc::fake_peek(dev), 70, "яркость не тронута");
+        assert!(card.problems(t).is_empty(), "второй раз то же не повторяется");
+        // Отвечает снова.
+        ddc::fake_silence(dev, 0);
+        run(&mut card, &mut settings, dev, Command::ApplyScene(0));
+        wait("яркость поставлена", || ddc::fake_peek(dev) == 30);
+        assert!(card.problems(t).is_empty());
+    }
+
+    /// Ждут и предупреждают о мониторе, что уже отвечал яркостью; тот, что по DDC/CI не отвечал ни разу, пропускается
+    /// молча, как и раньше, — иначе второй монитор без DDC/CI портил бы каждую сцену.
+    #[test]
+    fn a_monitor_that_never_answered_is_skipped_without_a_word() {
+        let _world = world();
+        let (a, b) = (r"\\.\TEST-BRIGHT-ANSWERS", r"\\.\TEST-BRIGHT-NEVER");
+        let monitors = vec![(a.to_string(), ddc::fake_handle(a)), (b.to_string(), ddc::fake_handle(b))];
+        ddc::fake_silence(b, u32::MAX);
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        shared.lock().unwrap().answered.push(a.to_string());
+        let started = Instant::now();
+        scene_bright(&shared, &monitors, 30, false);
+        assert!(started.elapsed() < SILENT_FOR, "молчуна, что не отвечал, не ждали");
+        assert_eq!((ddc::fake_peek(a), ddc::fake_peek(b)), (30, 70));
+        assert!(shared.lock().unwrap().problems.is_empty());
+        // Пока не отвечал никто (программа только запущена), ждут всех: молчит тот, у кого есть что спросить.
+        let cold = Arc::new(Mutex::new(Shared::default()));
+        scene_bright(&cold, &monitors[1..], 30, false);
+        assert_eq!(cold.lock().unwrap().problems, vec![Problem::SceneBright]);
+        // А того, что отвечал, возврат ждёт с повторами и предупреждает, если не дождался.
+        let back = Arc::new(Mutex::new(Shared::default()));
+        back.lock().unwrap().bright_before.push((b.to_string(), 0, ddc::fake_handle(b), 70));
+        assert_eq!(scene_bright_undo(&back).len(), 1);
+        assert_eq!(back.lock().unwrap().problems, vec![Problem::SceneBright]);
+    }
+
+    /// Номер сцены, а не имя: переименование возврат не теряет, новая сцена со старым именем чужого не наследует.
+    #[test]
+    fn the_return_belongs_to_the_scene_not_to_its_name() {
+        let _world = world();
+        let dev = r"\\.\TEST-BRIGHT-IDENTITY";
+        let mut card = card(dev);
+        let mut settings = Settings::default();
+        settings.profiles.push(scene("Dim", SceneSystem { bright: Some(30), ..Default::default() }));
+        run(&mut card, &mut settings, dev, Command::ApplyScene(0));
+        wait("яркость поставлена", || ddc::fake_peek(dev) == 30);
+        settings.profiles[0].name = "Dusk".into();
+        assert!(card.scene_can_undo(&settings.profiles[0]), "переименование возврат не теряет");
+        assert!(!card.scene_can_undo(&scene("Dim", SceneSystem { bright: Some(30), ..Default::default() })));
     }
 
     #[test]

@@ -16,7 +16,7 @@ use super::{Command, Ctx, Module, chips};
 use crate::config::{Profile, SceneRow};
 use crate::sys::net::{self, Vpn, Wifi};
 use crate::sys::system;
-use crate::texts::Tr;
+use crate::texts::{self, Tr};
 
 enum Job {
     Read,
@@ -31,22 +31,33 @@ enum Job {
     SceneWifiUndo,
 }
 
+/// Что не вышло в потоке модуля: панель скажет об этом своими словами (`Module::problems`), а английский текст ошибки
+/// остаётся в журнале.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Failure {
+    Wifi,
+    /// Подключение VPN с этим именем.
+    Vpn(String),
+}
+
 #[derive(Default)]
 struct Shared {
     /// `None` — ещё не прочитано; `Some(None)` — радио Wi‑Fi нет.
     wifi: Option<Option<Wifi>>,
     vpns: Vec<Vpn>,
-    /// Ошибка последнего действия — показать уведомлением.
-    error: Option<String>,
+    /// Что не вышло с прошлого раза — панель скажет уведомлением, даже если карточку не рисуют.
+    failed: Vec<Failure>,
     /// Был ли включён Wi‑Fi до сцены: запоминает поток, когда ставит его по сцене.
     wifi_before: Option<bool>,
 }
 
 /// Как было до сцены: что стояло в тех настройках, которые она поменяла (`None` — не меняла).
 struct SceneBefore {
-    scene: String,
+    /// Номер сцены ([`Profile::id`]): переименование возврат не теряет, новая сцена с тем же именем чужой не наследует.
+    scene: u64,
     awake: Option<bool>,
-    dark: Option<bool>,
+    /// Обе темы Windows — программ и панели задач — как были, каждая своя.
+    theme: Option<system::Theme>,
     quiet: Option<bool>,
     plan: Option<windows::core::GUID>,
     /// Wi‑Fi сцена трогала: прежнее лежит у потока (`Shared::wifi_before`).
@@ -54,19 +65,22 @@ struct SceneBefore {
 }
 
 impl SceneBefore {
-    fn new(scene: &str) -> SceneBefore {
-        SceneBefore { scene: scene.to_string(), awake: None, dark: None, quiet: None, plan: None, wifi: false }
+    fn new(scene: u64) -> SceneBefore {
+        SceneBefore { scene, awake: None, theme: None, quiet: None, plan: None, wifi: false }
     }
 
     fn is_empty(&self) -> bool {
-        self.awake.is_none() && self.dark.is_none() && self.quiet.is_none() && self.plan.is_none() && !self.wifi
+        self.awake.is_none() && self.theme.is_none() && self.quiet.is_none() && self.plan.is_none() && !self.wifi
     }
 }
 
 pub struct Quick {
     /// «Не спать» — только пока работает программа.
     awake: bool,
+    /// Тёмная ли тема программ (плитка).
     dark: Option<bool>,
+    /// Обе темы Windows, как прочитаны: сцена сверяет и ставит обе.
+    theme: Option<system::Theme>,
     quiet: Option<bool>,
     plans: Vec<system::Plan>,
     plan: Option<windows::core::GUID>,
@@ -82,7 +96,17 @@ impl Default for Quick {
         let shared = Arc::new(Mutex::new(Shared::default()));
         let s = shared.clone();
         std::thread::spawn(move || worker(rx, s));
-        Quick { awake: false, dark: None, quiet: None, plans: Vec::new(), plan: None, before: None, jobs: tx, shared }
+        Quick {
+            awake: false,
+            dark: None,
+            theme: None,
+            quiet: None,
+            plans: Vec::new(),
+            plan: None,
+            before: None,
+            jobs: tx,
+            shared,
+        }
     }
 }
 
@@ -93,8 +117,12 @@ fn worker(rx: Receiver<Job>, shared: Arc<Mutex<Shared>>) {
         while let Ok(j) = rx.try_recv() {
             jobs.push(j);
         }
-        let mut error = None;
+        let mut failed: Vec<Failure> = Vec::new();
         for j in jobs {
+            let what = match &j {
+                Job::Vpn(name, _) => Failure::Vpn(name.clone()),
+                _ => Failure::Wifi,
+            };
             let r = match j {
                 Job::Read => Ok(()),
                 Job::Wifi(on) => net::set_wifi(on),
@@ -122,15 +150,19 @@ fn worker(rx: Receiver<Job>, shared: Arc<Mutex<Shared>>) {
             };
             if let Err(e) = r {
                 eprintln!("quick settings failed: {e}");
-                error = Some(e);
+                if !failed.contains(&what) {
+                    failed.push(what);
+                }
             }
         }
         let (wifi, vpns) = (net::wifi(), net::vpns());
         let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
         s.wifi = Some(wifi);
         s.vpns = vpns;
-        if error.is_some() {
-            s.error = error;
+        for what in failed {
+            if !s.failed.contains(&what) {
+                s.failed.push(what);
+            }
         }
     }
 }
@@ -196,7 +228,8 @@ impl Module for Quick {
     }
 
     fn refresh(&mut self, _monitor: &str) {
-        self.dark = system::dark_theme();
+        self.theme = system::theme();
+        self.dark = self.theme.map(|t| t.apps_dark);
         self.quiet = system::notifications_off();
         (self.plans, self.plan) = system::plans();
         let _ = self.jobs.send(Job::Read);
@@ -231,8 +264,9 @@ impl Module for Quick {
         if let Some(want) = s.awake {
             same.push(self.awake == want);
         }
-        if let (Some(want), Some(now)) = (s.dark, self.dark) {
-            same.push(want == now);
+        // Тема стоит, когда обе — программ и панели задач — такие, как в сцене.
+        if let (Some(want), Some(now)) = (s.dark, self.theme) {
+            same.push(now.is(want));
         }
         if let (Some(want), Some(now)) = (s.quiet, self.quiet) {
             same.push(want == now);
@@ -249,7 +283,7 @@ impl Module for Quick {
     }
 
     fn scene_can_undo(&self, scene: &Profile) -> bool {
-        self.before.as_ref().is_some_and(|b| b.scene == scene.name)
+        self.before.as_ref().is_some_and(|b| b.scene == scene.id)
     }
 
     /// Строки быстрых настроек: «Не спать» всегда можно; остальное — если прочиталось (Wi‑Fi — есть радио).
@@ -264,15 +298,28 @@ impl Module for Quick {
         ]
     }
 
+    /// Wi‑Fi или VPN не переключились в потоке модуля: «Не получилось: Wi‑Fi» — словами программы, английский текст ошибки
+    /// остался в журнале. Панель берёт это сама каждый кадр, а не при рисовании карточки.
+    fn problems(&mut self, t: &Tr) -> Vec<(String, Tone)> {
+        let failed = std::mem::take(&mut self.shared.lock().unwrap_or_else(|e| e.into_inner()).failed);
+        failed
+            .into_iter()
+            .map(|what| {
+                let name = match what {
+                    Failure::Wifi => t.wifi.to_string(),
+                    Failure::Vpn(name) => format!("VPN {name}"),
+                };
+                (format!("{}: {name}", t.failed), Tone::Danger)
+            })
+            .collect()
+    }
+
     fn ui(&mut self, ui: &mut Ui, cx: &mut Ctx) {
         let t = cx.t;
-        let (wifi, vpns, error) = {
-            let mut s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
-            (s.wifi.clone(), s.vpns.clone(), s.error.take())
+        let (wifi, vpns) = {
+            let s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+            (s.wifi.clone(), s.vpns.clone())
         };
-        if let Some(e) = error {
-            cx.toasts.push((format!("{}: {e}", t.failed), Tone::Danger));
-        }
         let wifi_state = wifi.clone().flatten();
         // Название плитки одно — «Wi‑Fi»; сеть, через которую выход в интернет, — в строке состояния.
         let network = wifi_state.as_ref().filter(|wf| wf.on && !wf.network.is_empty()).map(|wf| wf.network.as_str());
@@ -314,7 +361,7 @@ impl Module for Quick {
                 {
                     match system::set_plan(&g) {
                         Ok(()) => self.plan = Some(g),
-                        Err(e) => cx.toasts.push((format!("{}: {e}", t.failed), Tone::Danger)),
+                        Err(e) => part_failed(cx, SceneRow::Plan, &e),
                     }
                 }
             }
@@ -340,10 +387,10 @@ impl Module for Quick {
     }
 }
 
-/// Сбой части сцены: в журнал по-английски, пользователю — «Не получилось: …».
-fn scene_failed(cx: &mut Ctx, what: &str, e: String) {
-    eprintln!("scene {what} failed: {e}");
-    cx.toasts.push((format!("{}: {e}", cx.t.failed), Tone::Danger));
+/// Сбой части быстрых настроек: английский текст ошибки — в журнал, пользователю — «Не получилось: Тёмная тема».
+fn part_failed(cx: &mut Ctx, row: SceneRow, e: &str) {
+    eprintln!("quick settings: {row:?} failed: {e}");
+    cx.toasts.push((texts::scene_failed(cx.t, row), Tone::Danger));
 }
 
 impl Quick {
@@ -352,17 +399,21 @@ impl Quick {
     fn apply_scene(&mut self, scene: &Profile, cx: &mut Ctx) {
         let s = &scene.system;
         let mut before = match self.before.take() {
-            Some(b) if b.scene == scene.name => b,
-            _ => SceneBefore::new(&scene.name),
+            Some(b) if b.scene == scene.id => b,
+            _ => SceneBefore::new(scene.id),
         };
+        // Тема стоит, когда обе — программ и панели задач — такие, как в сцене; ставятся обе, а в `before` лежат обе как были.
         if let Some(want) = s.dark
-            && let Some(now) = system::dark_theme()
+            && let Some(now) = system::theme()
         {
-            before.dark = before.dark.or(Some(now));
-            if now != want {
-                match system::set_dark_theme(want) {
-                    Ok(()) => self.dark = Some(want),
-                    Err(e) => scene_failed(cx, "dark theme", e),
+            before.theme = before.theme.or(Some(now));
+            if !now.is(want) {
+                match system::set_theme(system::Theme::both(want)) {
+                    Ok(()) => {
+                        self.theme = Some(system::Theme::both(want));
+                        self.dark = Some(want);
+                    }
+                    Err(e) => part_failed(cx, SceneRow::Dark, &e),
                 }
             }
         }
@@ -373,7 +424,7 @@ impl Quick {
             if now != want {
                 match system::set_notifications_off(want) {
                     Ok(()) => self.quiet = Some(want),
-                    Err(e) => scene_failed(cx, "quiet", e),
+                    Err(e) => part_failed(cx, SceneRow::Quiet, &e),
                 }
             }
         }
@@ -383,7 +434,7 @@ impl Quick {
                 if system::keep_awake(want) {
                     self.awake = want;
                 } else {
-                    scene_failed(cx, "keep awake", "SetThreadExecutionState failed".to_string());
+                    part_failed(cx, SceneRow::Awake, "SetThreadExecutionState failed");
                 }
             }
         }
@@ -394,7 +445,7 @@ impl Quick {
                 if active != Some(want) {
                     match system::set_plan(&want) {
                         Ok(()) => self.plan = Some(want),
-                        Err(e) => scene_failed(cx, "power plan", e),
+                        Err(e) => part_failed(cx, SceneRow::Plan, &e),
                     }
                 }
             } else {
@@ -414,12 +465,16 @@ impl Quick {
             return;
         }
         let Some(before) = self.before.take() else { return };
-        if let Some(dark) = before.dark
-            && system::dark_theme().is_some_and(|now| now != dark)
+        // Обе темы — каждая как была: «смешанный» режим (программы светлые, панель задач тёмная) возвращается таким же.
+        if let Some(theme) = before.theme
+            && system::theme().is_some_and(|now| now != theme)
         {
-            match system::set_dark_theme(dark) {
-                Ok(()) => self.dark = Some(dark),
-                Err(e) => scene_failed(cx, "dark theme", e),
+            match system::set_theme(theme) {
+                Ok(()) => {
+                    self.theme = Some(theme);
+                    self.dark = Some(theme.apps_dark);
+                }
+                Err(e) => part_failed(cx, SceneRow::Dark, &e),
             }
         }
         if let Some(quiet) = before.quiet
@@ -427,7 +482,7 @@ impl Quick {
         {
             match system::set_notifications_off(quiet) {
                 Ok(()) => self.quiet = Some(quiet),
-                Err(e) => scene_failed(cx, "quiet", e),
+                Err(e) => part_failed(cx, SceneRow::Quiet, &e),
             }
         }
         if let Some(awake) = before.awake
@@ -436,7 +491,7 @@ impl Quick {
             if system::keep_awake(awake) {
                 self.awake = awake;
             } else {
-                scene_failed(cx, "keep awake", "SetThreadExecutionState failed".to_string());
+                part_failed(cx, SceneRow::Awake, "SetThreadExecutionState failed");
             }
         }
         if let Some(plan) = before.plan
@@ -444,7 +499,7 @@ impl Quick {
         {
             match system::set_plan(&plan) {
                 Ok(()) => self.plan = Some(plan),
-                Err(e) => scene_failed(cx, "power plan", e),
+                Err(e) => part_failed(cx, SceneRow::Plan, &e),
             }
         }
         if before.wifi {
@@ -472,28 +527,38 @@ impl Quick {
 
     /// Щелчок по плитке с номером `i` (порядок — как в `ui`).
     fn toggle(&mut self, i: usize, wifi: Option<&Wifi>, cx: &mut Ctx) {
-        let t = cx.t;
+        // Что нажали (для слов об ошибке) и чем кончилось; нет значения у плитки — ничего.
         let result = match i {
             0 => {
                 let on = !self.awake;
-                Some(if system::keep_awake(on) {
-                    self.awake = on;
-                    Ok(())
-                } else {
-                    Err("SetThreadExecutionState failed".to_string())
-                })
+                Some((
+                    SceneRow::Awake,
+                    if system::keep_awake(on) {
+                        self.awake = on;
+                        Ok(())
+                    } else {
+                        Err("SetThreadExecutionState failed".to_string())
+                    },
+                ))
             }
-            1 => self.dark.map(|on| system::set_dark_theme(!on).map(|()| self.dark = Some(!on))),
-            2 => self.quiet.map(|on| system::set_notifications_off(!on).map(|()| self.quiet = Some(!on))),
+            1 => self.dark.map(|on| {
+                let ok = system::set_dark_theme(!on).map(|()| {
+                    self.dark = Some(!on);
+                    self.theme = Some(system::Theme::both(!on));
+                });
+                (SceneRow::Dark, ok)
+            }),
+            2 => self
+                .quiet
+                .map(|on| (SceneRow::Quiet, system::set_notifications_off(!on).map(|()| self.quiet = Some(!on)))),
             3 => wifi.map(|wf| {
                 let _ = self.jobs.send(Job::Wifi(!wf.on));
-                Ok(())
+                (SceneRow::Wifi, Ok(()))
             }),
             _ => None,
         };
-        if let Some(Err(e)) = result {
-            eprintln!("quick settings failed: {e}");
-            cx.toasts.push((format!("{}: {e}", t.failed), Tone::Danger));
+        if let Some((row, Err(e))) = result {
+            part_failed(cx, row, &e);
         }
     }
 }
@@ -657,6 +722,90 @@ mod tests {
         // Возврат — к тому, что было до сцены, а не до её второго раза: «Тишина» снова выключена.
         run(&mut q, &mut settings, Command::UndoScene(0));
         assert_eq!((system::notifications_off(), system::dark_theme()), (Some(false), Some(true)));
+    }
+
+    /// У Windows 10 по умолчанию программы светлые, а панель задач тёмная: сцена ставит обе темы, а возврат возвращает
+    /// каждую как была.
+    #[test]
+    fn a_mixed_theme_comes_back_the_way_it_was() {
+        let _world = world();
+        let mut q = Quick::default();
+        let mut settings = Settings::default();
+        settings.profiles.push(scene("Dark", SceneSystem { dark: Some(true), ..Default::default() }));
+        settings.profiles.push(scene("Light", SceneSystem { dark: Some(false), ..Default::default() }));
+        let (dark, light) = (settings.profiles[0].clone(), settings.profiles[1].clone());
+        let mixed = system::Theme { apps_dark: false, system_dark: true };
+        system::set_theme(mixed).unwrap();
+        q.refresh("");
+        assert_eq!(q.dark, Some(false), "плитка смотрит на программы");
+        assert_eq!(
+            (q.scene_part(&dark), q.scene_part(&light)),
+            (Some(false), Some(false)),
+            "ни одна тема не стоит целиком"
+        );
+        // «Тёмная»: обе тёмные; возврат — программы светлые, панель задач тёмная.
+        run(&mut q, &mut settings, Command::ApplyScene(0));
+        assert_eq!(system::theme(), Some(system::Theme::both(true)));
+        assert_eq!(q.scene_part(&dark), Some(true));
+        run(&mut q, &mut settings, Command::UndoScene(0));
+        assert_eq!(system::theme(), Some(mixed), "панель задач осталась тёмной, как была");
+        assert_eq!((q.dark, q.scene_part(&dark)), (Some(false), Some(false)));
+        // «Светлая»: из смешанной обе светлые (панель задач тоже), и обратно.
+        run(&mut q, &mut settings, Command::ApplyScene(1));
+        assert_eq!(system::theme(), Some(system::Theme::both(false)));
+        assert_eq!(q.scene_part(&light), Some(true));
+        run(&mut q, &mut settings, Command::UndoScene(1));
+        assert_eq!(system::theme(), Some(mixed));
+        // Плитка меняет обе темы вместе.
+        system::set_dark_theme(false).unwrap();
+        q.refresh("");
+        assert_eq!(system::theme(), Some(system::Theme::both(false)));
+    }
+
+    /// Сцену узнают по номеру: переименование возврат не теряет, новая сцена со старым именем чужого не наследует.
+    #[test]
+    fn the_return_belongs_to_the_scene_not_to_its_name() {
+        let _world = world();
+        let mut q = Quick::default();
+        q.refresh("");
+        let mut settings = Settings::default();
+        let quiet = SceneSystem { quiet: Some(true), ..Default::default() };
+        settings.profiles.push(scene("Quiet", quiet.clone()));
+        run(&mut q, &mut settings, Command::ApplyScene(0));
+        settings.profiles[0].name = "Hush".into();
+        assert!(q.scene_can_undo(&settings.profiles[0]), "переименование возврат не теряет");
+        assert!(!q.scene_can_undo(&scene("Quiet", quiet)), "новая сцена со старым именем возврата не наследует");
+        run(&mut q, &mut settings, Command::UndoScene(0));
+        assert_eq!(system::notifications_off(), Some(false));
+    }
+
+    /// Что не вышло, говорится словами программы (английский текст ошибки остаётся в журнале); Wi‑Fi — из потока модуля,
+    /// куда бы ни смотрела карточка.
+    #[test]
+    fn what_fails_is_told_in_the_programs_words() {
+        let _world = world();
+        let t = texts::tr(Lang::En);
+        let mut q = Quick::default();
+        let mut settings = Settings::default();
+        settings.profiles.push(scene("Plane", SceneSystem { wifi: Some(false), ..Default::default() }));
+        q.refresh("");
+        wait("строка Wi‑Fi стала доступна", || q.scene_rows().contains(&(SceneRow::Wifi, true)));
+        net::FAKE_WIFI_FAILS.store(true, std::sync::atomic::Ordering::Relaxed);
+        run(&mut q, &mut settings, Command::ApplyScene(0));
+        let mut told = Vec::new();
+        wait("слова про Wi‑Fi", || {
+            told.extend(q.problems(t));
+            !told.is_empty()
+        });
+        assert_eq!(told, vec![(format!("{}: Wi‑Fi", t.failed), Tone::Danger)]);
+        assert!(q.problems(t).is_empty(), "второй раз то же не повторяется");
+        // Сбой части сцены: «Не получилось: Тёмная тема», а не «cannot open …».
+        let mut toasts = Vec::new();
+        let mut cx =
+            Ctx { t, lang: Lang::En, monitor: r"\\.\TEST-QUICK", toasts: &mut toasts, settings: &mut settings };
+        part_failed(&mut cx, SceneRow::Dark, r"cannot open Software\Microsoft\Windows");
+        assert_eq!(toasts, vec![(format!("{}: {}", t.failed, t.dark_theme_win), Tone::Danger)]);
+        net::FAKE_WIFI_FAILS.store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
     #[test]

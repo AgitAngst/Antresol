@@ -80,18 +80,55 @@ fn capabilities(m: &PHYSICAL_MONITOR) -> Option<String> {
 /// Яркость выдуманного монитора вначале, %.
 const FAKE_BRIGHTNESS: u32 = 70;
 
-/// Выдуманные мониторы по именам устройств: яркость каждого. Нужный заводится при первом обращении.
-static FAKE: Mutex<Vec<(String, u32)>> = Mutex::new(Vec::new());
+/// Выдуманный монитор: его яркость и сколько ближайших обращений он «промолчит» (так проверяют повторы, когда монитор
+/// после смены режима не отвечает по DDC/CI). `u32::MAX` — молчит всегда.
+struct FakeMonitor {
+    device: String,
+    brightness: u32,
+    silent: u32,
+}
+
+impl FakeMonitor {
+    /// Монитор молчит на это обращение? Молчание, кроме вечного, убывает с каждым обращением.
+    fn is_silent(&mut self) -> bool {
+        if self.silent == 0 {
+            return false;
+        }
+        if self.silent != u32::MAX {
+            self.silent -= 1;
+        }
+        true
+    }
+}
+
+/// Выдуманные мониторы по именам устройств. Нужный заводится при первом обращении.
+static FAKE: Mutex<Vec<FakeMonitor>> = Mutex::new(Vec::new());
 
 /// Место выдуманного монитора в [`FAKE`]; нет — заводится.
-fn fake_index(list: &mut Vec<(String, u32)>, device: &str) -> usize {
-    match list.iter().position(|(d, _)| d.eq_ignore_ascii_case(device)) {
+fn fake_index(list: &mut Vec<FakeMonitor>, device: &str) -> usize {
+    match list.iter().position(|m| m.device.eq_ignore_ascii_case(device)) {
         Some(i) => i,
         None => {
-            list.push((device.to_string(), FAKE_BRIGHTNESS));
+            list.push(FakeMonitor { device: device.to_string(), brightness: FAKE_BRIGHTNESS, silent: 0 });
             list.len() - 1
         }
     }
+}
+
+/// Выдуманный монитор «молчит»: следующие `n` обращений к нему (чтение и запись) DDC/CI не ответит; `u32::MAX` — всегда.
+#[cfg(test)]
+pub fn fake_silence(device: &str, n: u32) {
+    let mut list = FAKE.lock().unwrap_or_else(|e| e.into_inner());
+    let i = fake_index(&mut list, device);
+    list[i].silent = n;
+}
+
+/// Яркость выдуманного монитора, не спрашивая его самого (молчащий не ответил бы, а вопрос съел бы одно молчание).
+#[cfg(test)]
+pub fn fake_peek(device: &str) -> u32 {
+    let mut list = FAKE.lock().unwrap_or_else(|e| e.into_inner());
+    let i = fake_index(&mut list, device);
+    list[i].brightness
 }
 
 /// «Ручка» выдуманного монитора вместо `HMONITOR`: его номер в списке выдуманных (с единицы, у каждого свой), чтобы `set`
@@ -101,22 +138,23 @@ pub fn fake_handle(device: &str) -> usize {
 }
 
 /// Выдуманный монитор для снимков и тестов: значения и входы не настоящие, шина DDC/CI не трогается. Яркость — та, что
-/// в него записали.
+/// в него записали. Молчащий монитор (`fake_silence`) на месте, но значений не отдаёт — как настоящий после смены режима.
 fn fake(device: &str, with_caps: bool) -> Physical {
     let f = |current| Some(Feature { current, max: 100 });
-    let brightness = {
+    let (brightness, silent) = {
         let mut list = FAKE.lock().unwrap_or_else(|e| e.into_inner());
         let i = fake_index(&mut list, device);
-        list[i].1
+        let silent = list[i].is_silent();
+        (list[i].brightness, silent)
     };
     Physical {
         device: device.to_string(),
         index: 0,
         name: "Monitor 27".to_string(),
-        brightness: f(brightness),
-        contrast: f(50),
-        input: Some(0x11),
-        inputs: if with_caps { vec![0x11, 0x0F] } else { Vec::new() },
+        brightness: if silent { None } else { f(brightness) },
+        contrast: if silent { None } else { f(50) },
+        input: if silent { None } else { Some(0x11) },
+        inputs: if with_caps && !silent { vec![0x11, 0x0F] } else { Vec::new() },
     }
 }
 
@@ -156,11 +194,15 @@ pub fn read(device: &str, handle: usize, with_caps: bool) -> Vec<Physical> {
 /// Поставить значение VCP физическому монитору `index` логического `handle`.
 pub fn set(handle: usize, index: usize, code: u8, value: u32) -> Result<(), String> {
     if super::blocked(&format!("ddc::set {handle} {index} 0x{code:02X} {value}")) {
-        // Выдуманный монитор запоминает яркость; чужой «ручки» (не из `fake_handle`) в выдуманном мире нет — ничего.
-        if code == BRIGHTNESS {
-            let mut list = FAKE.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(entry) = handle.checked_sub(1).and_then(|i| list.get_mut(i)) {
-                entry.1 = value;
+        // Выдуманный монитор запоминает яркость (молчащий — не принимает); чужой «ручки» (не из `fake_handle`) в
+        // выдуманном мире нет — ничего.
+        let mut list = FAKE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = handle.checked_sub(1).and_then(|i| list.get_mut(i)) {
+            if entry.is_silent() {
+                return Err(format!("SetVCPFeature 0x{code:02X} failed"));
+            }
+            if code == BRIGHTNESS {
+                entry.brightness = value;
             }
         }
         return Ok(());

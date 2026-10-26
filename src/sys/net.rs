@@ -39,10 +39,15 @@ macro_rules! wait {
 /// Выдуманный Wi‑Fi: включено ли радио. Читается и пишется из потока модуля — отсюда `AtomicBool`.
 static FAKE_WIFI: AtomicBool = AtomicBool::new(true);
 
+/// Выдуманный Wi‑Fi не переключается: радио «не даёт доступ» (для тестов уведомления об ошибке).
+#[cfg(test)]
+pub static FAKE_WIFI_FAILS: AtomicBool = AtomicBool::new(false);
+
 /// Выдуманный Wi‑Fi включён, как вначале (для тестов).
 #[cfg(test)]
 pub fn fake_reset() {
     FAKE_WIFI.store(true, Ordering::Relaxed);
+    FAKE_WIFI_FAILS.store(false, Ordering::Relaxed);
 }
 
 /// Wi‑Fi: включено ли радио и к какой сети подключены (пусто — ни к какой).
@@ -87,6 +92,10 @@ pub fn wifi() -> Option<Wifi> {
 
 pub fn set_wifi(on: bool) -> std::result::Result<(), String> {
     if super::blocked(&format!("set_wifi {on}")) {
+        #[cfg(test)]
+        if FAKE_WIFI_FAILS.load(Ordering::Relaxed) {
+            return Err("radio access: 1".into());
+        }
         FAKE_WIFI.store(on, Ordering::Relaxed);
         return Ok(());
     }

@@ -353,8 +353,11 @@ impl SceneRow {
 /// Сцена — экран и системные настройки, что ставятся одним щелчком или клавишей и (по желанию) возвращаются вторым
 /// щелчком. В файле — строка `profile=`, имя в коде осталось от профилей экрана: профиль до 2.1 — это сцена, которая
 /// меняет только экран.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, Debug)]
 pub struct Profile {
+    /// Номер сцены на время работы программы: у каждой свой, переименование его не меняет, новая сцена с тем же именем
+    /// получает другой. По нему модули помнят, что вернуть. В файл не пишется и при сравнении сцен не учитывается.
+    pub id: u64,
     pub name: String,
     pub hotkey: Option<Hotkey>,
     /// Экран: режим, масштаб и HDR мониторов; пусто — экран сцена не меняет.
@@ -364,10 +367,30 @@ pub struct Profile {
     pub undo: bool,
 }
 
+/// Сцены равны, когда равно то, что записано в файле: номер (`id`) у прочитанной заново сцены другой.
+impl PartialEq for Profile {
+    fn eq(&self, other: &Profile) -> bool {
+        self.name == other.name
+            && self.hotkey == other.hotkey
+            && self.monitors == other.monitors
+            && self.system == other.system
+            && self.undo == other.undo
+    }
+}
+
+impl Eq for Profile {}
+
+/// Следующий свободный номер сцены ([`Profile::id`]).
+fn next_scene_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 impl Profile {
     /// Сцена без частей: потом в неё отмечают, что менять.
     pub fn new(name: &str) -> Profile {
         Profile {
+            id: next_scene_id(),
             name: name.to_string(),
             hotkey: None,
             monitors: Vec::new(),
@@ -466,7 +489,7 @@ impl Profile {
                 }
             }
         }
-        let scene = Profile { name, hotkey, monitors, system, undo };
+        let scene = Profile { id: next_scene_id(), name, hotkey, monitors, system, undo };
         (!scene.name.is_empty() && !scene.is_empty()).then_some(scene)
     }
 }
@@ -1063,6 +1086,7 @@ mod tests {
     #[test]
     fn profiles_round_trip() {
         let p = Profile {
+            id: 0,
             name: "Игры".into(),
             hotkey: Hotkey::parse("Ctrl+Alt+1"),
             monitors: vec![
@@ -1122,6 +1146,7 @@ mod tests {
             hdr: Some(true),
         };
         Profile {
+            id: 0,
             name: "Кино".into(),
             hotkey: Hotkey::parse("Ctrl+Alt+3"),
             monitors: vec![monitor],
@@ -1161,6 +1186,23 @@ mod tests {
         let text = format(&s);
         assert_eq!(text.lines().filter(|l| l.starts_with("profile=")).count(), 4);
         assert_eq!(parse(&text), s);
+    }
+
+    /// Номер сцены живёт, пока работает программа: переименование его не меняет, новая сцена с тем же именем получает
+    /// другой, в файл он не попадает и сравнению сцен не мешает.
+    #[test]
+    fn a_scene_has_a_number_that_the_file_does_not_know() {
+        let (a, b) = (Profile::new("A"), Profile::new("A"));
+        assert_ne!(a.id, b.id, "каждая новая сцена со своим номером, хоть имя то же");
+        assert_eq!(a, b, "сцены сравниваются по записанному в файле");
+        assert_eq!(Profile { name: "B".into(), ..a.clone() }.id, a.id, "переименование номер не меняет");
+        let p = scene();
+        let again = Profile::parse(&p.to_string()).expect("строка читается");
+        assert_eq!(again, p);
+        assert_ne!(again.id, p.id, "прочитанная заново — это новый номер");
+        assert!(!p.to_string().contains("id="), "в файл номер не пишется: {p}");
+        let (x, y) = (parse("profile=X | | D 1x1@60\n").profiles, parse("profile=X | | D 1x1@60\n").profiles);
+        assert_ne!(x[0].id, y[0].id);
     }
 
     /// Строка до 2.1 — три части — читается как сцена, что меняет только экран; при записи остаётся такой же.

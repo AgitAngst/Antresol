@@ -523,8 +523,9 @@ mod tests {
     /// запись — `real_write` уронил бы тест раньше, чем что-то поменялось бы на этом ПК.
     #[test]
     fn every_writer_stops_at_the_guard() {
-        // Писатели меняют выдуманную систему (она одна на все тесты): держим её и возвращаем как была.
+        // Писатели меняют выдуманную систему (она одна на все тесты): держим её, начинаем с исходной и возвращаем как была.
         let _world = WORLD_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        reset_fake_world();
         let dev = r"\\.\GUARD-TEST";
         let mode = display::Mode { width: 1920, height: 1080, hz: 144, bits: 32 };
         assert!(isolated(), "в тестах мир выдуманный");
@@ -557,7 +558,7 @@ mod tests {
         assert_eq!(clip::write_text("guard-test"), Ok(()));
         for what in [
             "keep_awake true",
-            "set_dark_theme true",
+            "set_theme Theme { apps_dark: true, system_dark: true }",
             "set_notifications_off true",
             "set_plan",
             "set_wifi true",
@@ -589,6 +590,12 @@ mod tests {
         nightlight::set(true).unwrap();
         net::set_wifi(false).unwrap();
         assert_eq!(system::dark_theme(), Some(false));
+        assert_eq!(system::theme(), Some(system::Theme::both(false)));
+        // Тема — два значения по отдельности (программы и панель задач): «смешанная» помнится как есть.
+        let mixed = system::Theme { apps_dark: false, system_dark: true };
+        system::set_theme(mixed).unwrap();
+        assert_eq!((system::theme(), system::dark_theme()), (Some(mixed), Some(false)));
+        assert!(!mixed.is(true) && !mixed.is(false) && system::Theme::both(true).is(true));
         assert_eq!(system::notifications_off(), Some(true));
         assert_eq!(system::plans().1, Some(guid(3)));
         assert_eq!(nightlight::state(), Some(true));

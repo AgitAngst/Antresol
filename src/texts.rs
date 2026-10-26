@@ -2,6 +2,8 @@
 
 use anvil_ui::Lang;
 
+use crate::config::SceneRow;
+
 pub struct Tr {
     pub display: &'static str,
     pub recommended: &'static str,
@@ -224,6 +226,9 @@ pub struct Tr {
     pub scene_edit: &'static str,
     pub scene_rows_none: &'static str,
     pub scene_plan_missing: &'static str,
+    pub scene_bright_failed: &'static str,
+    pub scene_why_wifi: &'static str,
+    pub scene_why_read: &'static str,
     pub scenes_none: &'static str,
     pub wifi: &'static str,
     pub accents: [&'static str; 5],
@@ -448,6 +453,9 @@ const RU: Tr = Tr {
     scene_edit: "Изменить сцену",
     scene_rows_none: "Отметьте, что менять",
     scene_plan_missing: "Плана питания из сцены нет — он пропущен",
+    scene_bright_failed: "Не удалось поставить яркость: монитор не ответил по DDC/CI",
+    scene_why_wifi: "Нет радио Wi‑Fi",
+    scene_why_read: "Windows не отдала значение",
     scenes_none: "Сцен пока нет — «+» в шапке создаёт сцену из текущих настроек.",
     wifi: "Wi‑Fi",
     accents: ["Лайм", "Фиолетовый", "Индиго", "Фуксия", "Лазурь"],
@@ -672,6 +680,9 @@ const EN: Tr = Tr {
     scene_edit: "Edit scene",
     scene_rows_none: "Check what to change",
     scene_plan_missing: "The power plan from the scene is gone — skipped",
+    scene_bright_failed: "Could not set the brightness: the monitor did not answer over DDC/CI",
+    scene_why_wifi: "No Wi‑Fi radio",
+    scene_why_read: "Windows did not give the value",
     scenes_none: "No scenes yet — “+” in the header makes one from the current settings.",
     wifi: "Wi‑Fi",
     accents: ["Lime", "Violet", "Indigo", "Fuchsia", "Sky"],
@@ -804,6 +815,25 @@ pub fn revert_in(lang: Lang, secs: u64) -> String {
         Lang::Ru => format!("Вернётся сам через {secs} с"),
         Lang::En => format!("Reverts in {secs} s"),
     }
+}
+
+/// Подпись строки сцены — по ней же уведомления называют, что не вышло.
+pub fn scene_row_label(t: &Tr, row: SceneRow) -> &'static str {
+    match row {
+        SceneRow::Screen => t.display,
+        SceneRow::Bright => t.brightness,
+        SceneRow::Night => t.night_light,
+        SceneRow::Quiet => t.quiet,
+        SceneRow::Awake => t.keep_awake,
+        SceneRow::Dark => t.dark_theme_win,
+        SceneRow::Wifi => t.wifi,
+        SceneRow::Plan => t.power_plan,
+    }
+}
+
+/// Часть сцены не поставилась: своими словами, а английский текст ошибки остаётся в журнале — «Не получилось: Тёмная тема».
+pub fn scene_failed(t: &Tr, row: SceneRow) -> String {
+    format!("{}: {}", t.failed, scene_row_label(t, row))
 }
 
 /// Имя новой сцены: «Сцена 2» (первый свободный номер).

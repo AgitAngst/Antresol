@@ -29,15 +29,37 @@ use windows::core::{GUID, PCWSTR};
 
 use super::wide;
 
+/// Тема Windows: два значения реестра по отдельности. У Windows 10 по умолчанию программы светлые, а панель задач тёмная
+/// («смешанный» режим), поэтому одного признака «тёмная» мало: вернуть тему «как была» можно, только помня оба значения.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Theme {
+    /// `AppsUseLightTheme` = 0: программы тёмные.
+    pub apps_dark: bool,
+    /// `SystemUsesLightTheme` = 0: панель задач, «Пуск» и системные окна тёмные.
+    pub system_dark: bool,
+}
+
+impl Theme {
+    /// Обе темы тёмные (`true`) или обе светлые.
+    pub fn both(dark: bool) -> Theme {
+        Theme { apps_dark: dark, system_dark: dark }
+    }
+
+    /// Обе темы такие, как `dark`.
+    pub fn is(self, dark: bool) -> bool {
+        self == Theme::both(dark)
+    }
+}
+
 /// Выдуманная система: что «стоит» сейчас.
 struct World {
-    dark: bool,
+    theme: Theme,
     quiet: bool,
     /// План питания — GUID числом.
     plan: u128,
 }
 
-const WORLD_START: World = World { dark: true, quiet: false, plan: 1 };
+const WORLD_START: World = World { theme: Theme { apps_dark: true, system_dark: true }, quiet: false, plan: 1 };
 
 static WORLD: Mutex<World> = Mutex::new(WORLD_START);
 
@@ -110,23 +132,30 @@ fn write_dword(path: &str, name: &str, value: u32) -> Result<(), String> {
 const THEME: &str = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize";
 const PUSH: &str = r"Software\Microsoft\Windows\CurrentVersion\PushNotifications";
 
-/// Тёмная ли тема Windows (программы); не узнать — `None`.
-pub fn dark_theme() -> Option<bool> {
+/// Тема Windows сейчас: и программ, и панели задач. Значение программ не прочитать — `None`; панели задач нет (старая
+/// Windows) — она считается такой же, как программы.
+pub fn theme() -> Option<Theme> {
     if super::fake_reads() {
-        return Some(world(|w| w.dark));
+        return Some(world(|w| w.theme));
     }
-    read_dword(THEME, "AppsUseLightTheme").map(|v| v == 0)
+    let apps_dark = read_dword(THEME, "AppsUseLightTheme")? == 0;
+    let system_dark = read_dword(THEME, "SystemUsesLightTheme").map_or(apps_dark, |v| v == 0);
+    Some(Theme { apps_dark, system_dark })
 }
 
-/// Тёмная или светлая тема Windows — и для программ, и для панели задач.
-pub fn set_dark_theme(dark: bool) -> Result<(), String> {
-    if super::blocked(&format!("set_dark_theme {dark}")) {
-        world(|w| w.dark = dark);
+/// Тёмная ли тема программ Windows (плитка «Тёмная тема»); не узнать — `None`.
+pub fn dark_theme() -> Option<bool> {
+    theme().map(|t| t.apps_dark)
+}
+
+/// Поставить тему Windows: каждое из двух значений — своим, как передано (так сцена возвращает «смешанный» режим).
+pub fn set_theme(theme: Theme) -> Result<(), String> {
+    if super::blocked(&format!("set_theme {theme:?}")) {
+        world(|w| w.theme = theme);
         return Ok(());
     }
-    let light = if dark { 0 } else { 1 };
-    write_dword(THEME, "AppsUseLightTheme", light)?;
-    write_dword(THEME, "SystemUsesLightTheme", light)?;
+    write_dword(THEME, "AppsUseLightTheme", u32::from(!theme.apps_dark))?;
+    write_dword(THEME, "SystemUsesLightTheme", u32::from(!theme.system_dark))?;
     // Рассылка всем окнам может ждать по 200 мс на каждое зависшее — не в потоке панели.
     std::thread::spawn(|| {
         let topic = wide("ImmersiveColorSet");
@@ -144,6 +173,11 @@ pub fn set_dark_theme(dark: bool) -> Result<(), String> {
         }
     });
     Ok(())
+}
+
+/// Тёмная или светлая тема Windows — и для программ, и для панели задач.
+pub fn set_dark_theme(dark: bool) -> Result<(), String> {
+    set_theme(Theme::both(dark))
 }
 
 /// Выключены ли уведомления Windows (`ToastEnabled` = 0); нет значения — включены.

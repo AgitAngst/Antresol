@@ -14,7 +14,7 @@ use eframe::egui::{
 };
 
 use crate::config::{self, ALL_MONITORS, Hotkey, MAX_HEIGHT, MIN_HEIGHT, MIN_WIDTH, Profile, SceneRow, Settings};
-use crate::modules::{self, Command, Ctx, Module};
+use crate::modules::{self, Command, Ctx, Module, anchor};
 use crate::panel::{self, Edge, Input};
 use crate::sys::{self, monitor};
 use crate::{look, texts};
@@ -258,8 +258,12 @@ pub struct App {
     banner: Option<String>,
     /// Правка сцены: открыта, пока `view == View::Scene`.
     scene: Option<SceneEdit>,
-    /// Имя сцены, что ставили последней: из подходящих по состоянию чипов выделен этот (иначе первый).
-    last_scene: Option<String>,
+    /// Номер сцены ([`Profile::id`]), что ставили последней: из подходящих по состоянию чипов выделен этот (иначе первый).
+    last_scene: Option<u64>,
+    /// В настройках спросили «Удалить сцену?» — номер этой сцены; пока не ответили, строка сцены — вопрос.
+    ask_delete: Option<u64>,
+    /// Вопрос только что задан: карточка «Сцены» листается к нему (у последней сцены он иначе оказался бы под краем).
+    ask_scroll: bool,
     /// «Ещё N»: куда пролистать ряд карточек в следующем кадре.
     scroll_to: Option<f32>,
     /// Сколько места заняла правая часть шапки в прошлом кадре — левой достаётся остальное.
@@ -324,9 +328,9 @@ impl App {
             toasts: Toasts::default(),
             // Для снимков: открыть сразу настройки, не щёлкая мышью.
             view: match std::env::var("ANTRESOL_VIEW").as_deref() {
-                Ok("settings") => View::Settings,
+                Ok("settings" | "settings-ask") => View::Settings,
                 Ok("color") => View::Color,
-                Ok("scene") => View::Scene,
+                Ok("scene" | "scene-ask" | "scene-name") => View::Scene,
                 _ => View::Cards,
             },
             monitors: Vec::new(),
@@ -353,6 +357,8 @@ impl App {
             banner: None,
             scene: None,
             last_scene: None,
+            ask_delete: None,
+            ask_scroll: false,
             scroll_to: None,
             header_right: 0.0,
             header_edges: (0.0, f32::MAX),
@@ -374,13 +380,29 @@ impl App {
         if app.view == View::Color {
             app.open_color(&cc.egui_ctx);
         }
-        // Для снимков: `ANTRESOL_VIEW=scene` — сразу правка сцены `ANTRESOL_SCENE` (по порядку, с единицы; по умолчанию первой).
+        // Для снимков: `ANTRESOL_VIEW=scene` — сразу правка сцены `ANTRESOL_SCENE` (по порядку, с единицы; по умолчанию первой);
+        // `scene-ask` — с вопросом «Удалить сцену?», `scene-name` — с именем, что уже есть у другой сцены, `settings-ask` —
+        // настройки с тем же вопросом у этой сцены.
+        let hook = std::env::var("ANTRESOL_VIEW").unwrap_or_default();
+        let n = std::env::var("ANTRESOL_SCENE").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(1);
+        let scenes = app.settings.profiles.len();
+        let shown = n.saturating_sub(1).min(scenes.saturating_sub(1));
         if app.view == View::Scene {
-            let n = std::env::var("ANTRESOL_SCENE").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(1);
             app.view = View::Cards;
-            if !app.settings.profiles.is_empty() {
-                app.open_scene(n.saturating_sub(1).min(app.settings.profiles.len() - 1), false, View::Cards);
+            if scenes > 0 {
+                app.open_scene(shown, false, View::Cards);
             }
+        }
+        if let Some(edit) = &mut app.scene {
+            edit.confirm_delete = hook == "scene-ask";
+            if hook == "scene-name"
+                && let Some(other) = app.settings.profiles.iter().enumerate().find(|(j, _)| *j != shown)
+            {
+                edit.name = other.1.name.clone();
+            }
+        }
+        if hook == "settings-ask" && scenes > 0 {
+            (app.ask_delete, app.ask_scroll) = (Some(app.settings.profiles[shown].id), true);
         }
         app
     }
@@ -512,7 +534,7 @@ impl App {
             let parts: Vec<bool> = self.modules.iter().filter_map(|m| m.scene_part(s)).collect();
             !parts.is_empty() && parts.iter().all(|ok| *ok)
         };
-        let last = self.last_scene.as_ref().and_then(|n| self.settings.profiles.iter().position(|p| &p.name == n));
+        let last = self.last_scene.and_then(|id| self.settings.profiles.iter().position(|p| p.id == id));
         last.filter(|&i| stands(&self.settings.profiles[i])).or_else(|| self.settings.profiles.iter().position(stands))
     }
 
@@ -527,8 +549,9 @@ impl App {
     }
 
     /// Щелчок по чипу сцены или её клавиша. Стоящая сцена при включённом возврате — вернуть как было (модули помнят, что
-    /// было, пока работает программа: нечего — так и сказать), при выключенном — сказать, что стоит. Не стоящая — поставить:
-    /// экран, потом система; «Оставить этот режим?» ждёт ответа — сначала ответить.
+    /// было, пока работает программа: нечего — так и сказать; висит чужое «Оставить?» — сначала ответить, и не начинать:
+    /// иначе сцена вернулась бы наполовину), при выключенном — сказать, что стоит. Не стоящая — поставить: экран, потом
+    /// система; «Оставить этот режим?» ждёт ответа — сначала ответить.
     fn scene_click(&mut self, i: usize, device: &str) {
         let Some(scene) = self.settings.profiles.get(i).cloned() else { return };
         let (t, lang) = (texts::tr(self.lang()), self.lang());
@@ -537,13 +560,12 @@ impl App {
                 self.toasts.push(t.scene_already, Tone::Neutral);
             } else if !self.modules.iter().any(|m| m.scene_can_undo(&scene)) {
                 self.toasts.push(t.scene_nothing_undo, Tone::Neutral);
+            } else if self.modules.iter().any(|m| m.blocks_undo(&scene)) {
+                self.toasts.push(t.answer_first, Tone::Warning);
             } else {
                 self.command_on(&Command::UndoScene(i), device);
                 self.last_scene = None;
-                // Чужой вопрос «Оставить?» вернуть не дал — слова «вернул» не будет.
-                if !self.modules.iter().any(|m| m.scene_can_undo(&scene)) {
-                    self.toasts.push(t.scene_undone, Tone::Neutral);
-                }
+                self.toasts.push(t.scene_undone, Tone::Neutral);
             }
             return;
         }
@@ -551,7 +573,7 @@ impl App {
             return;
         }
         self.toasts.push(texts::scene_set(lang, &scene.name), Tone::Neutral);
-        self.last_scene = Some(scene.name.clone());
+        self.last_scene = Some(scene.id);
         self.command_on(&Command::ApplyScene(i), device);
         self.reveal_busy();
     }
@@ -622,8 +644,7 @@ impl App {
         if let Some(scene) = self.settings.profiles.get(edit.index) {
             let (bad_name, empty) = (self.name_problem(&edit.name, edit.index).is_some(), scene.is_empty());
             if edit.fresh && (bad_name || empty) {
-                let gone = self.settings.profiles.remove(edit.index);
-                self.forget_scene(&gone.name);
+                self.settings.profiles.remove(edit.index);
             } else if empty {
                 self.settings.profiles[edit.index] = edit.original.clone();
             }
@@ -644,23 +665,57 @@ impl App {
         })
     }
 
-    /// Сцену убрали: о ней больше нечего помнить.
-    fn forget_scene(&mut self, name: &str) {
-        if self.last_scene.as_deref() == Some(name) {
-            self.last_scene = None;
-        }
-    }
-
-    /// Удалить сцену `i` (корзина в настройках, «Удалить» в правке); её клавиша освобождается сама: набор клавиш сцен
-    /// окно пересобирает каждый кадр.
+    /// Удалить сцену `i` (корзина в настройках и «Удалить сцену» в правке — оба после вопроса); её клавиша освобождается
+    /// сама: набор клавиш сцен окно пересобирает каждый кадр. Модулям говорить нечего: они помнят сцену по номеру, а
+    /// номера удалённой больше ни у кого нет.
     fn delete_scene(&mut self, i: usize) {
         if i >= self.settings.profiles.len() {
             return;
         }
-        let gone = self.settings.profiles.remove(i);
-        self.forget_scene(&gone.name);
+        self.settings.profiles.remove(i);
         self.capture = None;
         self.save();
+    }
+
+    /// Отказались от режима, что поставила сцена («Вернуть», 15 секунд без ответа, закрытие программы), — это отказ от
+    /// сцены целиком: её системная часть возвращается так же, как вторым щелчком (и когда «Повторный щелчок — вернуть как
+    /// было» выключен: тот про второй щелчок, а не про отказ), и панель говорит, что вернула.
+    fn undo_refused_scenes(&mut self) {
+        let refused: Vec<u64> = self.modules.iter_mut().filter_map(|m| m.take_refused_scene()).collect();
+        if refused.is_empty() {
+            return;
+        }
+        let device = self.monitor().map(|m| m.device.clone()).unwrap_or_default();
+        let t = texts::tr(self.lang());
+        for id in refused {
+            let Some(i) = self.settings.profiles.iter().position(|p| p.id == id) else { continue };
+            self.command_on(&Command::UndoScene(i), &device);
+            if self.last_scene == Some(id) {
+                self.last_scene = None;
+            }
+            self.toasts.push(t.scene_undone, Tone::Neutral);
+        }
+    }
+
+    /// Что модули делают сами, без щелчка, каждый кадр: следят (`background`: «Оставить?» без ответа 15 секунд — откат),
+    /// зовут (`attention`: таймер дошёл), говорят, что не вышло в их потоках (`problems`: Wi‑Fi, DDC/CI), — это
+    /// уведомления, даже когда карточку не рисуют, — и отдают отказ от сцены (`undo_refused_scenes`). Ответ — что зовут
+    /// сказать.
+    fn modules_background(&mut self) -> Vec<String> {
+        let t = texts::tr(self.lang());
+        let (mut calls, mut problems) = (Vec::new(), Vec::new());
+        for module in &mut self.modules {
+            module.background(&self.settings);
+            if let Some(msg) = module.attention(t) {
+                calls.push(msg);
+            }
+            problems.extend(module.problems(t));
+        }
+        for (text, tone) in problems {
+            self.toasts.push(text, tone);
+        }
+        self.undo_refused_scenes();
+        calls
     }
 
     /// Модуль ждёт ответа (после сцены — «Оставить?» у «Экрана»), а карточки на открытой полке нет — открыть ту полку,
@@ -694,11 +749,14 @@ impl App {
         config::save(&self.settings);
     }
 
-    /// Программа закрывается: модули возвращают то, что держали на время (режим экрана до «Оставить»).
+    /// Программа закрывается: модули возвращают то, что держали на время (режим экрана до «Оставить»). Не ответили на
+    /// «Оставить?» после сцены — это отказ от сцены, как «Вернуть»: её системная часть возвращается тоже (что делает
+    /// поток модуля — Wi‑Fi, яркость по DDC/CI, — закрытие может и не дождаться).
     fn shutdown(&mut self) {
         for module in &mut self.modules {
             module.shutdown();
         }
+        self.undo_refused_scenes();
     }
 
     /// Тянут край панели: новый размер считаем от курсора на экране, а не от окна —
@@ -727,14 +785,7 @@ impl App {
             self.monitors = monitor::monitors();
             self.monitors_at = Some(now);
         }
-        let t = texts::tr(self.lang());
-        let mut calls = Vec::new();
-        for module in &mut self.modules {
-            module.background(&self.settings);
-            if let Some(msg) = module.attention(t) {
-                calls.push(msg);
-            }
-        }
+        let calls = self.modules_background();
         // Модуль зовёт (таймер дошёл) — уведомление и выезд, как по клавише.
         if !calls.is_empty() && !self.edge.shown && self.strip_on {
             self.banner = Some(calls.join(" · "));
@@ -1034,26 +1085,41 @@ impl App {
         }
     }
 
-    /// Карточка «Сцены»: имя, «Изменить…» (правка сцены), клавиша (захват, «занято»), убрать клавишу, удалить.
+    /// Карточка «Сцены»: имя, «Изменить…» (правка сцены), клавиша (захват, «занято»), убрать клавишу, удалить — корзина
+    /// спрашивает «Удалить сцену?» тут же, на месте строки, тем же вопросом, что и правка сцены.
     fn scenes_card(&mut self, ui: &mut Ui) {
-        let t = texts::tr(self.lang());
+        let (t, lang) = (texts::tr(self.lang()), self.lang());
         w::section_label(ui, t.scenes);
         if self.settings.profiles.is_empty() {
             w::note(ui, t.scenes_none);
             return;
         }
         self.capture_keys(ui);
-        let (mut delete, mut open) = (None, None);
+        let (mut delete, mut open, mut ask) = (None, None, None);
         for i in 0..self.settings.profiles.len() {
             let name = self.settings.profiles[i].name.clone();
             let hotkey = self.settings.profiles[i].hotkey.clone();
+            let id = self.settings.profiles[i].id;
+            if self.ask_delete == Some(id) {
+                let (yes, no, rect) = delete_question(ui, lang, &name);
+                if std::mem::take(&mut self.ask_scroll) {
+                    ui.scroll_to_rect(rect.expand(8.0), None);
+                }
+                if yes {
+                    delete = Some(i);
+                } else if no {
+                    self.ask_delete = None;
+                }
+                ui.add_space(6.0);
+                continue;
+            }
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(&name).font(anvil_ui::semibold(13.5)));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let trash = w::icon_button(ui, Icon::Trash, t.scene_delete);
                     anchor(ui, trash.rect, &format!("scene-trash-{i}"));
                     if trash.clicked() {
-                        delete = Some(i);
+                        ask = Some(id);
                     }
                     let edit = w::button(ui, Kind::Ghost, Some(Icon::Pencil), t.change).on_hover_text(t.scene_edit);
                     anchor(ui, edit.rect, &format!("scene-open-{i}"));
@@ -1088,7 +1154,11 @@ impl App {
             }
             ui.add_space(6.0);
         }
+        if ask.is_some() {
+            (self.ask_delete, self.ask_scroll) = (ask, true);
+        }
         if let Some(i) = delete {
+            self.ask_delete = None;
             self.delete_scene(i);
         }
         if let Some(i) = open
@@ -2353,9 +2423,14 @@ impl App {
             anchor(ui, back.rect, "scene-back");
             leave |= back.clicked();
             ui.label(egui::RichText::new("/").color(p.weak));
+            // Имя рисуем сами: `ui.label` в строке без переноса растягивает текст и обрезку по `room` не слушает — имя
+            // заходило на «Удалить сцену».
             let mut job = egui::text::LayoutJob::simple_singleline(title.clone(), anvil_ui::semibold(14.5), p.text);
             job.wrap = egui::text::TextWrapping::truncate_at_width(room);
-            let name = ui.label(job);
+            let galley = ui.painter().layout_job(job);
+            let (rect, name) = ui.allocate_exact_size(galley.size(), Sense::hover());
+            ui.painter().galley(rect.min, galley, p.text);
+            anchor(ui, rect, "scene-title");
             if cut {
                 name.on_hover_text(&title);
             }
@@ -2389,7 +2464,30 @@ impl App {
     /// не сжимаются: подписи и значения строк иначе обрезались бы.
     fn scene_view(&mut self, ui: &mut Ui) {
         const MIN: f32 = 1270.0;
-        let area = ui.available_rect_before_wrap();
+        let mut area = ui.available_rect_before_wrap();
+        // Вопрос «Удалить сцену?» — над карточками, по видимой ширине панели, а не по ширине карточек: листаются они, а не
+        // вопрос с его кнопками.
+        if self.scene.as_ref().is_some_and(|e| e.confirm_delete) {
+            let name = self
+                .scene
+                .as_ref()
+                .and_then(|e| self.settings.profiles.get(e.index))
+                .map(|s| s.name.clone())
+                .unwrap_or_default();
+            let mut question = ui.new_child(UiBuilder::new().max_rect(area));
+            let (yes, no, _) = delete_question(&mut question, self.lang(), &name);
+            area.min.y = question.min_rect().bottom() + 8.0;
+            if yes {
+                if let Some(edit) = self.scene.take() {
+                    self.view = edit.back;
+                    self.delete_scene(edit.index);
+                }
+                return;
+            }
+            if no && let Some(edit) = &mut self.scene {
+                edit.confirm_delete = false;
+            }
+        }
         if area.width() >= MIN {
             self.scene_columns(ui, area);
             return;
@@ -2436,61 +2534,35 @@ impl App {
 
     /// Подпись строки сцены.
     fn scene_label(&self, row: SceneRow) -> &'static str {
+        texts::scene_row_label(texts::tr(self.lang()), row)
+    }
+
+    /// Почему строку нельзя отметить (в подсказке недоступной строки): яркость — про DDC/CI, Wi‑Fi — нет радио, остальное —
+    /// Windows не отдала значение.
+    fn scene_why(&self, row: SceneRow) -> &'static str {
         let t = texts::tr(self.lang());
         match row {
-            SceneRow::Screen => t.display,
-            SceneRow::Bright => t.brightness,
-            SceneRow::Night => t.night_light,
-            SceneRow::Quiet => t.quiet,
-            SceneRow::Awake => t.keep_awake,
-            SceneRow::Dark => t.dark_theme_win,
-            SceneRow::Wifi => t.wifi,
-            SceneRow::Plan => t.power_plan,
+            SceneRow::Bright => t.ddc_none,
+            SceneRow::Wifi => t.scene_why_wifi,
+            _ => t.scene_why_read,
         }
     }
 
     fn scene_columns(&mut self, ui: &mut Ui, area: Rect) {
-        let (t, lang) = (texts::tr(self.lang()), self.lang());
+        let t = texts::tr(self.lang());
         let p = Palette::of(ui);
         let Some(index) = self.scene.as_ref().map(|e| e.index) else { return };
         let Some(scene) = self.settings.profiles.get(index).cloned() else { return };
         let ctx = ui.ctx().clone();
 
-        // Вопрос «Удалить сцену?» — баннером над карточками.
-        let mut body = area;
-        if self.scene.as_ref().is_some_and(|e| e.confirm_delete) {
-            let banner = Rect::from_min_size(area.min, Vec2::new(area.width(), 50.0));
-            let mut b = ui.new_child(UiBuilder::new().max_rect(banner));
-            let (mut yes, mut no) = (false, false);
-            w::banner(&mut b, Tone::Warning, &texts::scene_delete_q(lang, &scene.name), "", |ui| {
-                let delete = w::button(ui, Kind::Danger, None, t.scene_delete_yes);
-                anchor(ui, delete.rect, "scene-delete-yes");
-                yes = delete.clicked();
-                let cancel = w::button(ui, Kind::Secondary, None, t.cancel);
-                anchor(ui, cancel.rect, "scene-delete-no");
-                no = cancel.clicked();
-            });
-            body.min.y = banner.bottom() + 8.0;
-            if yes {
-                if let Some(edit) = self.scene.take() {
-                    self.view = edit.back;
-                    self.delete_scene(edit.index);
-                }
-                return;
-            }
-            if no && let Some(edit) = &mut self.scene {
-                edit.confirm_delete = false;
-            }
-        }
-
         // Три карточки по долям 2,45 : 1 : 1,32, зазор 10. В макете 2,3 : 1 : 1,15, но на 1300 так узка и первая («Display»
         // в английской подписи сжимается до «Displ…» рядом со значением экрана), и третья (подпись выключателя «Повторный
         // щелчок — вернуть как было» в одну строку не влезает).
-        let unit = (body.width() - 20.0) / 4.77;
-        let card1 = Rect::from_min_size(body.min, Vec2::new(unit * 2.45, body.height()));
-        let card2 = Rect::from_min_size(Pos2::new(card1.right() + 10.0, body.top()), Vec2::new(unit, body.height()));
+        let unit = (area.width() - 20.0) / 4.77;
+        let card1 = Rect::from_min_size(area.min, Vec2::new(unit * 2.45, area.height()));
+        let card2 = Rect::from_min_size(Pos2::new(card1.right() + 10.0, area.top()), Vec2::new(unit, area.height()));
         let card3 =
-            Rect::from_min_size(Pos2::new(card2.right() + 10.0, body.top()), Vec2::new(unit * 1.32, body.height()));
+            Rect::from_min_size(Pos2::new(card2.right() + 10.0, area.top()), Vec2::new(unit * 1.32, area.height()));
         let rows_state: Vec<(SceneRow, bool)> = self.modules.iter().flat_map(|m| m.scene_rows()).collect();
         let (mut toggle, mut take) = (None, false);
         let before = self.settings.clone();
@@ -2528,9 +2600,8 @@ impl App {
                                     } else if available {
                                         (t.scene_untouched.to_string(), String::new())
                                     } else {
-                                        // Недоступно в системе: в подсказке причина (у яркости — про DDC/CI).
-                                        let why = if row == SceneRow::Bright { t.ddc_none } else { t.unavailable };
-                                        (t.unavailable.to_string(), why.to_string())
+                                        // Недоступно в системе: в подсказке причина.
+                                        (t.unavailable.to_string(), self.scene_why(row).to_string())
                                     };
                                     let id = egui::Id::new(("scene-row", col * 4 + k));
                                     let r =
@@ -2580,7 +2651,14 @@ impl App {
                 // Enter в поле — «Готово».
                 done = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 if let Some(why) = self.name_problem(&name, index) {
-                    ui.label(egui::RichText::new(why).size(12.5).color(p.danger));
+                    // Красная рамка поля и под ним строка со значком (общий гайдлайн §5).
+                    ui.painter().rect_stroke(field.rect, 6, Stroke::new(1.5, p.danger), StrokeKind::Inside);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        let (rect, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
+                        anvil_ui::icons::paint(ui.painter(), rect, Tone::Danger.icon(), p.danger);
+                        ui.label(egui::RichText::new(why).size(12.5).color(p.danger));
+                    });
                 }
                 ui.add_space(8.0);
                 ui.label(egui::RichText::new(t.scene_key).size(12.5).color(p.weak));
@@ -2643,9 +2721,6 @@ impl App {
         if self.name_problem(&name, index).is_none() {
             let clean = Profile::clean_name(&name);
             if self.settings.profiles[index].name != clean {
-                if self.last_scene.as_deref() == Some(scene.name.as_str()) {
-                    self.last_scene = Some(clean.clone());
-                }
                 self.settings.profiles[index].name = clean;
             }
         }
@@ -2869,6 +2944,10 @@ impl App {
 
         // Полок стало меньше, чем номер открытой, — берётся последняя.
         self.shelf = self.shelf.min(self.settings.shelves.len().saturating_sub(1));
+        // Вопрос «Удалить сцену?» живёт в настройках: ушли оттуда — вопрос снят.
+        if self.view != View::Settings {
+            self.ask_delete = None;
+        }
         self.shelf_keys(&ctx);
 
         let inner = Rect::from_min_max(panel.min + Vec2::new(12.0, 0.0), panel.max - Vec2::new(12.0, BODY_BOTTOM));
@@ -2911,6 +2990,9 @@ impl App {
             } else if self.editing.is_some() {
                 // Esc в правке — как «Готово»; следующий Esc прячет панель.
                 self.finish_edit();
+            } else if self.view == View::Settings && self.ask_delete.is_some() {
+                // Esc в настройках сперва снимает вопрос «Удалить сцену?»; следующий прячет панель.
+                self.ask_delete = None;
             } else {
                 if self.view == View::Color {
                     self.restore_accent(&ctx);
@@ -2935,9 +3017,12 @@ impl eframe::App for App {
         anvil_ui::chrome::clear_color(visuals, look::accent_of(&self.settings.accent))
     }
 
-    /// Окно закрывается (Alt+F4, «Закрыть Antresol»): модули возвращают то, что держали на время, — режим экрана,
-    /// который не успели подтвердить. Выход из сеанса сюда не доходит, но и не нужен: неподтверждённого режима нет в реестре.
+    /// Окно закрывается (Alt+F4, «Закрыть Antresol»): открытая правка сцены кончается, как по «Готово» (негодная сцена
+    /// убирается, а у прежней без отмеченных строк остаётся такая, какой вошли, — иначе её не было бы в файле), а модули
+    /// возвращают то, что держали на время, — режим экрана, который не успели подтвердить. Выход из сеанса сюда не
+    /// доходит, но и не нужен: неподтверждённого режима нет в реестре.
     fn on_exit(&mut self) {
+        self.finish_scene();
         self.shutdown();
     }
 }
@@ -2964,9 +3049,86 @@ fn fit_widths(free: f32, items: &[(f32, f32)]) -> Vec<f32> {
     }
 }
 
-/// Свой `Id` у чужого виджета: тест без окна находит его через `Context::read_response`. Щелчков не ловит (`hover`).
-fn anchor(ui: &Ui, rect: Rect, key: &str) {
-    ui.interact(rect, egui::Id::new(("anchor", key)), Sense::hover());
+/// Вопрос «Удалить сцену «…»?» на месте: плашка предупреждения, вопрос слева, справа «Отмена» и «Удалить» (`Danger`). Не
+/// помещается в одну строку (узкая карточка настроек, длинное имя) — кнопки встают под вопросом, слева (колонка настроек
+/// на узкой панели листается вбок, а правый край у неё уходит из виду), а имя в вопросе обрезается многоточием. Ответ:
+/// (удалить, отмена, место плашки). Кнопки с якорями `scene-delete-yes` и `scene-delete-no`.
+fn delete_question(ui: &mut Ui, lang: Lang, name: &str) -> (bool, bool, Rect) {
+    let t = texts::tr(lang);
+    let p = Palette::of(ui);
+    let color = Tone::Warning.color(&p);
+    let painter = ui.painter().clone();
+    let measure = |text: &str, font: egui::FontId| painter.layout_no_wrap(text.to_owned(), font, p.text).size().x;
+    // Кнопка набора — 12 по бокам и текст; между кнопками обычный зазор.
+    let gap = ui.spacing().item_spacing.x;
+    let buttons = 24.0
+        + measure(t.scene_delete_yes, egui::FontId::proportional(14.0))
+        + gap
+        + 24.0
+        + measure(t.cancel, egui::FontId::proportional(14.0));
+    let (yes, no) = (std::cell::Cell::new(false), std::cell::Cell::new(false));
+    let frame = egui::Frame::new()
+        .fill(p.soft(color))
+        .stroke(Stroke::new(1.0, color.gamma_multiply(0.35)))
+        .corner_radius(anvil_ui::theme::radius::CARD)
+        .inner_margin(egui::Margin::symmetric(14, 10))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let room = ui.available_width();
+            // Значок 18, отступ 4 до вопроса и зазоры между ними; вопрос не шире места после них — длинное имя обрезается.
+            let lead = 18.0 + gap + 4.0 + gap;
+            let wide_enough =
+                |question: &str| lead + measure(question, anvil_ui::semibold(14.0)) + gap + buttons <= room;
+            let full = texts::scene_delete_q(lang, name);
+            let one_row = wide_enough(&full);
+            let question = if one_row { full } else { fit_question(lang, name, room - lead, &measure) };
+            let delete_button = |ui: &mut Ui| {
+                let delete = w::button(ui, Kind::Danger, None, t.scene_delete_yes);
+                anchor(ui, delete.rect, "scene-delete-yes");
+                yes.set(delete.clicked());
+            };
+            let cancel_button = |ui: &mut Ui| {
+                let cancel = w::button(ui, Kind::Secondary, None, t.cancel);
+                anchor(ui, cancel.rect, "scene-delete-no");
+                no.set(cancel.clicked());
+            };
+            let ask = |ui: &mut Ui| {
+                let (rect, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
+                anvil_ui::icons::paint(ui.painter(), rect, Tone::Warning.icon(), color);
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new(&question).font(anvil_ui::semibold(14.0)).color(p.text));
+            };
+            if one_row {
+                ui.horizontal(|ui| {
+                    ask(ui);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        delete_button(ui);
+                        cancel_button(ui);
+                    });
+                });
+            } else {
+                ui.horizontal(ask);
+                ui.horizontal(|ui| {
+                    cancel_button(ui);
+                    delete_button(ui);
+                });
+            }
+        });
+    (yes.get(), no.get(), frame.response.rect)
+}
+
+/// Вопрос «Удалить сцену «…»?» не шире `max` точек: у длинного имени отрезается конец и ставится многоточие.
+fn fit_question(lang: Lang, name: &str, max: f32, measure: &impl Fn(&str, egui::FontId) -> f32) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    for keep in (0..=chars.len()).rev() {
+        let shown: String =
+            if keep == chars.len() { name.to_string() } else { chars[..keep].iter().collect::<String>() + "…" };
+        let question = texts::scene_delete_q(lang, &shown);
+        if measure(&question, anvil_ui::semibold(14.0)) <= max {
+            return question;
+        }
+    }
+    texts::scene_delete_q(lang, "…")
 }
 
 /// Тихая кнопка цветом `danger` со значком — «Удалить сцену» в шапке правки. В наборе красная кнопка только с подложкой
@@ -3521,6 +3683,8 @@ mod tests {
                 banner: None,
                 scene: None,
                 last_scene: None,
+                ask_delete: None,
+                ask_scroll: false,
                 scroll_to: None,
                 header_right: 0.0,
                 header_edges: (0.0, f32::MAX),
@@ -3540,6 +3704,8 @@ mod tests {
         time: f64,
         mouse: Pos2,
         size: Vec2,
+        /// Что нарисовано в последнем кадре.
+        shapes: Vec<egui::epaint::ClippedShape>,
     }
 
     impl Rig {
@@ -3553,7 +3719,14 @@ mod tests {
             let ctx = egui::Context::default();
             anvil_ui::install(&ctx, look::accent_of(&settings.accent), settings.common.theme);
             let size = Vec2::new(width, SIZE.y);
-            let mut rig = Rig { ctx, app: App::for_test(settings), time: 0.0, mouse: Pos2::new(5.0, 5.0), size };
+            let mut rig = Rig {
+                ctx,
+                app: App::for_test(settings),
+                time: 0.0,
+                mouse: Pos2::new(5.0, 5.0),
+                size,
+                shapes: Vec::new(),
+            };
             rig.settle();
             rig
         }
@@ -3578,6 +3751,21 @@ mod tests {
             let mut out = self.ctx.run_ui(input, |ui| app.draw(ui));
             // Рисовать некому: изменения текстур (шрифты) никто не применит, и egui без `clear` на этом упадёт.
             out.textures_delta.clear();
+            self.shapes = out.shapes;
+        }
+
+        /// Рамки цвета `color` в последнем кадре: прямоугольники с обводкой этого цвета.
+        fn outlines(&self, color: Color32) -> Vec<Rect> {
+            fn walk(shape: &egui::Shape, color: Color32, out: &mut Vec<Rect>) {
+                match shape {
+                    egui::Shape::Rect(r) if r.stroke.color == color && r.stroke.width > 0.0 => out.push(r.rect),
+                    egui::Shape::Vec(list) => list.iter().for_each(|s| walk(s, color, out)),
+                    _ => {}
+                }
+            }
+            let mut out = Vec::new();
+            self.shapes.iter().for_each(|s| walk(&s.shape, color, &mut out));
+            out
         }
 
         /// Несколько кадров без ввода: слои и раскладка успокаиваются (у нового слоя первый кадр — на замер).
@@ -4538,7 +4726,7 @@ mod tests {
         rig.app.last_scene = None;
         assert_eq!(rig.app.active_scene(), Some(0), "не помним, какую ставили, — первая подходящая");
         // «Б» стоит, и второй щелчок по ней возвращает именно её (а не «А»).
-        rig.app.last_scene = Some("B".into());
+        rig.app.last_scene = Some(rig.app.settings.profiles[1].id);
         rig.app.scene_click(1, dev);
         assert_eq!((sys::system::notifications_off(), rig.app.active_scene()), (Some(false), None));
     }
@@ -4810,10 +4998,21 @@ mod tests {
             for n in 0..8 {
                 rig.scene_row(n);
             }
-            // Вопрос про удаление над карточками.
-            rig.click_anchor("scene-delete");
-            rig.settle();
-            rig.anchor("scene-delete-yes");
+            // Вопрос про удаление — над карточками, и обе кнопки видны целиком, а не где-то в листаемой части: с коротким
+            // именем в одну строку, с самым длинным (24 широких буквы) на узкой панели — кнопки под вопросом.
+            for name in ["Movie".to_string(), "W".repeat(config::MAX_SCENE_NAME)] {
+                rig.app.settings.profiles[0].name = name.clone();
+                rig.click_anchor("scene-delete");
+                rig.settle();
+                let visible = Rect::from_min_max(Pos2::new(12.0, 0.0), Pos2::new(width - 12.0, SIZE.y));
+                let (yes, no) = (rig.anchor("scene-delete-yes"), rig.anchor("scene-delete-no"));
+                for (key, button) in [("Delete", yes), ("Cancel", no)] {
+                    assert!(visible.contains_rect(button), "{width} «{name}»: «{key}» за краем: {button:?}");
+                }
+                assert!(no.right() <= yes.left() || no.bottom() <= yes.top(), "{width}: кнопки наехали друг на друга");
+                rig.click_anchor("scene-delete-no");
+                assert!(!rig.app.scene.as_ref().unwrap().confirm_delete, "{width}: «Отмена» вопрос не сняла");
+            }
             let done = rig.anchor("scene-done");
             assert!(done.right() <= width && done.left() > 0.0, "{width}: «Готово» за краем: {done:?}");
         }
@@ -4823,10 +5022,12 @@ mod tests {
     fn a_long_name_in_the_editor_header_does_not_cover_the_buttons() {
         let _world = world();
         let dev = r"\\.\TEST-SCENE-LONG-NAME";
-        for width in [560.0, 700.0, 1300.0] {
+        // Длинное имя и самое широкое из возможных (24 «Ш»): название обрезается многоточием, а не заходит на кнопки.
+        let names = ["Очень длинное имя сцены для шапки", "ШШШШШШШШШШШШШШШШШШШШШШШШ"];
+        for (width, name) in [560.0, 700.0, 1300.0].into_iter().flat_map(|w| names.map(|n| (w, n))) {
             let mut rig = Rig::sized(width);
             let mut scene = movie(dev);
-            scene.name = "Очень длинное имя сцены для шапки".into();
+            scene.name = name.into();
             rig.app.settings.profiles = vec![scene];
             rig.app.open_scene(0, false, View::Cards);
             rig.settle();
@@ -4835,8 +5036,13 @@ mod tests {
                 back.right() < delete.left() && delete.right() < done.left(),
                 "{width}: кнопки наехали друг на друга"
             );
-            // Имя между «‹ Сцены» и «Удалить сцену»: ничто не лезет за правый край.
+            // Имя между «‹ Сцены» и «Удалить сцену»: ничто не лезет за правый край и на кнопку.
             assert!(done.right() <= width, "{width}: «Готово» за краем: {done:?}");
+            let title = rig.anchor("scene-title");
+            assert!(
+                title.left() >= back.right() && title.right() <= delete.left(),
+                "{width} «{name}»: имя заходит на кнопки: {title:?} при {delete:?}"
+            );
         }
     }
 
@@ -4889,12 +5095,291 @@ mod tests {
         rig.click_anchor("scene-open-0");
         rig.key(Key::Escape, Modifiers::NONE);
         assert!(rig.app.view == View::Settings);
-        // Корзина — сразу, без вопроса.
+        // Корзина спрашивает на месте строки — тем же вопросом, что правка сцены; «Отмена» и Esc сцену оставляют.
+        let names = |rig: &Rig| rig.app.settings.profiles.iter().map(|p| p.name.clone()).collect::<Vec<_>>();
         rig.click_anchor("scene-trash-0");
-        assert_eq!(rig.app.settings.profiles.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["Work"]);
+        assert_eq!(names(&rig), ["Movie", "Work"], "от щелчка по корзине сцена не пропадает");
+        assert!(rig.app.ask_delete.is_some());
+        rig.anchor("scene-delete-yes");
+        rig.click_anchor("scene-delete-no");
+        assert!(rig.app.ask_delete.is_none() && names(&rig).len() == 2);
+        rig.app.edge.reveal(Instant::now());
         rig.click_anchor("scene-trash-0");
+        rig.key(Key::Escape, Modifiers::NONE);
+        assert!(rig.app.ask_delete.is_none() && names(&rig).len() == 2, "Esc снял вопрос");
+        assert!(rig.app.view == View::Settings && rig.app.edge.shown, "а панель не спряталась");
+        rig.key(Key::Escape, Modifiers::NONE);
+        assert!(!rig.app.edge.shown, "следующий Esc прячет её");
+        // Ушли из настроек с вопросом — он снят.
+        rig.click_anchor("scene-trash-1");
+        assert!(rig.app.ask_delete.is_some());
+        rig.app.view = View::Cards;
+        rig.settle();
+        rig.app.view = View::Settings;
+        rig.settle();
+        assert!(rig.app.ask_delete.is_none() && names(&rig).len() == 2);
+        // «Удалить» убирает сцену, и вопрос уходит вместе с ней.
+        rig.click_anchor("scene-trash-0");
+        rig.click_anchor("scene-delete-yes");
+        assert_eq!(names(&rig), ["Work"]);
+        assert!(rig.app.ask_delete.is_none());
+        rig.click_anchor("scene-trash-0");
+        rig.click_anchor("scene-delete-yes");
         assert!(rig.app.settings.profiles.is_empty());
         rig.settle();
+    }
+
+    /// Вопрос «Удалить сцену?» в настройках виден целиком и на самой узкой панели, и с самым длинным именем.
+    #[test]
+    fn the_settings_question_fits_the_narrowest_card() {
+        let _world = world();
+        let dev = r"\\.\TEST-SCENE-SETTINGS-NARROW";
+        for width in [560.0, 930.0, 1300.0] {
+            let mut rig = Rig::sized(width);
+            let mut scene = movie(dev);
+            scene.name = "W".repeat(config::MAX_SCENE_NAME);
+            rig.app.settings.profiles = vec![scene];
+            rig.app.view = View::Settings;
+            // Корзина на узкой панели в листаемой части: вопрос просим сами.
+            rig.app.ask_delete = Some(rig.app.settings.profiles[0].id);
+            rig.settle();
+            let visible = Rect::from_min_max(Pos2::new(12.0, 0.0), Pos2::new(width - 12.0, SIZE.y));
+            let (yes, no) = (rig.anchor("scene-delete-yes"), rig.anchor("scene-delete-no"));
+            for (key, button) in [("Delete", yes), ("Cancel", no)] {
+                assert!(visible.contains_rect(button), "{width}: «{key}» за краем: {button:?}");
+            }
+            assert!(no.right() <= yes.left() || no.bottom() <= yes.top(), "{width}: кнопки наехали друг на друга");
+        }
+    }
+
+    // ─── Сцены: отказ от режима, возврат при чужом вопросе, номер сцены, слова об ошибках ───
+
+    /// Отказ от режима, что поставила сцена («Вернуть»), — отказ от сцены целиком: возвращается и экран, и «Тишина»; это так
+    /// и у сцены без «Повторный щелчок — вернуть как было».
+    #[test]
+    fn declining_the_mode_returns_the_whole_scene() {
+        let _world = world();
+        let dev = r"\\.\TEST-SCENE-REFUSE";
+        let mut one_way = movie(dev);
+        (one_way.name, one_way.undo) = ("Fixed".into(), false);
+        let mut rig = scene_rig(dev, vec![movie(dev), one_way]);
+        let t = texts::tr(rig.app.lang());
+        let start = sys::display::current(dev).unwrap();
+        for chip in 0..2 {
+            rig.click_anchor(&format!("scene-chip-{chip}"));
+            assert!(rig.app.modules.iter().any(|m| m.busy()), "экран ждёт «Оставить?»");
+            assert_eq!(sys::system::notifications_off(), Some(true));
+            let before = Instant::now();
+            rig.click_anchor("keep-revert");
+            rig.app.modules_background();
+            assert!(!rig.app.modules.iter().any(|m| m.busy()));
+            assert_eq!((sys::display::current(dev), sys::system::notifications_off()), (Some(start), Some(false)));
+            assert_eq!(rig.app.active_scene(), None, "чип не выделен: сцены нет");
+            assert_eq!(rig.app.toasts.since(before), vec![(t.scene_undone.to_string(), Tone::Neutral)]);
+            let scene = rig.app.settings.profiles[chip].clone();
+            assert!(!rig.app.modules.iter().any(|m| m.scene_can_undo(&scene)), "возвращать больше нечего");
+        }
+    }
+
+    /// «Оставить» — сцена стоит, второй щелчок возвращает её; отказа не было, ничего само не возвращается.
+    #[test]
+    fn keeping_the_mode_keeps_the_scene() {
+        let _world = world();
+        let dev = r"\\.\TEST-SCENE-KEEP";
+        let mut rig = scene_rig(dev, vec![movie(dev)]);
+        let start = sys::display::current(dev).unwrap();
+        rig.click_anchor("scene-chip-0");
+        rig.click_anchor("keep-yes");
+        let before = Instant::now();
+        rig.app.modules_background();
+        assert_eq!((rig.app.active_scene(), sys::system::notifications_off()), (Some(0), Some(true)));
+        assert!(rig.app.toasts.since(before).is_empty());
+        rig.click_anchor("scene-chip-0");
+        assert_eq!((sys::display::current(dev), sys::system::notifications_off()), (Some(start), Some(false)));
+    }
+
+    /// Закрыли программу, не ответив на «Оставить?», — то же, что «Вернуть»: возвращается вся сцена.
+    #[test]
+    fn closing_the_program_without_an_answer_returns_the_whole_scene() {
+        let _world = world();
+        let dev = r"\\.\TEST-SCENE-CLOSE";
+        let mut rig = scene_rig(dev, vec![movie(dev)]);
+        let start = sys::display::current(dev).unwrap();
+        rig.click_anchor("scene-chip-0");
+        assert_eq!(sys::system::notifications_off(), Some(true));
+        eframe::App::on_exit(&mut rig.app);
+        assert_eq!((sys::display::current(dev), sys::system::notifications_off()), (Some(start), Some(false)));
+    }
+
+    /// Заглушка: модуль, что ждёт чужого ответа, пока флаг поднят.
+    struct Waiting(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    impl Module for Waiting {
+        fn key(&self) -> &'static str {
+            "waiting"
+        }
+
+        fn title(&self, _t: &texts::Tr) -> &'static str {
+            "Waiting"
+        }
+
+        fn refresh(&mut self, _monitor: &str) {}
+
+        fn ui(&mut self, _ui: &mut Ui, _cx: &mut Ctx) {}
+
+        fn blocks_undo(&self, _scene: &Profile) -> bool {
+            self.0.load(std::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    /// Висит чужое «Оставить?»: возврат сцены не начинается ни у кого (иначе она вернулась бы наполовину) и не говорит
+    /// «вернул»; ответили — возвращается.
+    #[test]
+    fn a_foreign_question_stops_the_return_before_it_starts() {
+        let _world = world();
+        let dev = r"\\.\TEST-SCENE-FOREIGN-QUESTION";
+        let waits = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let quiet = only("Quiet", config::SceneSystem { quiet: Some(true), ..Default::default() });
+        let mut rig = scene_rig(dev, vec![quiet]);
+        rig.app.modules.push(Box::new(Waiting(waits.clone())));
+        let t = texts::tr(rig.app.lang());
+        rig.click_anchor("scene-chip-0");
+        assert_eq!(sys::system::notifications_off(), Some(true));
+        waits.store(true, std::sync::atomic::Ordering::Relaxed);
+        let before = Instant::now();
+        rig.click_anchor("scene-chip-0");
+        assert_eq!(sys::system::notifications_off(), Some(true), "ничего не вернулось");
+        assert_eq!(rig.app.toasts.since(before), vec![(t.answer_first.to_string(), Tone::Warning)]);
+        let scene = rig.app.settings.profiles[0].clone();
+        assert!(rig.app.modules.iter().any(|m| m.scene_can_undo(&scene)), "возврат остался");
+        waits.store(false, std::sync::atomic::Ordering::Relaxed);
+        let before = Instant::now();
+        rig.click_anchor("scene-chip-0");
+        assert_eq!(sys::system::notifications_off(), Some(false));
+        assert_eq!(rig.app.toasts.since(before), vec![(t.scene_undone.to_string(), Tone::Neutral)]);
+    }
+
+    /// Сцену узнают по номеру, не по имени: переименование возврат не теряет, а новая сцена со старым именем чужого не
+    /// наследует.
+    #[test]
+    fn a_renamed_scene_keeps_its_return_and_a_new_one_with_the_old_name_has_none() {
+        let _world = world();
+        let dev = r"\\.\TEST-SCENE-IDENTITY";
+        let quiet = |name: &str| only(name, config::SceneSystem { quiet: Some(true), ..Default::default() });
+        let mut rig = scene_rig(dev, vec![quiet("Quiet")]);
+        let t = texts::tr(rig.app.lang());
+        rig.click_anchor("scene-chip-0");
+        assert_eq!(sys::system::notifications_off(), Some(true));
+        // Переименовали в правке — возврат на месте.
+        rig.open_editor(0);
+        rig.click(rig.rect(egui::Id::new("scene-name")).center());
+        rig.key(Key::A, CTRL);
+        rig.type_text("Hush");
+        rig.click_anchor("scene-done");
+        assert_eq!(rig.app.settings.profiles[0].name, "Hush");
+        assert_eq!(rig.app.active_scene(), Some(0));
+        rig.click_anchor("scene-chip-0");
+        assert_eq!(sys::system::notifications_off(), Some(false), "вернулось, хотя имя другое");
+        // Поставили, удалили, завели новую с тем же именем: её возврат — не чужой.
+        rig.click_anchor("scene-chip-0");
+        assert_eq!(sys::system::notifications_off(), Some(true));
+        rig.app.delete_scene(0);
+        rig.app.settings.profiles.push(quiet("Hush"));
+        rig.settle();
+        let fresh = rig.app.settings.profiles[0].clone();
+        assert!(!rig.app.modules.iter().any(|m| m.scene_can_undo(&fresh)), "у новой сцены чужого возврата нет");
+        let before = Instant::now();
+        rig.click_anchor("scene-chip-0");
+        assert_eq!(sys::system::notifications_off(), Some(true), "«Тишину» прежней сцены новая не гасит");
+        assert_eq!(rig.app.toasts.since(before), vec![(t.scene_nothing_undo.to_string(), Tone::Neutral)]);
+    }
+
+    /// Что не вышло в потоках модулей (Wi‑Fi, DDC/CI), панель говорит словами программы и когда карточек этих модулей на
+    /// экране нет.
+    #[test]
+    fn what_fails_in_a_module_thread_is_told_even_when_its_card_is_not_shown() {
+        let _world = world();
+        let dev = r"\\.\TEST-SCENE-THREADS";
+        let system = config::SceneSystem { wifi: Some(false), bright: Some(30), ..Default::default() };
+        let mut rig = scene_rig(dev, vec![only("Trip", system)]);
+        let t = texts::tr(rig.app.lang());
+        // Открыта третья полка («Под рукой»): ни «Быстрых настроек», ни «Яркости» на ней нет.
+        rig.app.set_shelf(2);
+        rig.settle();
+        assert!(rig.app.shelf_modules(2).iter().all(|&m| !["quick", "brightness"].contains(&rig.app.modules[m].key())));
+        sys::net::FAKE_WIFI_FAILS.store(true, std::sync::atomic::Ordering::Relaxed);
+        sys::ddc::fake_silence(dev, u32::MAX);
+        let before = Instant::now();
+        rig.click_anchor("scene-chip-0");
+        let start = Instant::now();
+        while rig.app.toasts.since(before).len() < 3 {
+            rig.app.modules_background();
+            assert!(start.elapsed() < Duration::from_secs(5), "не дождались слов: {:?}", rig.app.toasts.since(before));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let told = rig.app.toasts.since(before);
+        assert!(told.contains(&(format!("{}: {}", t.failed, t.wifi), Tone::Danger)), "{told:?}");
+        assert!(told.contains(&(t.scene_bright_failed.to_string(), Tone::Warning)), "{told:?}");
+        // Английского служебного («radio access: 1») в окне нет.
+        assert!(told.iter().all(|(text, _)| !text.contains("radio access")), "служебное в окне: {told:?}");
+        sys::net::FAKE_WIFI_FAILS.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Закрыли программу в правке сцены, с которой сняли всё, — она остаётся такой, какой вошли (иначе из файла пропала
+    /// бы вместе с клавишей); новая без годного имени уходит.
+    #[test]
+    fn closing_the_program_ends_the_editor_like_done() {
+        let _world = world();
+        let dev = r"\\.\TEST-SCENE-EXIT";
+        let mut rig = scene_rig(dev, vec![movie(dev)]);
+        rig.open_editor(0);
+        for row in SceneRow::ALL {
+            rig.app.settings.profiles[0].clear(row);
+        }
+        eframe::App::on_exit(&mut rig.app);
+        assert!(rig.app.scene.is_none());
+        assert_eq!(rig.app.settings.profiles[0], movie(dev));
+        rig.settle();
+        rig.click_anchor("scene-new");
+        let i = rig.app.scene.as_ref().unwrap().index;
+        rig.app.settings.profiles[i].clear(SceneRow::Screen);
+        eframe::App::on_exit(&mut rig.app);
+        assert_eq!(rig.app.settings.profiles.len(), 1, "пустая новая сцена ушла");
+    }
+
+    /// У недоступной строки сцены в подсказке причина, а не снова «Недоступно».
+    #[test]
+    fn an_unavailable_row_says_why() {
+        let mut rig = Rig::new();
+        for lang in [Lang::Ru, Lang::En] {
+            rig.app.settings.common.language = lang;
+            let t = texts::tr(lang);
+            assert_eq!(rig.app.scene_why(SceneRow::Bright), t.ddc_none);
+            assert_eq!(rig.app.scene_why(SceneRow::Wifi), t.scene_why_wifi);
+            for row in SceneRow::ALL {
+                let why = rig.app.scene_why(row);
+                assert!(!why.is_empty() && why != t.unavailable, "{row:?}: {why}");
+            }
+        }
+    }
+
+    /// Негодное имя: поле в красной рамке, под ним строка.
+    #[test]
+    fn a_bad_name_gets_a_red_frame() {
+        let _world = world();
+        let dev = r"\\.\TEST-SCENE-NAME-FRAME";
+        let work = only("Work", config::SceneSystem { dark: Some(false), ..Default::default() });
+        let mut rig = scene_rig(dev, vec![movie(dev), work]);
+        let danger = Palette::of_ctx(&rig.ctx).danger;
+        rig.open_editor(0);
+        assert!(rig.outlines(danger).is_empty(), "имя годное — красного нет");
+        rig.click(rig.rect(egui::Id::new("scene-name")).center());
+        rig.key(Key::A, CTRL);
+        rig.type_text("Work");
+        let field = rig.rect(egui::Id::new("scene-name"));
+        assert!(rig.outlines(danger).contains(&field), "рамка поля красная: {:?} у {field:?}", rig.outlines(danger));
+        rig.type_text("2");
+        assert!(rig.outlines(danger).is_empty(), "имя исправили — красная рамка ушла");
     }
 
     #[test]
