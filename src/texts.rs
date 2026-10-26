@@ -1155,6 +1155,14 @@ pub fn search_copy(lang: Lang, text: &str) -> String {
     }
 }
 
+/// Почему «Добавить пояс» серое: часов уже предел («Часов уже 8»).
+pub fn search_clocks_full(lang: Lang, max: usize) -> String {
+    match lang {
+        Lang::Ru => format!("Часов уже {max}"),
+        Lang::En => format!("Already {max} clocks"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

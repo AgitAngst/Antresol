@@ -78,6 +78,15 @@ impl Github {
     }
 }
 
+/// Страница Actions репозитория в браузере; не открылась — уведомление «Не получилось: имя». Одно и то же для щелчка по
+/// имени в карточке и для действия из поиска.
+fn open_repo(name: &str, cx: &mut Ctx) {
+    if let Err(e) = sys::launch(&format!("https://github.com/{name}/actions"), "") {
+        eprintln!("open repository failed: {e}");
+        cx.toasts.push((format!("{}: {name}", cx.t.failed), Tone::Danger));
+    }
+}
+
 fn demo() -> Vec<gh::Repo> {
     let run = |status: &str, conclusion: &str, mins: i64| {
         let at = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0) - mins * 60;
@@ -148,10 +157,7 @@ impl Module for Github {
         if sys::demo() || !cx.settings.github.iter().any(|g| g == name) {
             return;
         }
-        if let Err(e) = sys::launch(&format!("https://github.com/{name}/actions"), "") {
-            eprintln!("open repository failed: {e}");
-            cx.toasts.push((format!("{}: {name}", cx.t.failed), Tone::Danger));
-        }
+        open_repo(name, cx);
     }
 
     fn ui(&mut self, ui: &mut Ui, cx: &mut Ctx) {
@@ -170,7 +176,7 @@ impl Module for Github {
             .cloned()
             .collect();
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
-        let mut remove = None;
+        let (mut remove, mut open) = (None, None);
         egui::ScrollArea::vertical()
             .id_salt("gh")
             .auto_shrink([false, false])
@@ -191,7 +197,7 @@ impl Module for Github {
                             egui::Label::new(egui::RichText::new(&r.name).color(p.text)).sense(egui::Sense::click()),
                         );
                         if name.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() && !sys::demo() {
-                            let _ = sys::launch(&format!("https://github.com/{}/actions", r.name), "");
+                            open = Some(r.name.clone());
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if !sys::demo() && w::icon_button(ui, Icon::Close, t.github_remove).clicked() {
@@ -220,6 +226,9 @@ impl Module for Github {
                     ui.add_space(4.0);
                 }
             });
+        if let Some(name) = open {
+            open_repo(&name, cx);
+        }
         if let Some(i) = remove {
             let name = repos[i].name.clone();
             cx.settings.github.retain(|g| *g != name);

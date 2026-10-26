@@ -112,11 +112,13 @@ pub fn read(with_cover: bool) -> Option<NowPlaying> {
     read_session(with_cover).ok()
 }
 
-/// Кнопка плеера. Плеер ответил «не могу» — тоже ошибка.
+/// Кнопка плеера. Плеер ответил «не могу» — тоже ошибка. В демо и в тестах плееру ничего не уходит (заслон, как у
+/// остальных писателей): кнопка «пауза» из теста не остановила бы настоящий плеер.
 pub fn act(action: Action) -> Result<()> {
-    if super::demo() {
+    if super::blocked(&format!("media::act {action:?}")) {
         return Ok(());
     }
+    super::real_write("media::act");
     let s = session()?;
     let done = match action {
         Action::Previous => wait!(s.TrySkipPreviousAsync()?)?,

@@ -67,14 +67,23 @@ impl Module for Tray {
         });
     }
 
+    /// Список для проверки «нет файла» берётся из настроек каждый кадр, а не при отрисовке карточки: поиск видит
+    /// недостающий файл, даже если карточку «Лоток» ещё не рисовали.
+    fn background(&mut self, settings: &Settings) {
+        if !sys::demo() && self.list != settings.tray {
+            self.list = settings.tray.clone();
+        }
+    }
+
     fn command(&mut self, cmd: &Command, cx: &mut Ctx) {
         match cmd {
             Command::Dropped(files) => add(&mut cx.settings.tray, files),
             // «Открыть «…»» из поиска — щелчок по строке лотка: файл открывается, как двойным щелчком; нет файла — ничего.
+            // Файл узнаётся по пути, а не по месту в списке: бросили в лоток новый — действие не сползло на другой файл.
             Command::RunAction(id) => {
-                let rest = mine(self.key(), id).and_then(|r| r.strip_prefix("open:"));
-                let Some(i) = rest.and_then(|n| n.parse::<usize>().ok()) else { return };
-                let Some(path) = cx.settings.tray.get(i).cloned().filter(|_| !sys::demo()) else { return };
+                let Some(wanted) = mine(self.key(), id).and_then(|r| r.strip_prefix("open:")) else { return };
+                let same = |p: &&String| p.to_lowercase() == wanted.to_lowercase();
+                let Some(path) = cx.settings.tray.iter().find(same).cloned().filter(|_| !sys::demo()) else { return };
                 if self.missing.lock().unwrap_or_else(|e| e.into_inner()).contains(&path) {
                     return;
                 }
@@ -87,16 +96,15 @@ impl Module for Tray {
         }
     }
 
-    /// «Открыть «report.pdf»» у каждого файла лотка; нет файла на диске — серое, «нет файла».
+    /// «Открыть «report.pdf»» у каждого файла лотка; нет файла на диске — серое, «нет файла». Номер действия — путь файла.
     fn actions(&self, t: &Tr, lang: anvil_ui::Lang, settings: &Settings) -> Vec<Action> {
         let list = if sys::demo() { demo_files() } else { settings.tray.clone() };
         let gone = self.missing.lock().unwrap_or_else(|e| e.into_inner()).clone();
         list.iter()
-            .enumerate()
-            .map(|(i, path)| {
+            .map(|path| {
                 let missing = !sys::demo() && gone.contains(path);
                 let title = texts::search_open(lang, file_name(path));
-                Action::new(format!("tray:open:{i}"), title, t.tray, Icon::File)
+                Action::new(format!("tray:open:{path}"), title, t.tray, Icon::File)
                     .words(&format!("файл лоток file tray {path}"))
                     .off_if(missing, t.tray_missing)
             })
@@ -211,18 +219,63 @@ mod tests {
             "Открыть «report-4412.pdf»"
         );
         assert!(actions.iter().all(|x| x.enabled && x.place == en.tray && x.words.contains("search-test")));
+        // Номер действия — путь файла, а не место в списке.
+        assert_eq!(actions[0].id, format!("tray:open:{a}"));
         // Файл открывается, как двойным щелчком (запуск — за заслоном: в тестах ничего не открывается).
-        assert!(run(&mut tray, &mut settings, "tray:open:0").is_empty());
+        assert!(run(&mut tray, &mut settings, &actions[0].id).is_empty());
         assert!(launched(a), "файл не открылся");
         // Нет файла на диске (его проверяет поток карточки): серое «нет файла», и не открывается.
         tray.missing.lock().unwrap().insert(b.to_string());
         let actions = tray.actions(en, anvil_ui::Lang::En, &settings);
         assert!(actions[0].enabled && !actions[1].enabled && actions[1].reason.as_deref() == Some(en.tray_missing));
-        run(&mut tray, &mut settings, "tray:open:1");
+        run(&mut tray, &mut settings, &actions[1].id);
         assert!(!launched(b), "нет файла — нечего открывать");
-        // Номер за списком, чужое действие и пустой лоток — ничего.
+        // Путь, которого нет в лотке, чужое действие и пустой лоток — ничего.
+        let never = r"C:\search-test\never-4412.txt";
+        run(&mut tray, &mut settings, &format!("tray:open:{never}"));
         run(&mut tray, &mut settings, "tray:open:9");
         run(&mut tray, &mut settings, "quick:wifi");
+        assert!(!launched(never) && !launched("9"));
         assert!(Tray::default().actions(en, anvil_ui::Lang::En, &Settings::default()).is_empty());
+    }
+
+    /// Бросили в лоток новый файл — прежние действия остались при своих файлах (в «Недавних» не сползают).
+    #[test]
+    fn a_new_file_in_the_tray_does_not_shift_the_old_actions() {
+        let a = r"C:\search-test\alpha-5521.txt";
+        let b = r"C:\search-test\beta-5521.txt";
+        let new = r"C:\search-test\new-5521.txt";
+        let mut settings = Settings { tray: vec![a.into(), b.into()], ..Default::default() };
+        let mut tray = Tray::default();
+        let en = texts::tr(anvil_ui::Lang::En);
+        let id_of_b = tray.actions(en, anvil_ui::Lang::En, &settings)[1].id.clone();
+        add(&mut settings.tray, &[new.into()]);
+        assert_eq!(settings.tray, [new, a, b], "файл встал наверх: места старых сдвинулись");
+        run(&mut tray, &mut settings, &id_of_b);
+        assert!(launched(b) && !launched(a) && !launched(new), "открылся тот же файл, что и был назван");
+        // Тот же путь другими буквами (Windows их не различает) — тот же файл.
+        let upper = format!("tray:open:{}", a.to_uppercase());
+        run(&mut tray, &mut settings, &upper);
+        assert!(launched(a));
+    }
+
+    /// Недостающий файл виден поиску, даже если карточку «Лоток» ещё не рисовали: список берётся из настроек.
+    #[test]
+    fn a_missing_file_is_found_without_the_card_having_been_drawn() {
+        let here = concat!(env!("CARGO_MANIFEST_DIR"), r"\Cargo.toml").to_string();
+        let gone = r"C:\search-test\gone-5522.txt".to_string();
+        let settings = Settings { tray: vec![here.clone(), gone.clone()], ..Default::default() };
+        let mut tray = Tray::default();
+        tray.background(&settings);
+        tray.refresh("");
+        let start = std::time::Instant::now();
+        while *tray.checking.lock().unwrap() {
+            assert!(start.elapsed() < std::time::Duration::from_secs(3), "поток проверки не ответил");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let en = texts::tr(anvil_ui::Lang::En);
+        let actions = tray.actions(en, anvil_ui::Lang::En, &settings);
+        assert!(actions[0].enabled, "файл есть — открывается");
+        assert!(!actions[1].enabled && actions[1].reason.as_deref() == Some(en.tray_missing), "файла нет — серое");
     }
 }

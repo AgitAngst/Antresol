@@ -112,8 +112,10 @@ impl App {
             && !self.typing_here()
     }
 
-    /// Ctrl+K и Ctrl+F открывают поиск; печатная буква или цифра, пока панель открыта и фокус не в поле ввода, — тоже, с
-    /// этой буквой. Открыт — те же сочетания возвращают фокус полю.
+    /// Ctrl+K и Ctrl+F открывают поиск, пока фокус не в поле ввода (в «owner/repo» у GitHub они не нужны); печатная буква
+    /// или цифра, пока панель открыта и фокус не в поле ввода, — тоже, с этой буквой, но не пока какой-то модуль ждёт
+    /// ответа («Оставить этот режим?»): набор не должен уводить вопрос под поиск. Открыт — те же сочетания возвращают фокус
+    /// полю.
     pub(super) fn search_keys(&mut self, ctx: &egui::Context) {
         if self.view == View::Search {
             if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::K) | i.consume_key(Modifiers::CTRL, Key::F)) {
@@ -121,14 +123,14 @@ impl App {
             }
             return;
         }
-        if !self.can_open_search() {
+        if !self.can_open_search() || ctx.text_edit_focused() {
             return;
         }
         if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::K) | i.consume_key(Modifiers::CTRL, Key::F)) {
             self.open_search("");
             return;
         }
-        if ctx.text_edit_focused() {
+        if self.modules.iter().any(|m| m.busy()) {
             return;
         }
         // Всё, что напечатали за кадр (быстрый набор приносит несколько букв сразу).
@@ -207,11 +209,13 @@ impl App {
             }
         }
 
-        // Своё у панели.
+        // Своё у панели. Полка называется своим именем из файла (`@sys`, свои как есть), а не местом среди вкладок: переставили
+        // или добавили полку — «Недавние» не сползают.
         let panel = "Antresol";
-        for (i, shelf) in self.settings.shelves.iter().enumerate().filter(|(i, _)| *i != self.shelf) {
+        for shelf in self.settings.shelves.iter().enumerate().filter(|(i, _)| *i != self.shelf).map(|(_, s)| s) {
             let title = texts::search_open_shelf(lang, texts::shelf_title(t, &shelf.name));
-            out.push(Action::new(format!("shelf:{i}"), title, panel, Icon::Tiles).words("полка вкладка shelf tab"));
+            let id = format!("shelf:{}", shelf.name);
+            out.push(Action::new(id, title, panel, Icon::Tiles).words("полка вкладка shelf tab"));
         }
         let edit = Action::new("app:edit", t.shelves_edit, panel, Icon::Pencil);
         out.push(edit.words("карточки полки порядок править edit shelves cards layout"));
@@ -260,20 +264,20 @@ impl App {
             .into_iter()
             .map(|i| hit_of(&actions[i], search::marks(query, &actions[i].title)))
             .collect();
-        if let Some(value) = search::calc(query) {
+        if let Some(value) = search::calc(query, lang) {
             let result = search::number(value, lang);
             let title = format!("{query} = {result}");
             let end = title.chars().count();
             let marks = vec![(end - result.chars().count(), end)];
             let (sub, run) = (t.search_calc.to_string(), Run::Copy(result));
             hits.insert(0, Hit { title, marks, sub, hint: None, icon: Icon::Tiles, enabled: true, run });
-        } else if let Some(timer) = search::timer(query) {
+        } else if let Some(timer) = search::timer(query)
+            // Таймер заводит карточка «Таймеры»: убрана с полок — строки нет (как у остальных её действий).
+            && let Some(shelf) = self.settings.shelf_of("timers").and_then(|s| self.settings.shelves.get(s))
+        {
             let name = timer.name.clone().unwrap_or_default();
             let id = format!("timers:new:{}:{name}", timer.minutes);
-            let sub = match self.settings.shelf_of("timers").and_then(|s| self.settings.shelves.get(s)) {
-                Some(shelf) => format!("{} · {}", t.timers, texts::shelf_title(t, &shelf.name)),
-                None => t.timers.to_string(),
-            };
+            let sub = format!("{} · {}", t.timers, texts::shelf_title(t, &shelf.name));
             let title = texts::search_timer(lang, timer.name.as_deref(), timer.minutes);
             let hit = Hit {
                 title,
@@ -325,14 +329,16 @@ impl App {
 
     /// Своё действие панели или команда модулю — то, что сделал бы щелчок на своём месте.
     pub(super) fn run_action(&mut self, id: &str) {
-        let parse = |s: &str| s.parse::<usize>().ok();
         if let Some(scene_id) = id.strip_prefix("scene:").and_then(|n| n.parse::<u64>().ok()) {
             if let Some(i) = self.settings.profiles.iter().position(|p| p.id == scene_id) {
                 let device = self.monitor().map(|m| m.device.clone()).unwrap_or_default();
                 self.scene_click(i, &device);
             }
-        } else if let Some(i) = id.strip_prefix("shelf:").and_then(parse) {
-            self.set_shelf(i);
+        } else if let Some(name) = id.strip_prefix("shelf:") {
+            // Такой полки уже нет (убрали, переименовали) — ничего.
+            if let Some(i) = self.settings.shelves.iter().position(|s| s.name == name) {
+                self.set_shelf(i);
+            }
         } else if id == "app:edit" {
             self.start_edit();
         } else if id == "app:settings" {
@@ -390,6 +396,8 @@ impl App {
             ui.painter().galley(Pos2::new(left, rect.center().y - galley.size().y / 2.0), galley, p.weak);
             w::focus_ring(ui, rect, &r, 7);
             anchor(ui, rect, "search-open");
+            // Имя для диктора — «Найти действие»; подсказка с горячей клавишей — в подсказке.
+            r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, t.search_field));
             r.on_hover_text(t.search_tip).on_hover_cursor(CursorIcon::PointingHand).clicked()
         } else {
             let r = w::icon_button(ui, Icon::Search, &format!("{}\n{}", t.search_field, t.search_tip));
@@ -402,7 +410,9 @@ impl App {
     }
 
     /// Шапка вида поиска вместо шапки карточек: знак, «Antresol», поле запроса, подсказка клавиш и крестик «Закрыть поиск».
-    /// Вкладок, сцен и кнопок нет. Тесно — слово «Antresol» уходит первым, потом подсказка.
+    /// Вкладок, сцен и кнопок нет. Тесно — слово «Antresol» уходит первым, потом подсказка: слово стоит, только пока
+    /// подсказка помещается и с ним, а подсказка — пока помещается без него; от ширины панели зависит одно решение за
+    /// другим, так что при сужении слово не возвращается.
     pub(super) fn search_header(&mut self, ui: &mut Ui) {
         let t = texts::tr(self.lang());
         let p = Palette::of(ui);
@@ -413,18 +423,22 @@ impl App {
         self.search.step += i32::from(down) - i32::from(up);
         let width = ui.max_rect().width();
         let hint_w = text_w(ui, t.search_keys, egui::FontId::proportional(12.5));
+        let word_w = text_w(ui, "Antresol", anvil_ui::semibold(14.5)) + 8.0;
         let close_w = 30.0;
+        // Что остаётся за знаком (отступ 2, знак 24) и чертой (1), с промежутками по 8, — без слова и со словом.
+        let room_bare = width - (2.0 + 8.0 + 24.0 + 8.0 + 1.0 + 8.0);
+        let hint_fits = |room: f32| room - close_w - hint_w - 16.0 >= 260.0;
+        let (show_hint, show_word) = (hint_fits(room_bare), hint_fits(room_bare - word_w));
         let mut close = false;
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             ui.add_space(2.0);
             anvil_ui::chrome::app_mark(ui, Icon::Layers, 24.0);
-            if width >= 720.0 {
+            if show_word {
                 ui.label(egui::RichText::new("Antresol").font(anvil_ui::semibold(14.5)).color(p.text));
             }
             vline(ui, p.border);
             let room = ui.available_width();
-            let show_hint = room - close_w - hint_w - 16.0 >= 260.0;
             let tail = close_w + 8.0 + if show_hint { hint_w + 8.0 } else { 0.0 };
             let free = (room - tail - 12.0).max(120.0);
             // Поле — половина места между чертой и подсказкой (как на макете), не шире 620; без подсказки — всё место.
@@ -489,6 +503,7 @@ impl App {
             anvil_ui::icons::paint(row.painter(), glyph, Icon::Close, p.weak);
             w::focus_ring(&row, rect, &clear, 6);
             anchor(&row, rect, "search-clear");
+            clear.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, t.search_clear));
             if clear.on_hover_text(t.search_clear).on_hover_cursor(CursorIcon::PointingHand).clicked() {
                 self.search.query.clear();
                 self.search.selected = 0;
@@ -701,17 +716,38 @@ fn search_row(ui: &mut Ui, n: usize, hit: &Hit, selected: bool) -> egui::Respons
     let mut sub_job = LayoutJob::simple_singleline(hit.sub.clone(), egui::FontId::proportional(12.0), p.weak);
     sub_job.wrap = TextWrapping::truncate_at_width(room);
     let sub = ui.painter().layout_job(sub_job);
+    // Обрезано многоточием — полное название (и причину, если серая) в подсказке.
+    let (title_cut, sub_cut) = (title.elided, sub.elided);
     let total = title.size().y + sub.size().y;
     let top = rect.center().y - total / 2.0;
     let sub_at = Pos2::new(x, top + title.size().y);
     ui.painter().galley(Pos2::new(x, top), title, plain_color);
     ui.painter().galley(sub_at, sub, p.weak);
     anchor(ui, rect, &format!("search-row-{n}"));
+    // Строка берёт фокус при обходе Tab (серая — нет): рамка фокуса, как у остальных кнопок.
+    if hit.enabled {
+        w::focus_ring(ui, rect, &r, 6);
+    }
     let title_text = hit.title.clone();
     r.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, hit.enabled, selected, &title_text));
-    let r = match &hit.hint {
-        Some(hint) => r.on_hover_text(hint.as_str()),
+    let r = match row_tip(hit, title_cut, sub_cut) {
+        Some(tip) => r.on_hover_text(tip),
         None => r,
     };
     if hit.enabled { r.on_hover_cursor(CursorIcon::PointingHand) } else { r }
+}
+
+/// Подсказка строки: полное название, если оно обрезано; у серой — и причина целиком, у остальных — полное «где», если
+/// обрезано оно. Всё влезло и причины нет — подсказки нет.
+fn row_tip(hit: &Hit, title_cut: bool, sub_cut: bool) -> Option<String> {
+    let mut lines: Vec<&str> = Vec::new();
+    if title_cut {
+        lines.push(&hit.title);
+    }
+    match &hit.hint {
+        Some(reason) => lines.push(reason),
+        None if sub_cut => lines.push(&hit.sub),
+        None => {}
+    }
+    (!lines.is_empty()).then(|| lines.join("\n"))
 }

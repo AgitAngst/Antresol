@@ -19,6 +19,7 @@ use crate::panel::{self, Edge, Input};
 use crate::sys::{self, monitor};
 use crate::{look, texts};
 
+mod header_plan;
 mod search_ui;
 use search_ui::Search;
 
@@ -271,8 +272,8 @@ pub struct App {
     ask_scroll: bool,
     /// «Ещё N»: куда пролистать ряд карточек в следующем кадре.
     scroll_to: Option<f32>,
-    /// Сколько места заняла правая часть шапки в прошлом кадре — левой достаётся остальное.
-    header_right: f32,
+    /// Что показывает шапка над карточками на этой ширине (`header_plan`): для проверки в тестах.
+    header_plan: header_plan::Plan,
     /// Где кончается место левой части шапки (дальше она обрезана) и где начинается правая (для проверки, что не наезжают).
     header_edges: (f32, f32),
     /// Открытая полка (номер в `settings.shelves`); помнится, пока работает программа, в файл не пишется.
@@ -372,7 +373,7 @@ impl App {
             ask_delete: None,
             ask_scroll: false,
             scroll_to: None,
-            header_right: 0.0,
+            header_plan: header_plan::Plan::default(),
             header_edges: (0.0, f32::MAX),
             shelf,
             editing,
@@ -738,6 +739,17 @@ impl App {
         calls
     }
 
+    /// Панели нельзя прятаться самой (ни когда мышь ушла, ни когда окно потеряло фокус): тянут край, ждут сочетание, модуль
+    /// ждёт ответа («Оставить этот режим?») или открыт поиск — «Пипетке» из него нужна мышь вне панели, а набранное не
+    /// должно пропасть. Поиск закрывают Esc, крестик «Закрыть поиск», клавиша показа панели или выполненная строка.
+    fn panel_busy(&self) -> bool {
+        self.grip.is_some()
+            || self.capture.is_some()
+            || self.capture_panel
+            || self.view == View::Search
+            || self.modules.iter().any(|m| m.busy())
+    }
+
     /// Модуль ждёт ответа (после сцены — «Оставить?» у «Экрана»), а карточки на открытой полке нет — открыть ту полку,
     /// где она: иначе вопрос остался бы невидимым, а отсчёт 15 секунд шёл бы.
     fn reveal_busy(&mut self) {
@@ -854,10 +866,7 @@ impl App {
         let fullscreen = self.settings.fullscreen_guard && monitor::fullscreen_on(m.rect);
         self.strip_on = self.settings.strip && !excluded && !fullscreen;
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(false));
-        let busy = self.grip.is_some()
-            || self.capture.is_some()
-            || self.capture_panel
-            || self.modules.iter().any(|m| m.busy());
+        let busy = self.panel_busy();
         let hotkey = sys::take_hotkey();
         if !self.started {
             self.started = true;
@@ -1267,49 +1276,24 @@ impl App {
         });
     }
 
-    /// Шапка над карточками: слева значок, «Antresol» и вкладки, справа значки, монитор, сцены и поиск. Левая часть
-    /// рисуется по месту, что осталось после правой в прошлом кадре, и обрезана по нему — на правую не заезжает. Не
-    /// помещается — по порядку: уходят подписи («Сцена», «Монитор»), слово «Antresol», подпись у «Полка», вкладки сужаются
-    /// (многоточие, полное имя в подсказке), а если и так тесно — сцены и выбор монитора справа, и поиск остаётся значком
-    /// (`header_right`).
+    /// Шапка над карточками: слева значок, «Antresol» и вкладки, справа значки, монитор, сцены и поиск. Что показать,
+    /// решает `header_plan` по ширине панели, один порядок на все ширины: уходят подписи («Сцена», «Монитор»), слово
+    /// «Antresol», поле поиска сжимается до значка, подписи вкладок сужаются (многоточие, полное имя в подсказке), потом
+    /// уходят выбор монитора и сцены; в правке — подсказка, подпись у «Как было», слово, подпись у «Полка». Ушедшее при
+    /// сужении обратно не возвращается. Левая часть обрезана по своему месту и на правую не наезжает.
     fn header_cards(&mut self, ui: &mut Ui, ops: &mut Vec<Op>) {
         let t = texts::tr(self.lang());
         let p = Palette::of(ui);
         let rect = ui.max_rect();
         let editing = self.editing.is_some();
         let tabs = self.tab_metrics(ui);
-        let text_of = |sum_cap: f32| tabs.iter().map(|m| m.text.min(sum_cap)).sum::<f32>();
-        // Отступ со значком, черта после слова, промежутки между вкладками и «Полка» (в правке) — что не сужается.
-        let rest = 2.0
-            + 24.0
-            + 8.0
-            + 1.0
-            + 8.0
-            + tabs.iter().map(|m| m.rest).sum::<f32>()
-            + 2.0 * tabs.len().saturating_sub(1) as f32;
-        let word = ui.painter().layout_no_wrap("Antresol".into(), anvil_ui::semibold(14.5), p.text).size().x + 8.0;
-        let add_icon = if editing { 8.0 + 30.0 } else { 0.0 };
-        let add_text = if editing {
-            let label = ui.painter().layout_no_wrap(t.shelf_add.into(), egui::FontId::proportional(14.0), p.weak);
-            8.0 + 10.0 + 16.0 + 7.0 + label.size().x + 12.0
-        } else {
-            0.0
-        };
-        // Правой части вкладки оставляют не меньше `floor` (подписи на пределе), а сцены и монитор — не меньше `soft`.
-        let floor = rest + text_of(TAB_FLOOR) + add_icon;
-        let soft = rest + text_of(TAB_SOFT) + add_icon;
+        let plan = header_plan::plan(&self.header_sizes(ui, &tabs), rect.width());
+        self.header_plan = plan;
+        let widths: Vec<f32> = tabs.iter().map(|m| m.text).collect();
+        let cap = tab_cap(&widths, plan.tab_room, TAB_FLOOR);
 
-        // Слева — что осталось после правой части в прошлом кадре.
-        let budget = (rect.width() - self.header_right - 16.0).max(0.0);
-        let natural = text_of(f32::INFINITY);
-        let (show_word, add_label, cap) = if rest + word + natural + add_text <= budget {
-            (true, true, None)
-        } else if rest + natural + add_text <= budget {
-            (false, true, None)
-        } else {
-            let texts: Vec<f32> = tabs.iter().map(|m| m.text).collect();
-            (false, false, tab_cap(&texts, budget - rest - add_icon, TAB_FLOOR))
-        };
+        // Слева — всё, кроме правой части.
+        let budget = (rect.width() - plan.right - header_plan::GAP).max(0.0);
         let left_rect = Rect::from_min_max(rect.min, Pos2::new(rect.left() + budget, rect.bottom()));
         let mut left = ui.new_child(
             UiBuilder::new()
@@ -1321,7 +1305,7 @@ impl App {
         left.spacing_mut().item_spacing.x = 8.0;
         left.add_space(2.0);
         anvil_ui::chrome::app_mark(&mut left, Icon::Layers, 24.0);
-        if show_word {
+        if plan.word {
             left.label(egui::RichText::new("Antresol").font(anvil_ui::semibold(14.5)).color(p.text));
         }
         vline(&mut left, p.border);
@@ -1329,7 +1313,7 @@ impl App {
         if editing {
             let room = self.settings.shelves.len() < config::MAX_SHELVES;
             let r = left.add_enabled_ui(room, |ui| {
-                if add_label {
+                if plan.add_label {
                     w::button(ui, Kind::Ghost, Some(Icon::Plus), t.shelf_add)
                 } else {
                     w::icon_button(ui, Icon::Plus, t.shelf_add)
@@ -1344,34 +1328,72 @@ impl App {
             }
         }
 
-        // Справа налево: правой части отдано всё, кроме `floor` слева.
-        let right_rect = Rect::from_min_max(Pos2::new(rect.left() + floor + 16.0, rect.top()), rect.max);
+        // Справа налево.
         let mut right = ui.new_child(
             UiBuilder::new()
                 .id_salt("header-right")
-                .max_rect(right_rect)
+                .max_rect(rect)
                 .layout(egui::Layout::right_to_left(egui::Align::Center)),
         );
-        right.spacing_mut().item_spacing.x = 4.0;
-        self.header_right(&mut right, soft - floor);
-        let used = right.min_rect().width();
-        if (used - self.header_right).abs() > 0.5 {
-            // Правая часть поменялась — левой на следующем кадре другое место.
-            self.header_right = used;
-            ui.ctx().request_repaint();
-        }
+        right.spacing_mut().item_spacing.x = header_plan::SPACING;
+        self.header_right(&mut right, &plan);
         self.header_edges = (left_rect.right(), right.min_rect().left());
     }
 
-    /// Правая часть шапки над карточками: «спрятать», настройки, закрепить, правка полок; потом выбор монитора и сцены —
-    /// если вкладкам остаётся хотя бы `soft_reserve` сверх наименьшего; левее них — поиск: значок есть всегда, а целое поле
-    /// (204) — если уместились и сцены, и монитор; в правке — «Готово» и «Как было».
-    fn header_right(&mut self, ui: &mut Ui, soft_reserve: f32) {
+    /// Размеры частей шапки над карточками, как они нарисуются: по ним `header_plan` решает, что оставить.
+    fn header_sizes(&self, ui: &Ui, tabs: &[TabMetric]) -> header_plan::Sizes {
+        let t = texts::tr(self.lang());
+        let p = Palette::of(ui);
+        let measure =
+            |text: &str, font: egui::FontId| ui.painter().layout_no_wrap(text.to_owned(), font, p.text).size().x;
+        let text_of = |cap: f32| tabs.iter().map(|m| m.text.min(cap)).sum::<f32>();
+        // Отступ, знак, черта и промежутки между ними (по 8); у вкладок — поля и метки, между ними по 2.
+        let rest = 2.0
+            + 24.0
+            + 8.0
+            + 1.0
+            + 8.0
+            + tabs.iter().map(|m| m.rest).sum::<f32>()
+            + 2.0 * tabs.len().saturating_sub(1) as f32;
+        let mut sizes = header_plan::Sizes {
+            editing: self.editing.is_some(),
+            rest,
+            tabs: text_of(f32::INFINITY),
+            tabs_soft: text_of(TAB_SOFT),
+            tabs_floor: text_of(TAB_FLOOR),
+            word: measure("Antresol", anvil_ui::semibold(14.5)) + 8.0,
+            field: search_ui::FIELD_W,
+            icon: 30.0,
+            ..header_plan::Sizes::default()
+        };
+        // Кнопка с подписью: поля по 12, значок 16, промежуток 7 (`w::button`).
+        let button = |text: &str, font: egui::FontId| 12.0 * 2.0 + 16.0 + 7.0 + measure(text, font);
+        if sizes.editing {
+            sizes.add_icon = 8.0 + 30.0;
+            sizes.add_label = 8.0 + button(t.shelf_add, egui::FontId::proportional(14.0));
+            sizes.done = button(t.done, anvil_ui::semibold(14.0));
+            sizes.undo_label = button(t.shelves_undo, egui::FontId::proportional(14.0));
+            sizes.undo_icon = 30.0;
+            sizes.hint = measure(t.shelves_hint, egui::FontId::proportional(12.5));
+        } else {
+            // Сцены — без карточки «Экран» их нет; монитор — когда мониторов несколько.
+            sizes.scenes = (!self.settings.is_hidden("display")).then(|| self.profiles_width(ui));
+            sizes.monitors = (self.monitors.len() > 1).then(|| self.monitor_width(ui));
+            sizes.label_monitors = measure(t.monitor, egui::FontId::proportional(12.0));
+            sizes.label_scenes = measure(t.scene, egui::FontId::proportional(12.0));
+        }
+        sizes
+    }
+
+    /// Правая часть шапки над карточками, справа налево: «спрятать», настройки, закрепить, правка полок; потом то, что
+    /// оставил `header_plan`: выбор монитора, сцены (с подписями «Монитор» и «Сцена») и поиск — целым полем или значком, он
+    /// есть всегда. В правке — «Готово», «Как было» и подсказка.
+    fn header_right(&mut self, ui: &mut Ui, plan: &header_plan::Plan) {
         let t = texts::tr(self.lang());
         let p = Palette::of(ui);
         if self.editing.is_some() {
             // Правка полок: справа только «Готово», «Как было» и подсказка.
-            self.edit_controls(ui, soft_reserve);
+            self.edit_controls(ui, plan);
             return;
         }
         if w::icon_button(ui, Icon::ChevronUp, t.hide).clicked() {
@@ -1398,53 +1420,33 @@ impl App {
         if w::icon_button(ui, Icon::Pencil, t.shelves_edit).clicked() {
             self.start_edit();
         }
-        // Сцены — слева от монитора панели; без карточки «Экран» их нет. Не помещаются — уходят (они остаются в настройках
-        // и на клавишах).
-        let monitors = self.monitors.len() > 1;
-        let divider = 6.0 + 1.0 + 6.0 + 8.0;
-        // Поиск — самый левый: его значок есть всегда (место под него отложено), сцены и монитор берут остальное, а поле
-        // целиком — если и после них хватает места.
-        let icon_w = 30.0;
-        let mut room = ui.available_width() - soft_reserve - divider - (icon_w + divider);
-        let profiles_w = self.profiles_width(ui);
-        let profiles = !self.settings.is_hidden("display") && profiles_w <= room;
-        if profiles {
-            room -= profiles_w + divider;
-        }
-        let monitors = monitors && self.monitor_width(ui) <= room;
-        if monitors {
-            room -= self.monitor_width(ui) + divider;
-        }
-        // Поле целиком — только если уместилось и всё, что стоит правее: стоило сценам или монитору уйти, поле остаётся
-        // значком (иначе при сужении панели оно то росло бы, то сжималось).
-        let dropped = (!self.settings.is_hidden("display") && !profiles) || (self.monitors.len() > 1 && !monitors);
-        let full = !dropped && room >= search_ui::FIELD_W - icon_w;
-        // Подписи «Сцена» и «Монитор» не едят место поиска.
-        let reserve = soft_reserve + divider + if full { search_ui::FIELD_W } else { icon_w };
         ui.add_space(6.0);
         vline(ui, p.border);
         ui.add_space(6.0);
-        if monitors {
+        if plan.monitors {
             self.monitor_picker(ui);
-            side_label(ui, t.monitor, p.weak, reserve);
-            if profiles {
+            if plan.labels {
+                ui.label(egui::RichText::new(t.monitor).size(12.0).color(p.weak));
+            }
+            if plan.scenes {
                 ui.add_space(6.0);
                 vline(ui, p.border);
                 ui.add_space(6.0);
             }
         }
-        if profiles {
-            self.scenes_bar(ui, reserve);
+        if plan.scenes {
+            self.scenes_bar(ui, plan.labels);
         }
-        if profiles || monitors {
+        if plan.scenes || plan.monitors {
             ui.add_space(6.0);
             vline(ui, p.border);
             ui.add_space(6.0);
         }
-        self.search_button(ui, full);
+        self.search_button(ui, plan.field);
     }
 
-    /// Сколько места нужно чипам сцен и «+» (с запасом на полужирный): для решения, помещаются ли они в шапку.
+    /// Сколько места нужно «+» и чипам сцен (с запасом на полужирный: стоящая сцена выделена им): для решения, помещаются ли
+    /// они в шапку. Чип — подпись и по 10 с боков, перед каждым промежуток.
     fn profiles_width(&self, ui: &Ui) -> f32 {
         let p = Palette::of(ui);
         let font = anvil_ui::semibold(13.0);
@@ -1454,16 +1456,16 @@ impl App {
             .iter()
             .map(|pr| ui.painter().layout_no_wrap(pr.name.clone(), font.clone(), p.text).size().x + 20.0 + 4.0)
             .sum();
-        30.0 + 4.0 + chips
+        30.0 + chips
     }
 
-    /// Сколько места нужно выбору монитора панели («Все» и номера).
+    /// Сколько места нужно выбору монитора панели («Все» и номера): столько занимает `segmented`.
     fn monitor_width(&self, ui: &Ui) -> f32 {
         let t = texts::tr(self.lang());
         let p = Palette::of(ui);
-        let font = anvil_ui::semibold(13.5);
+        let font = egui::FontId::proportional(13.0);
         let names = std::iter::once(t.all_monitors.to_string()).chain((1..=self.monitors.len()).map(|i| i.to_string()));
-        names.map(|n| ui.painter().layout_no_wrap(n, font.clone(), p.text).size().x + 20.0).sum::<f32>() + 4.0 + 8.0
+        names.map(|n| ui.painter().layout_no_wrap(n, font.clone(), p.text).size().x + 20.0).sum::<f32>() + 4.0
     }
 
     /// Сколько места нужно вкладкам: ширина подписи (полужирной) и всё остальное у вкладки (поля, метка, крестик).
@@ -1492,23 +1494,15 @@ impl App {
             .collect()
     }
 
-    /// Шапка в правке полок, справа налево: «Готово», «Как было», подсказка (если есть где; `soft_reserve` — запас вкладкам).
-    fn edit_controls(&mut self, ui: &mut Ui, soft_reserve: f32) {
+    /// Шапка в правке полок, справа налево: «Готово», «Как было» (с подписью или значком) и подсказка — как решил
+    /// `header_plan`.
+    fn edit_controls(&mut self, ui: &mut Ui, plan: &header_plan::Plan) {
         let t = texts::tr(self.lang());
         let p = Palette::of(ui);
         if w::button(ui, Kind::Primary, Some(Icon::Check), t.done).clicked() {
             self.finish_edit();
         }
-        // «Как было» без подписи, если рядом с вкладками для неё нет места.
-        let undo_w = 10.0
-            + 16.0
-            + 7.0
-            + ui.painter()
-                .layout_no_wrap(t.shelves_undo.to_string(), egui::FontId::proportional(14.0), p.weak)
-                .size()
-                .x
-            + 12.0;
-        let undo = if ui.available_width() - soft_reserve >= undo_w + 40.0 {
+        let undo = if plan.undo_label {
             w::button(ui, Kind::Ghost, Some(Icon::Undo), t.shelves_undo)
         } else {
             w::icon_button(ui, Icon::Undo, t.shelves_undo)
@@ -1516,18 +1510,16 @@ impl App {
         if undo.clicked() {
             self.undo_edit();
         }
-        let hint = egui::RichText::new(t.shelves_hint).size(12.5).color(p.weak);
-        let hint_w = ui.painter().layout_no_wrap(t.shelves_hint.to_string(), egui::FontId::proportional(12.5), p.weak);
-        if ui.available_width() - soft_reserve >= hint_w.size().x + 24.0 {
+        if plan.hint {
             ui.add_space(6.0);
-            ui.label(hint);
+            ui.label(egui::RichText::new(t.shelves_hint).size(12.5).color(p.weak));
         }
     }
 
     /// Сцены чипами в шапке, «+» — новая сцена из того, что стоит сейчас (откроется правка). Рисуется справа налево: «+», чипы
-    /// с конца, подпись «Сцена». Щелчок по чипу ставит сцену, а по стоящей — возвращает как было (если возврат включён);
-    /// правый щелчок — правка. Подсказка чипа: клавиша и что делают щелчки.
-    fn scenes_bar(&mut self, ui: &mut Ui, soft_reserve: f32) {
+    /// с конца, подпись «Сцена» (если `label`). Щелчок по чипу ставит сцену, а по стоящей — возвращает как было (если
+    /// возврат включён); правый щелчок — правка. Подсказка чипа: клавиша и что делают щелчки.
+    fn scenes_bar(&mut self, ui: &mut Ui, label: bool) {
         let (t, lang) = (texts::tr(self.lang()), self.lang());
         let p = Palette::of(ui);
         let active = self.active_scene();
@@ -1549,7 +1541,9 @@ impl App {
                 open = Some(i);
             }
         }
-        side_label(ui, t.scene, p.weak, soft_reserve);
+        if label {
+            ui.label(egui::RichText::new(t.scene).size(12.0).color(p.weak));
+        }
         if new {
             self.new_scene();
         } else if let Some(i) = open {
@@ -3399,15 +3393,6 @@ fn preview(ui: &mut Ui, base: egui::Color32, dark: bool, t: &texts::Tr, lang: La
         });
 }
 
-/// Подпись в шапке («Сцена», «Монитор») — только если справа налево после неё ещё остаётся место (кроме `reserve`,
-/// что отдано вкладкам).
-fn side_label(ui: &mut Ui, text: &str, color: Color32, reserve: f32) {
-    let width = ui.painter().layout_no_wrap(text.to_owned(), egui::FontId::proportional(12.0), color).size().x;
-    if ui.available_width() - reserve >= width + 40.0 {
-        ui.label(egui::RichText::new(text).size(12.0).color(color));
-    }
-}
-
 /// Скруглённая рамка пунктиром: `Shape::dashed_line` по обходу прямоугольника с дугами в углах.
 fn dashed_rounded_rect(painter: &egui::Painter, rect: Rect, radius: f32, stroke: Stroke) {
     let r = radius.min(rect.width() / 2.0).min(rect.height() / 2.0).max(0.0);
@@ -3738,7 +3723,7 @@ mod tests {
                 ask_delete: None,
                 ask_scroll: false,
                 scroll_to: None,
-                header_right: 0.0,
+                header_plan: header_plan::Plan::default(),
                 header_edges: (0.0, f32::MAX),
                 shelf: 0,
                 editing: None,
@@ -3761,6 +3746,8 @@ mod tests {
         size: Vec2,
         /// Что нарисовано в последнем кадре.
         shapes: Vec<egui::epaint::ClippedShape>,
+        /// Что услышал бы диктор в последнем кадре (щелчки по кнопкам с именами).
+        events: Vec<egui::output::OutputEvent>,
     }
 
     impl Rig {
@@ -3781,6 +3768,7 @@ mod tests {
                 mouse: Pos2::new(5.0, 5.0),
                 size,
                 shapes: Vec::new(),
+                events: Vec::new(),
             };
             rig.settle();
             rig
@@ -3807,6 +3795,7 @@ mod tests {
             // Рисовать некому: изменения текстур (шрифты) никто не применит, и egui без `clear` на этом упадёт.
             out.textures_delta.clear();
             self.shapes = out.shapes;
+            self.events = std::mem::take(&mut out.platform_output.events);
         }
 
         /// Рамки цвета `color` в последнем кадре: прямоугольники с обводкой этого цвета.
@@ -3865,6 +3854,16 @@ mod tests {
             self.frame(vec![self.button(true)]);
             self.frame(vec![self.button(false)]);
             self.settle();
+        }
+
+        /// Щелчок; ответ — что услышал бы диктор в кадре, когда кнопку отпустили.
+        fn click_events(&mut self, pos: Pos2) -> Vec<egui::output::OutputEvent> {
+            self.move_to(pos);
+            self.frame(vec![self.button(true)]);
+            self.frame(vec![self.button(false)]);
+            let events = std::mem::take(&mut self.events);
+            self.settle();
+            events
         }
 
         fn double_click(&mut self, pos: Pos2) {
@@ -6090,6 +6089,383 @@ mod tests {
         let (field, close) = (narrow.rect(egui::Id::new("search-field")), narrow.anchor("search-close"));
         assert!(field.right() <= close.left() && close.right() <= 560.0 - 12.0 + 0.5, "{field:?} {close:?}");
         assert!(field.width() >= 150.0, "поле не схлопнулось: {field:?}");
+    }
+
+    // ─── Поиск действий: круг исправлений после судьи ───────────────────────
+
+    /// Мониторы для шапки: `n` выдуманных, подряд слева направо.
+    fn fake_monitors(n: usize) -> Vec<monitor::Monitor> {
+        (0..n as i32)
+            .map(|i| monitor::Monitor {
+                device: format!(r"\\.\TEST-HEADER-{i}"),
+                rect: monitor::PxRect { left: 1920 * i, top: 0, right: 1920 * (i + 1), bottom: 1080 },
+                primary: i == 0,
+                handle: 0,
+            })
+            .collect()
+    }
+
+    /// Шапка на всех ширинах от 1400 до 560: слово, подписи, поле, монитор и сцены уходят по одному порядку и обратно не
+    /// возвращаются, нарисовано то, что решено, а правая часть занимает не больше отданного ей места.
+    #[test]
+    fn the_header_collapses_in_one_order_and_nothing_comes_back_while_it_narrows() {
+        // (сцен, мониторов, правка полок)
+        for (scenes, monitors, editing) in [(3, 0, false), (3, 3, false), (1, 2, false), (0, 0, false), (0, 0, true)] {
+            let mut last: Option<(f32, header_plan::Plan)> = None;
+            for width in (560..=1400).rev().step_by(10) {
+                let width = width as f32;
+                let mut rig = Rig::sized(width);
+                rig.app.settings.profiles =
+                    ["Работа", "Игры", "Кино"].into_iter().take(scenes).map(Profile::new).collect();
+                rig.app.monitors = fake_monitors(monitors);
+                if editing {
+                    rig.app.start_edit();
+                }
+                rig.settle();
+                let (plan, tag) =
+                    (rig.app.header_plan, format!("{scenes} сцен, {monitors} мон., правка {editing}, {width}"));
+                assert_eq!(painted(&rig).contains("Antresol"), plan.word, "{tag}: слово нарисовано не так, как решено");
+                // Правая часть влезает в отданное ей место и не стоит заметно меньше, чем ей отдали.
+                let used = width - 12.0 - rig.app.header_edges.1;
+                assert!(used <= plan.right + 0.5, "{tag}: правая часть {used} шире плана {}", plan.right);
+                assert!(plan.right - used <= 5.0, "{tag}: плану {} нужно больше, чем правой части {used}", plan.right);
+                // Левая часть не наезжает на правую.
+                assert!(
+                    rig.app.header_edges.0 <= rig.app.header_edges.1 + 0.5,
+                    "{tag}: части шапки наезжают друг на друга"
+                );
+                if let Some((wider, was)) = last {
+                    for (name, before, now) in [
+                        ("слово", was.word, plan.word),
+                        ("подпись у «Полка»", was.add_label, plan.add_label),
+                        ("подписи «Сцена» и «Монитор»", was.labels, plan.labels),
+                        ("поле поиска", was.field, plan.field),
+                        ("выбор монитора", was.monitors, plan.monitors),
+                        ("сцены", was.scenes, plan.scenes),
+                        ("подпись у «Как было»", was.undo_label, plan.undo_label),
+                        ("подсказка правки", was.hint, plan.hint),
+                    ] {
+                        assert!(before || !now, "{tag}: {name} ушло(ла) на {wider} и вернулось(ась) на {width}");
+                    }
+                }
+                last = Some((width, plan));
+            }
+        }
+    }
+
+    /// В поиске слово «Antresol» уходит первым, подсказка клавиш — потом; ни одно не возвращается при сужении.
+    #[test]
+    fn the_search_header_drops_the_word_then_the_hint_and_neither_comes_back() {
+        for lang in [Lang::Ru, Lang::En] {
+            let t = texts::tr(lang);
+            let mut last: Option<(bool, bool)> = None;
+            let mut seen = (false, false);
+            for width in (560..=1400).rev().step_by(10) {
+                let mut rig = Rig::sized(width as f32);
+                rig.app.settings.common.language = lang;
+                rig.key(Key::K, CTRL);
+                let shown = painted(&rig);
+                let (word, hint) = (shown.contains("Antresol"), shown.contains(t.search_keys));
+                assert!(!word || hint, "{lang:?} {width}: слово есть, а подсказки уже нет");
+                if let Some((was_word, was_hint)) = last {
+                    assert!(was_word || !word, "{lang:?}: слово вернулось на {width}");
+                    assert!(was_hint || !hint, "{lang:?}: подсказка вернулась на {width}");
+                }
+                last = Some((word, hint));
+                seen = (seen.0 | word, seen.1 | hint);
+            }
+            assert!(seen.0 && seen.1, "{lang:?}: на широкой панели есть и слово, и подсказка");
+            // На самой узкой панели слова нет; подсказка есть, лишь если она помещается (по-английски она короче).
+            assert!(last.is_some_and(|(word, hint)| !word && (!hint || lang == Lang::En)), "{lang:?}: {last:?}");
+        }
+    }
+
+    /// Поиск открыт — панель сама не прячется (ни когда мышь ушла, ни когда окно потеряло фокус): «Пипетке» из поиска нужна
+    /// мышь вне панели. Закрывают его Esc, крестик, клавиша показа панели или выполненная строка.
+    #[test]
+    fn an_open_search_keeps_the_panel_from_hiding_itself() {
+        let _world = world();
+        let mut rig = search_rig(r"\\.\TEST-SEARCH-BUSY", Lang::En);
+        assert!(!rig.app.panel_busy());
+        let (show, hide) = (Duration::from_millis(150), Duration::from_millis(450));
+        let now = Instant::now();
+        let at = |ms: u64| now + Duration::from_millis(ms);
+        // Панель выехала от края, мышь побывала на ней и ушла.
+        let mut edge = Edge::default();
+        edge.step(Input { at_edge: true, ..Input::default() }, now, show, hide);
+        edge.step(Input { at_edge: true, ..Input::default() }, at(200), show, hide);
+        edge.step(Input { over: true, focused: true, ..Input::default() }, at(300), show, hide);
+        assert!(edge.shown);
+        rig.key(Key::K, CTRL);
+        assert!(rig.app.view == View::Search && rig.app.panel_busy());
+        for (ms, lost_focus) in [(400, false), (900, true), (5_000, false), (60_000, true)] {
+            let input = Input { busy: rig.app.panel_busy(), lost_focus, ..Input::default() };
+            edge.step(input, at(ms), show, hide);
+            assert!(edge.shown, "{ms} мс (фокус потерян: {lost_focus}): поиск открыт — панель не прячется сама");
+        }
+        // Закрыли поиск крестиком — панель снова прячется как обычно, когда мышь далеко.
+        rig.click_anchor("search-close");
+        assert!(rig.app.view == View::Cards && !rig.app.panel_busy());
+        edge.step(Input::default(), at(61_000), show, hide);
+        edge.step(Input::default(), at(61_600), show, hide);
+        assert!(!edge.shown, "поиск закрыт — мыши нет, панель спряталась");
+
+        // Вызвана клавишей: потеря фокуса её не прячет, пока поиск открыт; а клавиша показа панели прячет и с поиском.
+        let mut edge = Edge::default();
+        edge.step(Input { hotkey: true, ..Input::default() }, at(70_000), show, hide);
+        rig.key(Key::K, CTRL);
+        edge.step(Input { lost_focus: true, busy: rig.app.panel_busy(), ..Input::default() }, at(71_000), show, hide);
+        assert!(edge.shown, "вызвана клавишей, поиск открыт, фокус потерян — остаётся");
+        edge.step(Input { hotkey: true, busy: rig.app.panel_busy(), ..Input::default() }, at(72_000), show, hide);
+        assert!(!edge.shown, "клавиша показа панели прячет и открытую с поиском");
+        // Esc и выполненная строка тоже возвращают панели прежнее поведение.
+        rig.key(Key::Escape, NO_KEYS);
+        assert!(!rig.app.panel_busy());
+        rig.key(Key::K, CTRL);
+        rig.type_text("dark");
+        rig.key(Key::Enter, NO_KEYS);
+        assert!(rig.app.view == View::Cards && !rig.app.panel_busy());
+    }
+
+    /// Таймер из запроса заводит карточка «Таймеры»: убрана с полок — строки таймера нет (как у остальных её действий).
+    #[test]
+    fn the_timer_row_needs_the_timers_card_on_a_shelf() {
+        let _world = world();
+        let mut rig = search_rig(r"\\.\TEST-SEARCH-TIMER-HIDDEN", Lang::Ru);
+        rig.key(Key::K, CTRL);
+        rig.type_text("чай 5");
+        assert_eq!(titles(&rig)[0], "Таймер «чай» на 5 мин");
+        // Карточку убрали: строки нет, и Enter не заводит таймер.
+        rig.app.settings.hide_card("timers");
+        assert!(titles(&rig).is_empty(), "{:?}", titles(&rig));
+        rig.key(Key::Enter, NO_KEYS);
+        assert!(!rig.app.modules.iter().any(|m| m.ticking()), "таймер не заведён");
+        assert!(rig.app.view == View::Search, "строк нет — Enter ничего не делает");
+        // Калькулятор карточке не нужен.
+        rig.app.search.query = "2+2".into();
+        assert_eq!(titles(&rig)[0], "2+2 = 4");
+        // Вернули карточку на полку — строка снова есть, и место в ней — новая полка.
+        rig.app.settings.place_card("timers", 0, None);
+        rig.app.search.query = "чай 5".into();
+        let found = rig.app.found();
+        assert_eq!(
+            (found.hits[0].title.as_str(), found.hits[0].sub.as_str()),
+            ("Таймер «чай» на 5 мин", "Таймеры · Экран и звук")
+        );
+    }
+
+    /// Пока висит «Оставить этот режим?», печать поиск не открывает (вопрос не уйдёт под него), а Ctrl+K открывает.
+    #[test]
+    fn typing_does_not_open_the_search_over_a_question_but_ctrl_k_does() {
+        let _world = world();
+        let mut rig = search_rig(r"\\.\TEST-SEARCH-QUESTION", Lang::En);
+        rig.key(Key::K, CTRL);
+        rig.type_text("1080");
+        rig.key(Key::ArrowDown, NO_KEYS);
+        rig.key(Key::Enter, NO_KEYS);
+        assert!(rig.app.modules.iter().any(|m| m.busy()), "режим сменился — ждём ответа");
+        assert!(rig.app.view == View::Cards);
+        for text in ["н", "night", "1"] {
+            rig.type_text(text);
+            assert!(rig.app.view == View::Cards, "«{text}» открыло поиск поверх вопроса");
+        }
+        rig.key(Key::K, CTRL);
+        assert!(rig.app.view == View::Search, "Ctrl+K открывает и при вопросе");
+    }
+
+    /// Поле ввода у карточки («owner/repo» у GitHub) забирает и буквы, и Ctrl+K, и Ctrl+F.
+    #[test]
+    fn ctrl_k_and_letters_stay_in_a_text_field_of_a_card() {
+        let mut rig = Rig::new();
+        rig.app.edge.shown = true;
+        // GitHub — на «Системе», четвёртая карточка из пяти; поле «owner/repo» — в нижней строке карточки.
+        rig.app.set_shelf(1);
+        rig.settle();
+        let x = 12.0 + 3.0 * ((SIZE.x - 24.0 - 4.0 * GAP) / 5.0 + GAP) + 60.0;
+        let mut focused = false;
+        for y in (120..330).step_by(4) {
+            rig.click(Pos2::new(x, y as f32));
+            if rig.ctx.text_edit_focused() {
+                focused = true;
+                break;
+            }
+        }
+        assert!(focused, "поле «owner/repo» нашлось щелчком — иначе проверка ниже ничего не стоит");
+        rig.key(Key::K, CTRL);
+        assert!(rig.app.view == View::Cards, "Ctrl+K открыл поиск поверх поля ввода");
+        rig.key(Key::F, CTRL);
+        rig.type_text("н");
+        assert!(rig.app.view == View::Cards, "Ctrl+F или буква открыли поиск поверх поля ввода");
+        // Фокус ушёл из поля — поиск открывается как обычно.
+        rig.ctx.memory_mut(|m| {
+            if let Some(id) = m.focused() {
+                m.surrender_focus(id);
+            }
+        });
+        rig.settle();
+        assert!(!rig.ctx.text_edit_focused());
+        rig.key(Key::K, CTRL);
+        assert!(rig.app.view == View::Search);
+    }
+
+    /// Esc в поиске пояса у «Часов» отменяет поиск пояса, а не прячет панель; следующий Esc прячет, как обычно.
+    #[test]
+    fn esc_in_the_clock_zone_search_cancels_it_and_keeps_the_panel() {
+        let mut rig = Rig::new();
+        rig.app.edge.shown = true;
+        rig.app.set_shelf(1);
+        rig.app.run_action("clocks:add");
+        rig.settle();
+        assert!(rig.app.typing_here());
+        rig.key(Key::Escape, NO_KEYS);
+        assert!(!rig.app.typing_here(), "Esc отменил поиск пояса");
+        assert!(rig.app.edge.shown, "панель осталась на месте");
+        rig.key(Key::Escape, NO_KEYS);
+        assert!(!rig.app.edge.shown, "следующий Esc прячет панель, как обычно");
+    }
+
+    /// «Недавние» держатся за сами вещи (файл лотка, закреплённый текст, полку), а не за их места в списках.
+    #[test]
+    fn recent_actions_follow_their_things_when_the_lists_change() {
+        let _world = world();
+        let mut rig = search_rig(r"\\.\TEST-SEARCH-STABLE", Lang::En);
+        let (a, b, new) =
+            (r"C:\search-test\alpha-8841.txt", r"C:\search-test\beta-8841.txt", r"C:\search-test\gamma-8841.txt");
+        rig.app.settings.tray = vec![a.into(), b.into()];
+        rig.app.settings.pinned = vec!["search-test one 8841".into(), "search-test two 8841".into()];
+        rig.settle();
+        // Открыли первый файл, скопировали второй закреплённый текст, открыли полку «Система».
+        for query in ["alpha-8841", "two 8841", "shelf system"] {
+            rig.key(Key::K, CTRL);
+            rig.type_text(query);
+            rig.key(Key::Enter, NO_KEYS);
+        }
+        assert_eq!(rig.app.shelf, 1);
+        assert_eq!(rig.app.recent[0], "shelf:@sys");
+        // Списки поменялись: файл лотка встал наверх, закрепили новый текст, полки переставили.
+        modules::tray::add(&mut rig.app.settings.tray, &[new.into()]);
+        rig.app.settings.pinned.insert(0, "search-test zero 8841".into());
+        rig.app.settings.shelves.swap(0, 1);
+        rig.app.shelf = 1;
+        rig.key(Key::K, CTRL);
+        let found = rig.app.found();
+        assert_eq!(found.listing, search_ui::Listing::Recent);
+        // Полка «Система» теперь первая, а открыта вторая — действие осталось при «Системе».
+        assert_eq!(
+            titles(&rig),
+            ["Open the “System” shelf", "Copy “search-test two 8841”", "Open “alpha-8841.txt”"],
+            "в недавних те же вещи, что открывали, а не их соседи по номеру"
+        );
+        rig.key(Key::Enter, NO_KEYS);
+        assert_eq!(rig.app.shelf, 0, "открылась «Система», а не та, что теперь под прежним номером");
+        // Пропавшее не показывается: файл убрали из лотка, текст открепили; открытую полку не предлагают — остаётся подсказка.
+        rig.app.settings.tray.retain(|p| p != a);
+        rig.app.settings.pinned.retain(|p| p != "search-test two 8841");
+        rig.key(Key::K, CTRL);
+        let found = rig.app.found();
+        assert_eq!((found.listing, found.hits.len()), (search_ui::Listing::Start, 0), "{:?}", titles(&rig));
+    }
+
+    /// Запятая в числе — по языку; ответ — до двенадцати значащих цифр; всё это — в строке поиска.
+    #[test]
+    fn the_calculator_reads_commas_by_language_and_rounds_the_noise() {
+        let _world = world();
+        let mut rig = search_rig(r"\\.\TEST-SEARCH-CALC-LANG", Lang::En);
+        rig.key(Key::K, CTRL);
+        for (query, title) in [
+            ("1,000*2", "1,000*2 = 2000"),
+            ("0.1+0.2-0.3", "0.1+0.2-0.3 = 0"),
+            ("100/3", "100/3 = 33.3333333333"),
+            ("1/3000000", "1/3000000 = 3.33333333333e-7"),
+        ] {
+            rig.app.search.query = query.to_string();
+            assert_eq!(titles(&rig)[0], title);
+        }
+        rig.app.search.query = "1,5+1".into();
+        assert!(!titles(&rig).iter().any(|t| t.contains(" = ")), "запятая не на месте — строки нет");
+        // По-русски запятая десятичная.
+        rig.app.settings.common.language = Lang::Ru;
+        rig.app.search.query = "1,000*2".into();
+        assert_eq!(titles(&rig)[0], "1,000*2 = 2");
+        rig.app.search.query = "2/3".into();
+        assert_eq!(titles(&rig)[0], "2/3 = 0,666666666667");
+        // Enter кладёт в буфер то же, что написано справа от «=».
+        rig.app.search.query = "1/3000000".into();
+        rig.key(Key::Enter, NO_KEYS);
+        let written = sys::BLOCKED.lock().unwrap().iter().any(|w| w == "clip::write_text 3,33333333333e-7");
+        assert!(written, "в буфер ушёл результат, как он написан");
+    }
+
+    /// Длинное название обрезается многоточием, а полное — в подсказке; короткое подсказки не просит.
+    #[test]
+    fn a_cut_title_gets_a_tooltip_with_the_full_text() {
+        let _world = world();
+        let mut rig = search_rig(r"\\.\TEST-SEARCH-TIP", Lang::En);
+        let long = format!("{}.txt", "long".repeat(40));
+        rig.app.settings.tray = vec![format!(r"C:\search-test\{long}"), r"C:\search-test\short-8851.txt".into()];
+        rig.settle();
+        rig.key(Key::K, CTRL);
+        rig.type_text("long");
+        let full = format!("Open “{long}”");
+        let count = |rig: &Rig| painted(rig).matches(full.as_str()).count();
+        let before = count(&rig);
+        rig.move_to(rig.anchor("search-row-0").center());
+        for _ in 0..40 {
+            rig.frame(Vec::new());
+        }
+        assert!(count(&rig) > before, "задержались над строкой — полное название в подсказке");
+        // Короткое название влезло — подсказки нет.
+        rig.move_to(Pos2::new(5.0, 5.0));
+        rig.app.search.query = "short-8851".into();
+        rig.settle();
+        let short = "Open “short-8851.txt”";
+        rig.move_to(rig.anchor("search-row-0").center());
+        for _ in 0..40 {
+            rig.frame(Vec::new());
+        }
+        assert_eq!(painted(&rig).matches(short).count(), 1, "влезло — подсказки нет");
+    }
+
+    /// Поле в шапке и «Стереть» называют себя диктору; строки результатов берут фокус с клавиатуры и показывают рамку.
+    #[test]
+    fn the_search_controls_have_names_and_the_rows_show_the_focus() {
+        let mut rig = Rig::new();
+        let heard = |events: &[egui::output::OutputEvent]| -> Vec<String> {
+            events
+                .iter()
+                .filter_map(|e| match e {
+                    egui::output::OutputEvent::Clicked(info) => info.label.clone(),
+                    _ => None,
+                })
+                .collect()
+        };
+        let t = texts::tr(rig.app.lang());
+        // Поле целиком (на широкой панели) называется «Найти действие».
+        let field = rig.anchor("search-open");
+        assert_eq!(field.width(), search_ui::FIELD_W, "на 1300 поле целиком");
+        let events = rig.click_events(field.center());
+        assert_eq!(heard(&events), [t.search_field.to_string()]);
+        assert!(rig.app.view == View::Search);
+        // «Стереть» называется так, как подписано.
+        rig.type_text("night");
+        let events = rig.click_events(rig.anchor("search-clear").center());
+        assert_eq!(heard(&events), [t.search_clear.to_string()]);
+        // Строки: Tab из поля доводит фокус до строки, и у неё рамка.
+        rig.type_text("turn");
+        let rows = rig.app.found().hits.len();
+        let accent_text = Palette::of_ctx(&rig.ctx).accent_text;
+        let mut on_row = None;
+        for _ in 0..12 {
+            rig.key(Key::Tab, NO_KEYS);
+            if let Some(at) = rig.focused_rect()
+                && let Some(i) = (0..rows).find(|i| rig.anchor(&format!("search-row-{i}")) == at)
+            {
+                on_row = Some((i, at));
+                break;
+            }
+        }
+        let (row, at) = on_row.expect("Tab довёл фокус до строки результата");
+        assert!(rig.outlines(accent_text).contains(&at.expand(2.0)), "у строки {row} нет рамки фокуса");
     }
 
     #[test]

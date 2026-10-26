@@ -110,10 +110,17 @@ struct Parser<'a> {
     ops: usize,
     /// Глубина скобок и знаков перед числом: больше [`MAX_DEPTH`] — не разбираем.
     depth: usize,
+    /// Язык интерфейса: по-русски запятая — десятичная («1,5»), по-английски — разделитель тысяч («1,000»).
+    lang: Lang,
 }
 
 /// Глубже скобки и знаки подряд не разбираются: стек не должен переполниться от длинного запроса.
 const MAX_DEPTH: usize = 64;
+/// Сколько значащих цифр в ответе: дальше у двойной точности уже шум (`0,1 + 0,2` — `0,30000000000000004`).
+const DIGITS: usize = 12;
+/// Разность слагаемых меньше этой доли от них самих — они взаимно уничтожились: остаток есть шум точности, а не ответ
+/// (`0,1 + 0,2 − 0,3` — это 0, а не `5,5e-17`).
+const CANCELS: f64 = 1e-13;
 
 impl Parser<'_> {
     /// Следующая буква, пробелы пропущены.
@@ -131,8 +138,12 @@ impl Parser<'_> {
             self.at += 1;
             self.ops += 1;
             let rhs = self.product()?;
+            let scale = value.abs().max(rhs.abs());
             value = if op == '+' { value + rhs } else { value - rhs };
             value.is_finite().then_some(())?;
+            if value.abs() <= scale * CANCELS {
+                value = 0.0;
+            }
         }
         Some(value)
     }
@@ -183,56 +194,104 @@ impl Parser<'_> {
         Some(value)
     }
 
-    /// `12`, `3,5`, `3.5`: цифры подряд, а после точки или запятой — ещё цифры.
+    /// Сколько цифр подряд — и пройти их.
+    fn digits(&mut self) -> usize {
+        let from = self.at;
+        while self.src.get(self.at).is_some_and(|c| c.is_ascii_digit()) {
+            self.at += 1;
+        }
+        self.at - from
+    }
+
+    /// `12`, `3,5`, `3.5` (по-русски запятая и точка — десятичные) и `1,000.5` (по-английски запятая — разделитель
+    /// тысяч: одна–три цифры, а после каждой запятой ровно три; десятичная только точка). Запятая не там, где ей место
+    /// («1,5» по-английски, «1000,000»), — не число.
     fn number(&mut self) -> Option<f64> {
-        let digits = |p: &mut Self| {
-            let from = p.at;
-            while p.src.get(p.at).is_some_and(|c| c.is_ascii_digit()) {
-                p.at += 1;
-            }
-            p.at > from
-        };
-        let start = self.at;
-        if !digits(self) {
+        let from = self.at;
+        let int_len = self.digits();
+        if int_len == 0 {
             return None;
         }
-        if matches!(self.src.get(self.at), Some('.' | ',')) {
-            self.at += 1;
-            if !digits(self) {
+        let mut text: String = self.src[from..self.at].iter().collect();
+        if self.lang == Lang::En && self.src.get(self.at) == Some(&',') {
+            if int_len > 3 {
                 return None;
             }
+            while self.src.get(self.at) == Some(&',') {
+                self.at += 1;
+                let group = self.at;
+                if self.digits() != 3 {
+                    return None;
+                }
+                text.extend(&self.src[group..self.at]);
+            }
         }
-        let text: String = self.src[start..self.at].iter().map(|&c| if c == ',' { '.' } else { c }).collect();
+        let point = match self.lang {
+            Lang::Ru => matches!(self.src.get(self.at), Some('.' | ',')),
+            Lang::En => self.src.get(self.at) == Some(&'.'),
+        };
+        if point {
+            self.at += 1;
+            let fraction = self.at;
+            if self.digits() == 0 {
+                return None;
+            }
+            text.push('.');
+            text.extend(&self.src[fraction..self.at]);
+        }
         text.parse().ok()
     }
 }
 
 /// Запрос — арифметика: только цифры, `+ − * /`, скобки, пробелы и `,` / `.`, и хоть одно действие между числами
-/// (`-5` и `(5)` не считаются). Ответ — значение; деление на ноль, неверные скобки, два числа подряд и переполнение (от
-/// 1e15) — `None`.
-pub fn calc(query: &str) -> Option<f64> {
+/// (`-5` и `(5)` не считаются). Запятая в числе — по языку (`lang`): по-русски десятичная, по-английски разделитель
+/// тысяч. Ответ — значение; деление на ноль, неверные скобки, два числа подряд и переполнение (от 1e15) — `None`.
+pub fn calc(query: &str, lang: Lang) -> Option<f64> {
     let src: Vec<char> = query.trim().chars().collect();
     let allowed = |c: &char| c.is_ascii_digit() || c.is_whitespace() || "+-−*/(),.".contains(*c);
     if src.is_empty() || src.len() > MAX_EXPR || !src.iter().all(allowed) {
         return None;
     }
-    let mut parser = Parser { src: &src, at: 0, ops: 0, depth: 0 };
+    let mut parser = Parser { src: &src, at: 0, ops: 0, depth: 0, lang };
     let value = parser.sum()?;
     // Всё прочитано: после выражения остались лишь пробелы.
     parser.peek();
     (parser.at == src.len() && parser.ops > 0 && value.abs() < 1e15).then_some(value)
 }
 
-/// Число словами языка: до шести знаков после запятой, без хвоста нулей — `7`, `3,5` (RU) и `3.5` (EN).
+/// Число словами языка: до [`DIGITS`] значащих цифр, без хвоста нулей — `7`, `3,5` (RU), `3.5` (EN), `0,333333333333`.
+/// Совсем малое (меньше 1e-6) — с порядком: `3,33333333333e-7`, а не `0`.
 pub fn number(value: f64, lang: Lang) -> String {
-    let mut s = format!("{:.6}", (value * 1e6).round() / 1e6);
-    s.truncate(s.trim_end_matches('0').trim_end_matches('.').len());
-    if s == "-0" || s.is_empty() {
-        s = "0".into();
+    if value == 0.0 || !value.is_finite() {
+        return "0".into();
     }
+    // Двенадцать значащих цифр кладёт сам формат: `3.33333333333e-7`; ниже — та же запись без порядка (если можно).
+    let sci = format!("{value:.prec$e}", prec = DIGITS - 1);
+    let (mantissa, exp) = sci.split_once('e').unwrap_or((sci.as_str(), "0"));
+    let exp: i32 = exp.parse().unwrap_or(0);
+    let all: String = mantissa.chars().filter(char::is_ascii_digit).collect();
+    let digits = all.trim_end_matches('0');
+    let digits = if digits.is_empty() { "0" } else { digits };
+    let sign = if value < 0.0 { "-" } else { "" };
+    let body = if exp < -6 {
+        match digits.split_at(1) {
+            (first, "") => format!("{first}e{exp}"),
+            (first, rest) => format!("{first}.{rest}e{exp}"),
+        }
+    } else if exp < 0 {
+        format!("0.{}{digits}", "0".repeat((-exp - 1) as usize))
+    } else {
+        let whole = exp as usize + 1;
+        if digits.len() <= whole {
+            format!("{digits}{}", "0".repeat(whole - digits.len()))
+        } else {
+            format!("{}.{}", &digits[..whole], &digits[whole..])
+        }
+    };
+    let text = format!("{sign}{body}");
     match lang {
-        Lang::Ru => s.replace('.', ","),
-        Lang::En => s,
+        Lang::Ru => text.replace('.', ","),
+        Lang::En => text,
     }
 }
 
@@ -357,7 +416,7 @@ mod tests {
 
     #[test]
     fn calculator_computes_with_its_own_parser() {
-        let c = |q: &str| calc(q);
+        let c = |q: &str| calc(q, Lang::Ru);
         assert_eq!(c("2*3,5"), Some(7.0));
         assert_eq!(c("2*3.5"), Some(7.0));
         assert_eq!(c("1 + 2 * 3"), Some(7.0), "умножение раньше сложения");
@@ -391,18 +450,69 @@ mod tests {
 
     #[test]
     fn calculator_gives_nothing_for_zero_division_and_overflow() {
-        assert_eq!(calc("1/0"), None);
-        assert_eq!(calc("5/(2-2)"), None);
-        assert_eq!(calc("0*(1/0)"), None);
-        assert_eq!(calc("99999999999999*99999999999999"), None, "переполнение");
-        assert_eq!(calc("1e3+1"), None, "буква «e» — не число");
-        assert_eq!(calc(&format!("{}+1", "9".repeat(400))), None, "слишком длинный");
-        let nested = format!("{}1+1{}", "(".repeat(100), ")".repeat(100));
-        assert_eq!(calc(&nested), None, "скобок слишком много — без падения");
-        let minuses = format!("{}1+1", "-".repeat(100));
-        assert_eq!(calc(&minuses), None);
-        assert_eq!(calc("999999999999999+1"), None, "от 1e15 строки нет");
-        assert!(calc("99999999999999+1").is_some());
+        for lang in [Lang::Ru, Lang::En] {
+            let calc = |q: &str| calc(q, lang);
+            assert_eq!(calc("1/0"), None);
+            assert_eq!(calc("5/(2-2)"), None);
+            assert_eq!(calc("0*(1/0)"), None);
+            assert_eq!(calc("99999999999999*99999999999999"), None, "переполнение");
+            assert_eq!(calc("1e3+1"), None, "буква «e» — не число");
+            assert_eq!(calc(&format!("{}+1", "9".repeat(400))), None, "слишком длинный");
+            let nested = format!("{}1+1{}", "(".repeat(100), ")".repeat(100));
+            assert_eq!(calc(&nested), None, "скобок слишком много — без падения");
+            let minuses = format!("{}1+1", "-".repeat(100));
+            assert_eq!(calc(&minuses), None);
+            assert_eq!(calc("999999999999999+1"), None, "от 1e15 строки нет");
+            assert!(calc("99999999999999+1").is_some());
+        }
+    }
+
+    /// Запятая в числе — по языку: по-русски десятичная, по-английски разделитель тысяч (и только на своём месте).
+    #[test]
+    fn a_comma_is_decimal_in_russian_and_thousands_in_english() {
+        let (ru, en) = (|q: &str| calc(q, Lang::Ru), |q: &str| calc(q, Lang::En));
+        assert_eq!(ru("2,5+1"), Some(3.5));
+        assert_eq!(ru("1,000*2"), Some(2.0), "по-русски 1,000 — это единица с тремя нулями после запятой");
+        assert_eq!(ru("2.5+1"), Some(3.5), "точка тоже десятичная");
+        assert_eq!(ru("1,5,5+1"), None);
+        assert_eq!(en("1,000*2"), Some(2000.0));
+        assert_eq!(en("12,345,678+1"), Some(12_345_679.0));
+        assert_eq!(en("1,000.5*2"), Some(2001.0));
+        assert_eq!(en("2.5+1"), Some(3.5));
+        assert_eq!(en("1000*2"), Some(2000.0), "без запятых — как есть");
+        assert_eq!(en("(1,000+1,000)/4"), Some(500.0));
+        // Запятая не на месте — не число, а не молчаливая ошибка в тысячу раз.
+        for bad in ["1,5+1", "1,00+1", "1,0000+1", "1000,000+1", ",5+1", "1,+1", "1,000,+1", "1,000.+1", "1.5,5+1"] {
+            assert_eq!(en(bad), None, "{bad}");
+        }
+    }
+
+    /// «Без шума»: двоичная точность не лезет в ответ, а то, что взаимно уничтожилось, — ровно ноль.
+    #[test]
+    fn answers_have_no_floating_point_noise() {
+        let say = |q: &str, lang| calc(q, lang).map(|v| number(v, lang));
+        assert_eq!(say("0.1+0.2", Lang::En).as_deref(), Some("0.3"));
+        assert_eq!(say("0,1+0,2", Lang::Ru).as_deref(), Some("0,3"));
+        assert_eq!(say("0.1+0.2-0.3", Lang::En).as_deref(), Some("0"), "взаимно уничтожилось — не 5.5e-17");
+        assert_eq!(say("0,3-0,1-0,2", Lang::Ru).as_deref(), Some("0"));
+        assert_eq!(say("0.1*3", Lang::En).as_deref(), Some("0.3"));
+        assert_eq!(say("100/3", Lang::En).as_deref(), Some("33.3333333333"), "двенадцать значащих цифр");
+        assert_eq!(say("2/3", Lang::Ru).as_deref(), Some("0,666666666667"));
+        assert_eq!(say("1/3*3", Lang::En).as_deref(), Some("1"));
+        // Шум за двенадцатой цифрой не показан.
+        assert_eq!(say("999999999999.99*1", Lang::En).as_deref(), Some("1000000000000"));
+        assert_eq!(say("99999999999999.9+0", Lang::En).as_deref(), Some("100000000000000"));
+        assert_eq!(say("12345678901*10+7", Lang::En).as_deref(), Some("123456789017"), "двенадцать цифр — как есть");
+        assert_eq!(say("123456789012*10+7", Lang::En).as_deref(), Some("1234567890130"), "тринадцатая — округлена");
+        // Разность близких чисел, что не шум, остаётся.
+        assert_eq!(say("1000.5-1000", Lang::En).as_deref(), Some("0.5"));
+        assert_eq!(say("0.000003-0.000001", Lang::En).as_deref(), Some("0.000002"));
+        // Очень малый ответ — не «0»: с порядком.
+        assert_eq!(say("1/3000000", Lang::En).as_deref(), Some("3.33333333333e-7"));
+        assert_eq!(say("1/3000000", Lang::Ru).as_deref(), Some("3,33333333333e-7"));
+        assert_eq!(say("1/10000000", Lang::En).as_deref(), Some("1e-7"));
+        assert_eq!(say("0-1/10000000", Lang::En).as_deref(), Some("-1e-7"));
+        assert_eq!(say("1/1000000", Lang::En).as_deref(), Some("0.000001"), "до 1e-6 — обычной записью");
     }
 
     #[test]
@@ -410,11 +520,18 @@ mod tests {
         assert_eq!(number(7.0, Lang::Ru), "7");
         assert_eq!(number(3.5, Lang::Ru), "3,5");
         assert_eq!(number(3.5, Lang::En), "3.5");
-        assert_eq!(number(0.1 + 0.2, Lang::En), "0.3", "шесть знаков, без хвоста погрешности");
-        assert_eq!(number(100.0 / 3.0, Lang::En), "33.333333");
+        assert_eq!(number(0.1 + 0.2, Lang::En), "0.3", "без хвоста погрешности");
+        assert_eq!(number(100.0 / 3.0, Lang::En), "33.3333333333", "двенадцать значащих цифр");
         assert_eq!(number(-2.0, Lang::Ru), "-2");
-        assert_eq!(number(-0.0000001, Lang::Ru), "0", "«минус ноль» не пишем");
+        assert_eq!(number(-0.0, Lang::Ru), "0", "«минус ноль» не пишем");
+        assert_eq!(number(0.0, Lang::En), "0");
         assert_eq!(number(1234567.0, Lang::Ru), "1234567");
+        assert_eq!(number(2000.0, Lang::En), "2000", "без разделителя тысяч: ответ можно вставить дальше");
+        assert_eq!(number(1e14, Lang::En), "100000000000000");
+        assert_eq!(number(-12.5, Lang::Ru), "-12,5");
+        assert_eq!(number(0.000123, Lang::En), "0.000123");
+        assert_eq!(number(1.234e-7, Lang::En), "1.234e-7", "меньше 1e-6 — с порядком, а не нулём");
+        assert_eq!(number(-1.234e-7, Lang::Ru), "-1,234e-7");
     }
 
     #[test]
@@ -462,10 +579,10 @@ mod tests {
     #[test]
     fn a_calculation_is_not_a_timer_and_a_timer_is_not_a_calculation() {
         for q in ["2*3,5", "10 - 5", "(1+2)*3"] {
-            assert!(calc(q).is_some() && timer(q).is_none(), "{q}");
+            assert!(calc(q, Lang::Ru).is_some() && timer(q).is_none(), "{q}");
         }
         for q in ["чай 5", "tea 10 min", "5 мин"] {
-            assert!(timer(q).is_some() && calc(q).is_none(), "{q}");
+            assert!(timer(q).is_some() && calc(q, Lang::Ru).is_none() && calc(q, Lang::En).is_none(), "{q}");
         }
     }
 }

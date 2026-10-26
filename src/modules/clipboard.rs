@@ -10,7 +10,7 @@ use anvil_ui::widgets::{self as w, Kind};
 use anvil_ui::{Icon, Palette, Tone};
 use eframe::egui::{self, Pos2, Rect, Sense, Ui, Vec2};
 
-use super::{Action, Command, Ctx, Module, mine, row};
+use super::{Action, Command, Ctx, Module, mine, row, stable_key};
 use crate::config::{MAX_PINNED, Settings};
 use crate::sys::{self, clip};
 use crate::texts::{self, Tr};
@@ -222,18 +222,20 @@ impl Module for Clipboard {
 
     fn refresh(&mut self, _monitor: &str) {}
 
-    /// «Скопировать «…»» у каждого закреплённого текста: щелчок по его строке. Найти можно по любому слову текста.
+    /// «Скопировать «…»» у каждого закреплённого текста: щелчок по его строке. Найти можно по любому слову текста. Номер
+    /// действия — отпечаток текста, а не место в списке: открепили другой текст — действие не сползает на чужой.
     fn actions(&self, t: &Tr, lang: anvil_ui::Lang, settings: &Settings) -> Vec<Action> {
         let pinned: Vec<String> = if sys::demo() { demo_pinned(lang) } else { settings.pinned.clone() };
         pinned
             .iter()
-            .enumerate()
-            .map(|(i, text)| {
+            .map(|text| {
                 let title = texts::search_copy(lang, &short(text, 40));
-                Action::new(format!("clipboard:copy:{i}"), title, t.clipboard, Icon::Copy).words(&format!(
-                    "закреплённое заготовка pinned snippet {}",
-                    one_line(text).chars().take(300).collect::<String>()
-                ))
+                Action::new(format!("clipboard:copy:{}", stable_key(&[text])), title, t.clipboard, Icon::Copy).words(
+                    &format!(
+                        "закреплённое заготовка pinned snippet {}",
+                        one_line(text).chars().take(300).collect::<String>()
+                    ),
+                )
             })
             .collect()
     }
@@ -241,10 +243,10 @@ impl Module for Clipboard {
     fn command(&mut self, cmd: &Command, cx: &mut Ctx) {
         let Command::RunAction(id) = cmd else { return };
         if let Some(rest) = mine(self.key(), id)
-            && let Some(i) = rest.strip_prefix("copy:").and_then(|n| n.parse::<usize>().ok())
+            && let Some(key) = rest.strip_prefix("copy:")
         {
             let pinned: Vec<String> = if sys::demo() { demo_pinned(cx.lang) } else { cx.settings.pinned.clone() };
-            if let Some(text) = pinned.get(i).cloned() {
+            if let Some(text) = pinned.into_iter().find(|text| stable_key(&[text]) == key) {
                 self.copy(text, false, cx);
             }
         }
@@ -464,15 +466,42 @@ mod tests {
         // Выполнение — то же, что щелчок по закреплённой строке: текст в буфере, «В буфере — вставляйте».
         let mut toasts = Vec::new();
         let mut cx = Ctx { t: en, lang: anvil_ui::Lang::En, monitor: "", toasts: &mut toasts, settings: &mut settings };
-        clip.command(&Command::RunAction("clipboard:copy:1".into()), &mut cx);
+        clip.command(&Command::RunAction(actions[1].id.clone()), &mut cx);
         assert_eq!(*cx.toasts, [(en.clipboard_done.to_string(), Tone::Success)]);
         assert!(was_written(&format!("{marker}\nsecond line about keys")), "в буфер ушёл весь текст, не первая строка");
-        // Закреплённое в историю не идёт, номера за списком и чужое — ничего.
+        // Закреплённое в историю не идёт, незнакомое и чужое — ничего.
         assert!(clip.history.is_empty());
         clip.command(&Command::RunAction("clipboard:copy:9".into()), &mut cx);
         clip.command(&Command::RunAction("quick:wifi".into()), &mut cx);
         assert_eq!(cx.toasts.len(), 1);
         // Закреплённого нет — и действий нет.
         assert!(Clipboard::default().actions(en, anvil_ui::Lang::En, &Settings::default()).is_empty());
+    }
+
+    /// Открепили или закрепили другой текст — действие осталось при своём тексте (в «Недавних» не сползает).
+    #[test]
+    fn a_pinned_text_keeps_its_action_when_the_list_changes() {
+        let en = texts::tr(anvil_ui::Lang::En);
+        let (first, second) = ("search-test first 6631".to_string(), "search-test second 6631".to_string());
+        let mut settings = Settings { pinned: vec![first.clone(), second.clone()], ..Default::default() };
+        let mut clip = Clipboard::default();
+        let id_of_second = clip.actions(en, anvil_ui::Lang::En, &settings)[1].id.clone();
+        // Закрепили новое — наверху, места старых сдвинулись; первое открепили.
+        settings.pinned.insert(0, "search-test third 6631".into());
+        settings.pinned.retain(|p| *p != first);
+        let mut toasts = Vec::new();
+        let mut cx = Ctx { t: en, lang: anvil_ui::Lang::En, monitor: "", toasts: &mut toasts, settings: &mut settings };
+        clip.command(&Command::RunAction(id_of_second), &mut cx);
+        assert!(was_written(&second), "скопирован тот же текст, что был назван");
+        assert!(!was_written(&first) && !was_written("search-test third 6631"));
+        // Открепили сам текст — его действия нет, а старое «номер» ничего не копирует.
+        let id_of_third = clip.actions(en, anvil_ui::Lang::En, cx.settings)[0].id.clone();
+        cx.settings.pinned.retain(|p| p != "search-test third 6631");
+        clip.command(&Command::RunAction(id_of_third), &mut cx);
+        assert!(!was_written("search-test third 6631"), "убранный текст не копируется");
+        // Одинаковый текст — одинаковый номер; разный — разный.
+        assert_eq!(stable_key(&["a"]), stable_key(&["a"]));
+        assert_ne!(stable_key(&["a"]), stable_key(&["b"]));
+        assert_ne!(stable_key(&["ab", "c"]), stable_key(&["a", "bc"]));
     }
 }

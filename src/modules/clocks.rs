@@ -121,7 +121,9 @@ impl Clocks {
             if query.is_empty() && !r.has_focus() && !r.lost_focus() {
                 r.request_focus();
             }
-            if w::button(ui, Kind::Ghost, None, t.cancel).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            // Esc отменяет поиск пояса, а не прячет панель: клавишу забираем (окно проверит её уже после карточки).
+            let esc = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+            if w::button(ui, Kind::Ghost, None, t.cancel).clicked() || esc {
                 done = true;
             }
         });
@@ -163,10 +165,11 @@ impl Module for Clocks {
     }
 
     /// «Добавить пояс»: открывает в карточке поиск пояса (панель покажет карточку). Часов уже предел — серое.
-    fn actions(&self, t: &Tr, _lang: anvil_ui::Lang, settings: &Settings) -> Vec<Action> {
+    fn actions(&self, t: &Tr, lang: anvil_ui::Lang, settings: &Settings) -> Vec<Action> {
         let count = if sys::demo() { 2 } else { settings.clocks.len() };
         let action = Action::new("clocks:add", t.clock_add, t.clocks, Icon::Plus);
-        vec![action.words("часы пояс время timezone time zone clock").off_if(count >= MAX_CLOCKS, t.unavailable)]
+        let full = texts::search_clocks_full(lang, MAX_CLOCKS);
+        vec![action.words("часы пояс время timezone time zone clock").off_if(count >= MAX_CLOCKS, &full)]
     }
 
     fn command(&mut self, cmd: &Command, cx: &mut Ctx) {
@@ -251,7 +254,10 @@ mod tests {
         let mut settings = Settings { clocks: (0..MAX_CLOCKS).map(clock).collect(), ..Default::default() };
         let mut clocks = Clocks::default();
         let actions = clocks.actions(en, anvil_ui::Lang::En, &settings);
-        assert!(!actions[0].enabled && actions[0].reason.as_deref() == Some(en.unavailable));
+        // Причина называет предел, а не просто «Недоступно».
+        assert!(!actions[0].enabled && actions[0].reason.as_deref() == Some("Already 8 clocks"));
+        let ru = clocks.actions(crate::texts::tr(anvil_ui::Lang::Ru), anvil_ui::Lang::Ru, &settings);
+        assert_eq!(ru[0].reason.as_deref(), Some("Часов уже 8"));
         run(&mut clocks, &mut settings, "clocks:add");
         assert!(clocks.adding.is_none(), "часов уже предел — как и кнопки в карточке, поиска пояса нет");
     }

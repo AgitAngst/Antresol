@@ -556,6 +556,10 @@ mod tests {
         assert_eq!(net::set_vpn("guard-test-vpn", true), Ok(()));
         assert_eq!(nightlight::set(true), Ok(()));
         assert_eq!(clip::write_text("guard-test"), Ok(()));
+        // Кнопки плеера: настоящему плееру в тестах ничего не уходит.
+        for action in [media::Action::Previous, media::Action::PlayPause, media::Action::Next] {
+            assert!(media::act(action).is_ok(), "{action:?}");
+        }
         for what in [
             "keep_awake true",
             "set_theme Theme { apps_dark: true, system_dark: true }",
@@ -565,6 +569,9 @@ mod tests {
             "set_vpn guard-test-vpn true",
             "nightlight::set true",
             "clip::write_text guard-test",
+            "media::act Previous",
+            "media::act PlayPause",
+            "media::act Next",
         ] {
             assert!(was_blocked(what), "{what}");
         }
@@ -650,6 +657,9 @@ mod tests {
             "SetThreadExecutionState",
             "SendMessageTimeoutW",
             "SetStateAsync",
+            "TrySkipPreviousAsync",
+            "TryTogglePlayPauseAsync",
+            "TrySkipNextAsync",
             "Command::new",
             "fs::write",
         ];
@@ -661,6 +671,7 @@ mod tests {
             ("sys/net.rs", include_str!("net.rs")),
             ("sys/nightlight.rs", include_str!("nightlight.rs")),
             ("sys/clip.rs", include_str!("clip.rs")),
+            ("sys/media.rs", include_str!("media.rs")),
             ("config.rs", include_str!("../config.rs")),
         ];
         let mut seen = 0;
@@ -683,6 +694,6 @@ mod tests {
                 }
             }
         }
-        assert!(seen >= 18, "тест нашёл всего {seen} записей: список имён или файлов устарел");
+        assert!(seen >= 21, "тест нашёл всего {seen} записей: список имён или файлов устарел");
     }
 }

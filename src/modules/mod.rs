@@ -117,6 +117,18 @@ pub fn mine<'a>(key: &str, id: &'a str) -> Option<&'a str> {
     id.strip_prefix(key)?.strip_prefix(':')
 }
 
+/// Устойчивый номер для `Action::id` там, где у строки нет своего имени (закреплённый текст, своя кнопка): отпечаток
+/// того, что в строке. Не номер в списке: убрали или добавили строку — «Недавние» поиска не сползают на другие. Одно и то
+/// же в одной работе программы (в файл не пишется).
+pub fn stable_key(parts: &[&str]) -> String {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    for part in parts {
+        part.hash(&mut hasher);
+    }
+    format!("{:016x}", hasher.finish())
+}
+
 /// Что играет — для спрятанной полоски.
 #[derive(Clone)]
 pub struct Playing {
