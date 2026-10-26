@@ -556,6 +556,11 @@ mod tests {
         assert_eq!(net::set_vpn("guard-test-vpn", true), Ok(()));
         assert_eq!(nightlight::set(true), Ok(()));
         assert_eq!(clip::write_text("guard-test"), Ok(()));
+        let mut dib = vec![0u8; 40];
+        dib[0..4].copy_from_slice(&40u32.to_le_bytes());
+        dib[4..8].copy_from_slice(&2i32.to_le_bytes());
+        dib[8..12].copy_from_slice(&1i32.to_le_bytes());
+        assert_eq!(clip::write_image(&clip::image_of(dib, false).expect("заголовок 40 байт, 2 × 1")), Ok(()));
         // Кнопки плеера: настоящему плееру в тестах ничего не уходит.
         for action in [media::Action::Previous, media::Action::PlayPause, media::Action::Next] {
             assert!(media::act(action).is_ok(), "{action:?}");
@@ -569,6 +574,7 @@ mod tests {
             "set_vpn guard-test-vpn true",
             "nightlight::set true",
             "clip::write_text guard-test",
+            "clip::write_image 2x1 40 bytes",
             "media::act Previous",
             "media::act PlayPause",
             "media::act Next",

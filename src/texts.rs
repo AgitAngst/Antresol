@@ -259,6 +259,15 @@ pub struct Tr {
     pub tips: [(&'static str, &'static str); 6],
     pub wifi: &'static str,
     pub accents: [&'static str; 5],
+    // Буфер: картинки, ссылки, цвета, фильтр и «Исправить раскладку» (2.3.0): один блок.
+    pub clip_all: &'static str,
+    pub clip_text: &'static str,
+    pub clip_links: &'static str,
+    pub clip_images: &'static str,
+    pub clip_colors: &'static str,
+    pub clip_nothing: &'static str,
+    pub clip_open: &'static str,
+    pub clip_fix: &'static str,
 }
 
 const RU: Tr = Tr {
@@ -309,11 +318,11 @@ const RU: Tr = Tr {
     plugged: "от сети",
     clipboard: "Буфер обмена",
     clipboard_off: "Запоминание выключено в настройках.",
-    clipboard_empty: "Скопируйте текст — он появится здесь.",
+    clipboard_empty: "Скопируйте текст или картинку — они появятся здесь.",
     clipboard_put: "Положить в буфер обмена",
     clipboard_done: "В буфере — вставляйте",
     clipboard_clear: "Очистить",
-    clipboard_remember: "Запоминать скопированный текст (только в памяти)",
+    clipboard_remember: "Запоминать скопированное (только в памяти)",
     tray: "Лоток",
     tray_empty: "Перетащите файлы на панель — они полежат здесь.",
     tray_missing: "нет файла",
@@ -517,6 +526,14 @@ const RU: Tr = Tr {
     ],
     wifi: "Wi‑Fi",
     accents: ["Лайм", "Фиолетовый", "Индиго", "Фуксия", "Лазурь"],
+    clip_all: "Все",
+    clip_text: "Текст",
+    clip_links: "Ссылки",
+    clip_images: "Картинки",
+    clip_colors: "Цвета",
+    clip_nothing: "Здесь пока ничего нет",
+    clip_open: "Открыть в браузере",
+    clip_fix: "Исправить раскладку",
 };
 
 const EN: Tr = Tr {
@@ -567,11 +584,11 @@ const EN: Tr = Tr {
     plugged: "plugged in",
     clipboard: "Clipboard",
     clipboard_off: "Remembering is off in settings.",
-    clipboard_empty: "Copy some text — it will show up here.",
+    clipboard_empty: "Copy some text or an image — it will show up here.",
     clipboard_put: "Put on the clipboard",
     clipboard_done: "On the clipboard — paste away",
     clipboard_clear: "Clear",
-    clipboard_remember: "Remember copied text (in memory only)",
+    clipboard_remember: "Remember what is copied (in memory only)",
     tray: "Tray",
     tray_empty: "Drop files on the panel — they will wait here.",
     tray_missing: "missing",
@@ -775,6 +792,14 @@ const EN: Tr = Tr {
     ],
     wifi: "Wi‑Fi",
     accents: ["Lime", "Violet", "Indigo", "Fuchsia", "Sky"],
+    clip_all: "All",
+    clip_text: "Text",
+    clip_links: "Links",
+    clip_images: "Images",
+    clip_colors: "Colors",
+    clip_nothing: "Nothing here yet",
+    clip_open: "Open in the browser",
+    clip_fix: "Fix layout",
 };
 
 pub fn tr(lang: Lang) -> &'static Tr {
@@ -822,17 +847,17 @@ pub fn shelf_n(lang: Lang, n: usize) -> String {
 
 /// Выдуманные тексты для снимков (демо-режим) — по языку сцены, чтобы в английских не было русских: недавнее и
 /// закреплённое в «Буфере обмена», города в «Часах».
-pub fn demo_clip_recent(lang: Lang) -> [&'static str; 3] {
-    match lang {
-        Lang::Ru => ["Пример текста для вставки", "https://example.com/demo", "#2A5FD0"],
-        Lang::En => ["Sample text to paste", "https://example.com/demo", "#2A5FD0"],
-    }
+pub fn demo_clip_recent() -> [&'static str; 3] {
+    // Одинаковые на обоих языках, русских букв в них нет: текст не в той раскладке, ссылка и цвет. Картинку (1280 × 720)
+    // рисует сама карточка.
+    ["Ghbdtn, rfr ltkf?", "https://example.com/report", "#4f7a12"]
 }
 
-pub fn demo_clip_pinned(lang: Lang) -> [&'static str; 2] {
+pub fn demo_clip_pinned(lang: Lang) -> [&'static str; 1] {
+    // Одно закреплённое, как на макете: иначе на карточке 340 высотой недавнему не хватает места.
     match lang {
-        Lang::Ru => ["Спасибо, получил!", "Встреча завтра в 10:00\nКомната 3"],
-        Lang::En => ["Thanks, got it!", "Meeting tomorrow at 10:00\nRoom 3"],
+        Lang::Ru => ["Спасибо, получил!"],
+        Lang::En => ["Thanks, got it!"],
     }
 }
 
@@ -1163,9 +1188,58 @@ pub fn search_clocks_full(lang: Lang, max: usize) -> String {
     }
 }
 
+// ─── Буфер: картинки, ссылки, цвета, раскладка (2.3.0) ──────────────────────
+
+/// Строка картинки в истории: «Картинка · 1280 × 720».
+pub fn clip_image(lang: Lang, width: u32, height: u32) -> String {
+    match lang {
+        Lang::Ru => format!("Картинка · {width} × {height}"),
+        Lang::En => format!("Image · {width} × {height}"),
+    }
+}
+
+/// Подсказка к «Исправить раскладку»: на что похож текст и что получится.
+pub fn clip_fix_tip(lang: Lang, to_russian: bool, fixed: &str) -> String {
+    match (lang, to_russian) {
+        (Lang::Ru, true) => format!("Похоже на русский текст, набранный в английской раскладке: «{fixed}»"),
+        (Lang::Ru, false) => format!("Похоже на английский текст, набранный в русской раскладке: «{fixed}»"),
+        (Lang::En, true) => format!("Looks like Russian typed with the English layout: “{fixed}”"),
+        (Lang::En, false) => format!("Looks like English typed with the Russian layout: “{fixed}”"),
+    }
+}
+
+/// Сколько назад скопировано — справа в строке истории: «сейчас», «2 мин», «1 ч».
+pub fn clip_age(lang: Lang, secs: u64) -> String {
+    match (lang, secs) {
+        (Lang::Ru, 0..=59) => "сейчас".into(),
+        (Lang::En, 0..=59) => "now".into(),
+        (_, 60..=3599) => minutes(lang, secs / 60),
+        (Lang::Ru, _) => format!("{} ч", secs / 3600),
+        (Lang::En, _) => format!("{} h", secs / 3600),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clipboard_words() {
+        assert_eq!(clip_image(Lang::Ru, 1280, 720), "Картинка · 1280 × 720");
+        assert_eq!(clip_image(Lang::En, 1280, 720), "Image · 1280 × 720");
+        assert_eq!(clip_age(Lang::Ru, 0), "сейчас");
+        assert_eq!(clip_age(Lang::En, 59), "now");
+        assert_eq!(clip_age(Lang::Ru, 60), "1 мин");
+        assert_eq!(clip_age(Lang::En, 2 * 60 + 59), "2 min");
+        assert_eq!(clip_age(Lang::Ru, 3599), "59 мин");
+        assert_eq!(clip_age(Lang::Ru, 3600), "1 ч");
+        assert_eq!(clip_age(Lang::En, 5 * 3600 + 1800), "5 h");
+        assert_eq!(
+            clip_fix_tip(Lang::Ru, true, "Привет, как дела?"),
+            "Похоже на русский текст, набранный в английской раскладке: «Привет, как дела?»"
+        );
+        assert_eq!(clip_fix_tip(Lang::En, false, "Hello"), "Looks like English typed with the Russian layout: “Hello”");
+    }
 
     #[test]
     fn ago_words() {
