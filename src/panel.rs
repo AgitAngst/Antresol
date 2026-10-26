@@ -57,7 +57,7 @@ impl Edge {
         self.hold_until = by_hotkey.then(|| now + HOTKEY_HOLD);
     }
 
-    /// Показать, как по клавише панели: клавиша профиля, чтобы вопрос «Оставить?» был виден.
+    /// Показать, как по клавише панели: клавиша сцены, чтобы вопрос «Оставить?» был виден.
     pub fn reveal(&mut self, now: Instant) {
         if !self.shown {
             self.show(true, now);
