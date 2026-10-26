@@ -1,0 +1,44 @@
+# Проверка и сборка Antresol на GitHub (по образцу скилла github-ci). Программа только под Windows — одна система.
+name: CI
+
+# По кнопке (Actions → CI → Run workflow) и на тег выпуска `v*`. Репозиторий открытый, минуты не считаются, но запуск —
+# по решению владельца: после новой версии и перед выпуском.
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+# Новый запуск отменяет ещё идущий для той же ветки или тега: проверять стоит только последнее.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: windows-latest
+    # Потолок на случай зависшего теста или сборки.
+    timeout-minutes: 60
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Версия Rust — та же, что на ПК (`rustc --version`): с `-D warnings` новый выпуск ломал бы проверку сам по себе.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      # Дешёвое — первым. Без `--all`: только свой код.
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      # Тесты работают в выдуманном мире (`sys::isolated`): в Windows раннера ничего не пишется.
+      - run: cargo test --locked --all-features --no-fail-fast
+      - run: cargo build --release --locked
+      - uses: actions/upload-artifact@v4
+        with:
+          name: antresol-${{ github.ref_name }}-${{ github.sha }}
+          path: target/release/antresol.exe
+          if-no-files-found: error
+          retention-days: 14
