@@ -16,10 +16,12 @@ use eframe::egui::{
 use crate::config::{self, ALL_MONITORS, Hotkey, MAX_HEIGHT, MIN_HEIGHT, MIN_WIDTH, Profile, SceneRow, Settings};
 use crate::modules::{self, Command, Ctx, Module, anchor};
 use crate::panel::{self, Edge, Input};
+use crate::plaque::{self, Plaque};
 use crate::sys::{self, monitor};
-use crate::{look, texts};
+use crate::{look, texts, watch};
 
 mod header_plan;
+mod plaque_ui;
 mod search_ui;
 use search_ui::Search;
 
@@ -63,8 +65,8 @@ const STRIP: Vec2 = Vec2::new(120.0, 5.0);
 const STRIP_HOT: Vec2 = Vec2::new(160.0, 6.0);
 /// Полоска с медиа: обложка, трек и три кнопки.
 const MEDIA_STRIP: Vec2 = Vec2::new(372.0, 34.0);
-/// Плашка у края: таймер дошёл, пока панель спрятана.
-const BANNER: Vec2 = Vec2::new(320.0, 48.0);
+/// Плашка у края — событие, пока панель спрятана: значок, название и пояснение, до двух кнопок (`crate::plaque`).
+const PLAQUE: Vec2 = Vec2::new(plaque::WIDTH, plaque::HEIGHT);
 /// Как часто перечитывать систему, пока панель открыта.
 const REFRESH: Duration = Duration::from_millis(1500);
 
@@ -87,7 +89,8 @@ enum StripKind {
     Off,
     Plain,
     Media,
-    Banner,
+    /// Плашка события (`plaque_drawn`).
+    Plaque,
 }
 
 /// «Свой цвет…»: что выбрано сейчас и что в поле кода.
@@ -260,8 +263,16 @@ pub struct App {
     strip_fill: Option<f32>,
     /// Что играет — для полоски с медиа.
     playing: Option<modules::Playing>,
-    /// Плашка таймера у края.
-    banner: Option<String>,
+    /// Очередь плашек событий у края: по одной, остальные ждут (`plaque::Queue`).
+    plaques: plaque::Queue,
+    /// Что рисует окно у края: показанная плашка, а пока она уезжает — ещё и после того, как очередь её отдала.
+    plaque_drawn: Option<Plaque>,
+    /// Доля выезда плашки в последнем кадре: 0 — у края её нет, 1 — вся на месте.
+    plaque_t: f32,
+    /// Флешки и загрузки: наблюдатели без карточек (`watch.rs`).
+    watch: watch::Watch,
+    /// Файл потянули с плашки, и egui не видел, как отпустили кнопку: отпустить за него в следующем кадре (`raw_input_hook`).
+    release: Option<Pos2>,
     /// Правка сцены: открыта, пока `view == View::Scene`.
     scene: Option<SceneEdit>,
     /// Номер сцены ([`Profile::id`]), что ставили последней: из подходящих по состоянию чипов выделен этот (иначе первый).
@@ -367,7 +378,11 @@ impl App {
             strip_kind: StripKind::Off,
             strip_fill: None,
             playing: None,
-            banner: None,
+            plaques: plaque::Queue::default(),
+            plaque_drawn: None,
+            plaque_t: 0.0,
+            watch: watch::Watch::new(),
+            release: None,
             scene: None,
             last_scene: None,
             ask_delete: None,
@@ -394,8 +409,12 @@ impl App {
             app.edge.pinned = false;
             app.started = true;
             cc.egui_ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-            if v == "strip-banner" {
-                app.banner = Some(texts::tr(app.lang()).timer_done.to_string());
+            // Для снимков: `strip-plaque-<вид>` (bluetooth, battery, usb, eject, busy, github, downloads, timer) — плашка с выдуманными
+            // данными на языке кадра; обычная замерла на 62 % полоски, как на макете.
+            if let Some(kind) = v.strip_prefix("strip-plaque-")
+                && let Some(plaque) = plaque::sample(kind, app.lang())
+            {
+                app.plaques.hold(plaque, 0.62, Instant::now());
             }
         }
         if app.view == View::Color {
@@ -467,7 +486,9 @@ impl App {
         let mut pos = Pos2::new(left(size.x), (r.top as f32 / ppp - (1.0 - t) * size.y).round());
         if t <= 0.0 && self.strip_kind != StripKind::Off {
             size = self.strip_size();
-            pos = Pos2::new(left(size.x), r.top as f32 / ppp);
+            // Плашка выезжает и уезжает за верхний край монитора (доля `plaque_t`), как панель.
+            let slide = if self.strip_kind == StripKind::Plaque { (1.0 - self.plaque_t) * size.y } else { 0.0 };
+            pos = Pos2::new(left(size.x), r.top as f32 / ppp - slide);
         } else if t <= 0.0 {
             let far = self.monitors.iter().map(|m| m.rect.right).max().unwrap_or(r.right);
             pos = Pos2::new(far as f32 / ppp + 200.0, r.top as f32 / ppp);
@@ -488,7 +509,7 @@ impl App {
         let corner = match self.strip_kind {
             _ if t > 0.0 => CORNER,
             StripKind::Media => 10,
-            StripKind::Banner => 12,
+            StripKind::Plaque => 12,
             _ => 3,
         };
         let radius = ((corner as f32 * ppp) as i32).min(px.1);
@@ -529,7 +550,7 @@ impl App {
     fn strip_size(&self) -> Vec2 {
         match self.strip_kind {
             StripKind::Media => MEDIA_STRIP,
-            StripKind::Banner => BANNER,
+            StripKind::Plaque => PLAQUE,
             _ if self.strip_fill.is_some() => STRIP_HOT,
             _ => STRIP,
         }
@@ -734,25 +755,23 @@ impl App {
         }
     }
 
-    /// Что модули делают сами, без щелчка, каждый кадр: следят (`background`: «Оставить?» без ответа 15 секунд — откат),
-    /// зовут (`attention`: таймер дошёл), говорят, что не вышло в их потоках (`problems`: Wi‑Fi, DDC/CI), — это
-    /// уведомления, даже когда карточку не рисуют, — и отдают отказ от сцены (`undo_refused_scenes`). Ответ — что зовут
-    /// сказать.
-    fn modules_background(&mut self) -> Vec<String> {
+    /// Что модули делают сами, без щелчка, каждый кадр: следят (`background`: «Оставить?» без ответа 15 секунд — откат,
+    /// устройства Bluetooth и прогоны GitHub для плашек), говорят, что случилось (`events`: таймер дошёл, наушники
+    /// подключились, сборка упала), говорят, что не вышло в их потоках (`problems`: Wi‑Fi, DDC/CI), — это уведомления, даже
+    /// когда карточку не рисуют, — и отдают отказ от сцены (`undo_refused_scenes`). Ответ — события: из них плашки.
+    fn modules_background(&mut self) -> Vec<Plaque> {
         let t = texts::tr(self.lang());
-        let (mut calls, mut problems) = (Vec::new(), Vec::new());
+        let (mut events, mut problems) = (Vec::new(), Vec::new());
         for module in &mut self.modules {
             module.background(&self.settings);
-            if let Some(msg) = module.attention(t) {
-                calls.push(msg);
-            }
+            events.extend(module.events(&self.settings));
             problems.extend(module.problems(t));
         }
         for (text, tone) in problems {
             self.toasts.push(text, tone);
         }
         self.undo_refused_scenes();
-        calls
+        events
     }
 
     /// Панели нельзя прятаться самой (ни когда мышь ушла, ни когда окно потеряло фокус): тянут край, ждут сочетание, модуль
@@ -833,19 +852,12 @@ impl App {
             self.monitors = monitor::monitors();
             self.monitors_at = Some(now);
         }
-        let calls = self.modules_background();
-        // Модуль зовёт (таймер дошёл) — уведомление и выезд, как по клавише.
-        if !calls.is_empty() && !self.edge.shown && self.strip_on {
-            self.banner = Some(calls.join(" · "));
-        } else if !calls.is_empty() {
-            for msg in calls {
-                self.toasts.push(msg, Tone::Accent);
-            }
-            if !self.edge.shown {
-                self.edge.reveal(Instant::now());
-                self.refreshed = None;
-                self.focus(ctx);
-            }
+        // События модулей и наблюдателей (таймер дошёл, наушники подключились, флешка вставлена, сборка упала, файл
+        // скачан): панель спрятана — плашка у края, выдвинута — уведомление. Панель при этом не выезжает и клавиатуру не берёт.
+        let mut events = self.modules_background();
+        events.extend(self.watch.events(&self.settings));
+        for plaque in events {
+            self.post(plaque, now);
         }
         self.take_dropped(ctx);
         let cursor = monitor::cursor();
@@ -938,19 +950,20 @@ impl App {
             self.editing = None;
             self.renaming = None;
         }
-        if self.edge.shown {
-            self.banner = None;
-        }
+        // Плашкам можно быть на экране, пока панель спрятана, на мониторе не игра во весь экран и программа не из «Не выезжать»;
+        // мышь над плашкой — её время стоит. Полоска у края от этого не зависит: плашка видна и при выключенной полоске.
+        let hovered = self.plaque_drawn.is_some() && plaque::over(cursor, &m.rect, ppp);
+        self.plaque_frame(ctx, now, hovered, !self.edge.shown && !excluded && !fullscreen);
         self.strip_fill = self.edge.edge_progress(now, show_delay);
         self.playing = if self.settings.media_strip && self.strip_on && !self.edge.shown {
             self.modules.iter_mut().find_map(|m| m.playing(ctx))
         } else {
             None
         };
-        self.strip_kind = if !self.strip_on {
+        self.strip_kind = if self.plaque_drawn.is_some() {
+            StripKind::Plaque
+        } else if !self.strip_on {
             StripKind::Off
-        } else if self.banner.is_some() {
-            StripKind::Banner
         } else if self.playing.is_some() && self.strip_fill.is_none() {
             StripKind::Media
         } else {
@@ -971,7 +984,7 @@ impl App {
         self.place(ctx, ppp, t);
 
         // Спрятана — смотрим на мышь 25 раз в секунду; открыта — чаще, ради отсчёта ухода.
-        let ticking = self.modules.iter().any(|m| m.ticking());
+        let ticking = self.modules.iter().any(|m| m.ticking()) || self.plaque_drawn.is_some();
         let period = if self.edge.shown || self.edge.counting() || ticking { 33 } else { 40 };
         ctx.request_repaint_after(Duration::from_millis(period));
     }
@@ -1043,9 +1056,13 @@ impl App {
         let files: Vec<String> = ctx.input(|i| {
             i.raw.dropped_files.iter().map(|f| f.path().display().to_string()).filter(|p| !p.is_empty()).collect()
         });
-        if files.is_empty() {
-            return;
+        if !files.is_empty() {
+            self.drop_files(files);
         }
+    }
+
+    /// Файлы — в лоток: бросили на панель или нажали «В лоток» на плашке загрузки.
+    fn drop_files(&mut self, files: Vec<String>) {
         let t = texts::tr(self.lang());
         let lang = self.lang();
         let device = self.monitor().map(|m| m.device.clone()).unwrap_or_default();
@@ -2173,6 +2190,17 @@ impl App {
                     w::switch(ui, &mut self.settings.media_strip, t.media_strip);
                 });
                 w::switch(ui, &mut self.settings.clipboard, t.clipboard_remember);
+                // Живые плашки у края: какие события показывать; таймер — всегда.
+                ui.add_space(6.0);
+                w::section_label(ui, t.plaques);
+                let r = w::switch(ui, &mut self.settings.plaques.bluetooth, t.bluetooth);
+                anchor(ui, r.rect, "plaque-switch-bluetooth");
+                let r = w::switch(ui, &mut self.settings.plaques.usb, t.plaques_usb);
+                anchor(ui, r.rect, "plaque-switch-usb");
+                let r = w::switch(ui, &mut self.settings.plaques.github, t.github);
+                anchor(ui, r.rect, "plaque-switch-github");
+                let r = w::switch(ui, &mut self.settings.plaques.downloads, t.plaques_downloads);
+                anchor(ui, r.rect, "plaque-switch-downloads");
                 self.exclude_ui(ui);
                 ui.horizontal(|ui| {
                     ui.label(t.show_delay);
@@ -2949,41 +2977,6 @@ impl App {
         }
     }
 
-    /// Плашка у края: таймер дошёл. «Готово» — убрать, щелчок по тексту — открыть панель.
-    fn banner_strip(&mut self, ui: &mut Ui) {
-        let Some(text) = self.banner.clone() else { return };
-        let t = texts::tr(self.lang());
-        let p = Palette::of(ui);
-        let rect = Rect::from_min_size(Pos2::ZERO, BANNER);
-        let corner = CornerRadius { nw: 0, ne: 0, sw: 12, se: 12 };
-        ui.painter().rect(rect, corner, p.surface, Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
-        let mark = Rect::from_center_size(Pos2::new(rect.left() + 26.0, rect.center().y), Vec2::splat(28.0));
-        ui.painter().rect_filled(mark, 7, p.badge_fill(p.accent));
-        anvil_ui::icons::paint(ui.painter(), mark.shrink(6.0), Icon::Clock, p.accent_text);
-        let done_w = 76.0;
-        let btn = Rect::from_min_size(
-            Pos2::new(rect.right() - done_w - 10.0, rect.center().y - 14.0),
-            Vec2::new(done_w, 28.0),
-        );
-        let mut b = ui.new_child(UiBuilder::new().max_rect(btn));
-        if w::button_sized(&mut b, Kind::Primary, None, t.done, btn.size()).clicked() {
-            self.banner = None;
-        }
-        let info =
-            Rect::from_min_max(Pos2::new(mark.right() + 10.0, rect.top()), Pos2::new(btn.left() - 8.0, rect.bottom()));
-        let mut job = egui::text::LayoutJob::simple_singleline(text, anvil_ui::semibold(13.0), p.text);
-        job.wrap = egui::text::TextWrapping::truncate_at_width(info.width());
-        let galley = ui.painter().layout_job(job);
-        ui.painter().galley(Pos2::new(info.left(), info.center().y - galley.size().y / 2.0), galley, p.text);
-        let r = ui.interact(info, ui.id().with("banner-open"), Sense::click());
-        if r.on_hover_text(t.open_panel).on_hover_cursor(CursorIcon::PointingHand).clicked() {
-            self.banner = None;
-            self.edge.reveal(Instant::now());
-            self.refreshed = None;
-            self.focus(ui.ctx());
-        }
-    }
-
     fn draw(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
         let ppp = ctx.pixels_per_point();
@@ -2993,7 +2986,7 @@ impl App {
                 StripKind::Off => {}
                 StripKind::Plain => self.plain_strip(ui),
                 StripKind::Media => self.media_strip(ui),
-                StripKind::Banner => self.banner_strip(ui),
+                StripKind::Plaque => self.plaque_strip(ui),
             }
             return;
         }
@@ -3077,6 +3070,19 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.draw(ui);
+    }
+
+    /// Файл потянули с плашки: пока шло перетаскивание Windows, кнопку отпустили, а egui этого не видел и считал бы её
+    /// нажатой, пока в окне не щёлкнут снова. Отпускаем за него.
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if let Some(pos) = self.release.take() {
+            raw_input.events.push(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
     }
 
     fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
@@ -3740,7 +3746,11 @@ mod tests {
                 strip_kind: StripKind::Off,
                 strip_fill: None,
                 playing: None,
-                banner: None,
+                plaques: plaque::Queue::default(),
+                plaque_drawn: None,
+                plaque_t: 0.0,
+                watch: watch::Watch::new(),
+                release: None,
                 scene: None,
                 last_scene: None,
                 ask_delete: None,
@@ -6574,5 +6584,366 @@ mod tests {
         rig.app.search.query = "abc".into();
         rig.app.close_search();
         assert!(rig.app.view == View::Cards && rig.app.search.query.is_empty());
+    }
+
+    // ─── Живые плашки у края (2.4) ──────────────────────────────────────────────────────────────────────────────────
+
+    use crate::modules::timers::{self, Phase};
+    use crate::plaque::Say;
+    use crate::sys::usb;
+
+    impl Rig {
+        /// Кадр жизни плашки: очередь ставит её, окно рисует (панель спрятана, плашке можно, мышь не над ней).
+        fn show_plaque(&mut self) {
+            self.app.plaque_frame(&self.ctx, Instant::now(), false, true);
+            self.app.strip_kind = StripKind::Plaque;
+            self.settle();
+        }
+    }
+
+    /// Окно плашки без окна ОС: размер как у плашки, панель спрятана, движение выключено (всё сразу), плашка показана.
+    fn plaque_rig(plaque: Plaque) -> Rig {
+        let mut rig = Rig::new();
+        rig.size = PLAQUE;
+        anvil_ui::motion::set_reduced(&rig.ctx, true);
+        rig.app.edge = Edge::default();
+        rig.app.drawn = 0.0;
+        rig.app.plaques.push(plaque, Instant::now());
+        rig.show_plaque();
+        rig
+    }
+
+    /// Просили ли заслон открыть `what` (адрес, диск, файл) — такой записью в журнале (`sys::launch`).
+    fn launched(what: &str) -> bool {
+        let want = format!("launch {what} ");
+        sys::BLOCKED.lock().unwrap_or_else(|e| e.into_inner()).contains(&want)
+    }
+
+    fn logged(line: &str) -> usize {
+        sys::BLOCKED.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|w| *w == line).count()
+    }
+
+    fn drive(root: &str, label: &str) -> usb::Volume {
+        usb::Volume { root: root.into(), label: label.into(), total: 32 << 30 }
+    }
+
+    #[test]
+    fn the_plaque_says_its_words_and_has_its_buttons_in_both_languages() {
+        for (lang, words) in [
+            (Lang::Ru, ["Флешка «DEMO»", "32 ГБ · вставлена", "Открыть", "Извлечь"]),
+            (Lang::En, ["USB drive “DEMO”", "32 GB · plugged in", "Open", "Eject"]),
+        ] {
+            let mut rig = plaque_rig(plaque::sample("usb", lang).unwrap());
+            rig.app.settings.common.language = lang;
+            rig.settle();
+            let text = painted(&rig);
+            for word in words {
+                assert!(text.contains(word), "{lang:?}: нет «{word}» в {text:?}");
+            }
+            // Кнопки — слева направо «Открыть», «Извлечь»; креста у обычной плашки нет.
+            let (open, eject) = (rig.anchor("plaque-button-0"), rig.anchor("plaque-button-1"));
+            assert!(open.right() < eject.left() && eject.right() <= PLAQUE.x - 10.0 + 0.5, "{open:?} {eject:?}");
+            assert!(open.height() == 28.0 && eject.height() == 28.0);
+            assert!(rig.ctx.read_response(egui::Id::new(("anchor", "plaque-close"))).is_none());
+        }
+    }
+
+    /// Слова плашки собираются при показе: сменили язык — плашка заговорила на другом, а не осталась со старыми словами.
+    #[test]
+    fn a_plaque_that_hangs_changes_its_language_with_the_panel() {
+        let mut rig = plaque_rig(plaque::sample("github", Lang::Ru).unwrap());
+        rig.app.settings.common.language = Lang::Ru;
+        rig.settle();
+        assert!(painted(&rig).contains("demo/site: сборка упала"));
+        rig.app.settings.common.language = Lang::En;
+        rig.settle();
+        assert!(painted(&rig).contains("demo/site: build failed"));
+    }
+
+    #[test]
+    fn a_click_on_the_plaque_opens_the_panel_on_the_shelf_of_its_card() {
+        let mut rig = plaque_rig(plaque::sample("bluetooth", Lang::En).unwrap());
+        rig.app.settings.common.language = Lang::En;
+        rig.settle();
+        assert!(!rig.app.edge.shown && rig.app.shelf == 0);
+        // Диктор слышит слова плашки: она рисуется без виджетов, и имя у её тела — название и пояснение.
+        let events = rig.click_events(Pos2::new(200.0, 24.0));
+        let said = events.iter().any(|e| {
+            matches!(e, egui::output::OutputEvent::Clicked(info) if info.label.as_deref() == Some("Headphones connected. Bluetooth · battery 80%"))
+        });
+        assert!(said, "{events:?}");
+        assert!(rig.app.edge.shown && rig.app.edge.keyboard(), "щелчок по плашке — как вызов клавишей");
+        assert_eq!(rig.app.shelf, 1, "карточка Bluetooth стоит на полке «Система»");
+        assert!(rig.app.plaques.current().is_none(), "плашка своё сказала");
+        // Карточку убрали с полок — панель просто открывается на той полке, что была.
+        let mut rig = plaque_rig(plaque::sample("bluetooth", Lang::En).unwrap());
+        rig.app.settings.hide_card("bluetooth");
+        rig.click(Pos2::new(200.0, 24.0));
+        assert!(rig.app.edge.shown && rig.app.shelf == 0);
+    }
+
+    #[test]
+    fn the_open_button_opens_the_drive_and_ends_the_plaque_without_pulling_the_panel_out() {
+        let mut rig = plaque_rig(watch::usb_plaque(&drive(r"K:\", "KEY")));
+        rig.click_anchor("plaque-button-0");
+        assert!(launched(r"K:\"), "диск открылся, как двойным щелчком");
+        assert!(rig.app.plaques.current().is_none() && !rig.app.edge.shown);
+    }
+
+    /// «Извлечь»: плашка остаётся, кнопки не нажимаются; итог (поток) заменяет её на месте — «Можно вынимать» или «Не извлечь:
+    /// диск занят»; второй щелчок до итога ничего не запускает.
+    #[test]
+    fn eject_keeps_the_plaque_with_dead_buttons_until_the_answer_replaces_it() {
+        usb::fake_busy(r"N:\", true);
+        for (root, label, answer, tone) in [
+            (r"M:\", "FREE", "Safe to remove", Tone::Accent),
+            (r"N:\", "BUSY", "Can’t eject: the drive is busy", Tone::Warning),
+        ] {
+            let mut rig = plaque_rig(watch::usb_plaque(&drive(root, label)));
+            rig.app.settings.common.language = Lang::En;
+            rig.click_anchor("plaque-button-1");
+            assert!(rig.app.plaques.busy(), "кнопки ждут итога");
+            rig.click_anchor("plaque-button-1");
+            rig.click_anchor("plaque-button-0");
+            assert!(!launched(root), "пока ждём — и «Открыть» не нажимается");
+            // Итог приходит из потока плашкой с тем же ключом.
+            let key = format!("usb:{root}");
+            let start = Instant::now();
+            let result = loop {
+                let found = rig.app.watch.events(&rig.app.settings).into_iter().find(|p| p.key == key);
+                if let Some(found) = found {
+                    break found;
+                }
+                assert!(start.elapsed() < Duration::from_secs(5), "итога извлечения нет");
+                std::thread::sleep(Duration::from_millis(5));
+            };
+            assert_eq!(logged(&format!("usb::eject {root}")), 1, "извлечение запущено один раз");
+            rig.app.post(result, Instant::now());
+            assert!(!rig.app.plaques.busy(), "итог заменил плашку — кнопки снова живые");
+            rig.show_plaque();
+            assert_eq!(rig.app.plaques.current().map(|c| c.tone), Some(tone));
+            assert!(painted(&rig).contains(answer), "{answer}: {}", painted(&rig));
+        }
+        usb::fake_busy(r"N:\", false);
+    }
+
+    #[test]
+    fn a_failed_build_stays_has_a_cross_and_opens_the_run() {
+        let mut rig = plaque_rig(plaque::sample("github", Lang::En).unwrap());
+        // Висит: через час всё ещё здесь, полоски нет.
+        rig.app.plaque_frame(&rig.ctx, Instant::now() + Duration::from_secs(3600), false, true);
+        assert!(rig.app.plaques.current().is_some() && rig.app.plaques.fraction().is_none());
+        rig.click_anchor("plaque-button-0");
+        assert!(launched("https://github.com/demo/site/actions/runs/7001"), "сам прогон в браузере");
+        assert!(rig.app.plaques.current().is_none());
+        // Крестик закрывает, не открывая ничего.
+        let mut rig = plaque_rig(plaque::sample("github", Lang::En).unwrap());
+        rig.click_anchor("plaque-close");
+        assert!(rig.app.plaques.current().is_none() && !rig.app.edge.shown);
+    }
+
+    #[test]
+    fn the_timer_plaque_has_done_and_no_cross_and_does_not_pull_the_panel_out() {
+        let mut rig = plaque_rig(timers::done_plaque(Phase::Plain, Some("tea".into())));
+        rig.app.settings.common.language = Lang::En;
+        rig.settle();
+        assert!(painted(&rig).contains("Timer “tea” is up") && painted(&rig).contains("Done"));
+        assert!(
+            rig.ctx.read_response(egui::Id::new(("anchor", "plaque-close"))).is_none(),
+            "«Готово» закрывает, крест не нужен"
+        );
+        rig.click_anchor("plaque-button-0");
+        assert!(rig.app.plaques.current().is_none() && !rig.app.edge.shown && !rig.app.edge.keyboard());
+    }
+
+    #[test]
+    fn a_file_dragged_from_the_plaque_starts_the_windows_drag_and_closes_the_plaque() {
+        let path = r"C:\Demo\Downloads\report.pdf";
+        let mut rig = plaque_rig(plaque::sample("downloads", Lang::En).unwrap());
+        rig.drag(Pos2::new(100.0, 24.0), Pos2::new(220.0, 40.0));
+        assert_eq!(logged(&format!("drag_file {path}")), 1, "перетаскивание файла началось");
+        assert!(rig.app.plaques.current().is_none(), "плашка отдала файл — уходит");
+        // egui не видел, как отпустили кнопку, — следующий кадр отпускает её за него.
+        assert!(rig.app.release.is_some());
+        let mut raw = egui::RawInput::default();
+        eframe::App::raw_input_hook(&mut rig.app, &rig.ctx, &mut raw);
+        assert!(matches!(
+            raw.events.as_slice(),
+            [Event::PointerButton { pressed: false, button: PointerButton::Primary, .. }]
+        ));
+        assert!(rig.app.release.is_none());
+        eframe::App::raw_input_hook(&mut rig.app, &rig.ctx, &mut raw);
+        assert_eq!(raw.events.len(), 1, "один раз");
+        // Без файла (наушники) протяжка ничего не тянет, и плашка остаётся.
+        let mut rig = plaque_rig(plaque::sample("bluetooth", Lang::En).unwrap());
+        rig.drag(Pos2::new(100.0, 24.0), Pos2::new(220.0, 40.0));
+        assert!(rig.app.plaques.current().is_some() && rig.app.release.is_none());
+    }
+
+    /// «В лоток» кладёт файл в лоток (в настройки) и закрывает плашку.
+    #[test]
+    fn to_tray_puts_the_file_into_the_tray() {
+        let path = r"C:\Demo\Downloads\report.pdf";
+        let mut rig = plaque_rig(plaque::sample("downloads", Lang::En).unwrap());
+        assert!(rig.app.settings.tray.is_empty());
+        rig.click_anchor("plaque-button-1");
+        assert_eq!(rig.app.settings.tray, [path]);
+        assert!(rig.app.plaques.current().is_none());
+    }
+
+    /// Панель выдвинута — событие уведомлением набора, без плашки; спрятана — плашкой.
+    #[test]
+    fn with_the_panel_out_an_event_is_a_notice_and_with_it_hidden_a_plaque() {
+        let mut rig = Rig::new();
+        rig.app.settings.common.language = Lang::En;
+        rig.app.edge.shown = true;
+        let before = Instant::now();
+        rig.app.post(plaque::sample("usb", Lang::En).unwrap(), Instant::now());
+        rig.app.post(plaque::sample("github", Lang::En).unwrap(), Instant::now());
+        assert!(rig.app.plaques.current().is_none() && rig.app.plaques.is_empty());
+        assert_eq!(
+            rig.app.toasts.since(before),
+            vec![
+                ("USB drive “DEMO” · 32 GB · plugged in".to_string(), Tone::Accent),
+                ("demo/site: build failed · main · 1 min ago".to_string(), Tone::Danger),
+            ]
+        );
+        rig.app.edge.shown = false;
+        rig.app.post(plaque::sample("usb", Lang::En).unwrap(), Instant::now());
+        assert_eq!(rig.app.plaques.waiting(), 1);
+    }
+
+    /// Панель выдвинулась, пока плашки ждали: обычные уходят уведомлениями, важные остаются и показываются, когда панель
+    /// спрячется.
+    #[test]
+    fn a_panel_that_comes_out_takes_the_ordinary_plaques_and_leaves_the_important_ones() {
+        let mut rig = Rig::new();
+        anvil_ui::motion::set_reduced(&rig.ctx, true);
+        rig.app.edge = Edge::default();
+        let (usb, fail) = (plaque::sample("usb", Lang::En).unwrap(), plaque::sample("github", Lang::En).unwrap());
+        rig.app.post(usb, Instant::now());
+        rig.app.post(fail, Instant::now());
+        rig.app.plaque_frame(&rig.ctx, Instant::now(), false, true);
+        assert!(rig.app.plaque_drawn.is_some(), "флешка на экране");
+        let before = Instant::now();
+        rig.app.edge.shown = true;
+        rig.app.plaque_frame(&rig.ctx, Instant::now(), false, false);
+        assert!(rig.app.plaque_drawn.is_none(), "окно плашки ушло");
+        assert_eq!(rig.app.toasts.since(before).len(), 1, "флешка — уведомлением, сборка осталась");
+        // Панель спряталась — важная встаёт.
+        rig.app.edge.shown = false;
+        rig.app.plaque_frame(&rig.ctx, Instant::now(), false, true);
+        rig.app.plaque_frame(&rig.ctx, Instant::now(), false, true);
+        assert_eq!(rig.app.plaque_drawn.as_ref().map(|p| p.key.as_str()), Some("gh:demo/site"));
+    }
+
+    /// Игра во весь экран или программа из «Не выезжать»: плашка копится и не показывается, показанная прячется и ждёт.
+    #[test]
+    fn a_plaque_waits_while_it_may_not_show_and_comes_when_it_may() {
+        let mut rig = Rig::new();
+        anvil_ui::motion::set_reduced(&rig.ctx, true);
+        rig.app.edge = Edge::default();
+        rig.app.post(plaque::sample("usb", Lang::En).unwrap(), Instant::now());
+        rig.app.plaque_frame(&rig.ctx, Instant::now(), false, false);
+        rig.app.plaque_frame(&rig.ctx, Instant::now(), false, false);
+        assert!(rig.app.plaque_drawn.is_none() && rig.app.plaques.current().is_none(), "копится");
+        rig.app.plaque_frame(&rig.ctx, Instant::now(), false, true);
+        rig.app.plaque_frame(&rig.ctx, Instant::now(), false, true);
+        assert!(rig.app.plaque_drawn.is_some());
+        // Игра началась посреди показа: плашка уехала, но осталась в очереди.
+        rig.app.plaque_frame(&rig.ctx, Instant::now(), false, false);
+        assert!(rig.app.plaque_drawn.is_none() && rig.app.plaques.current().is_some());
+        rig.app.plaque_frame(&rig.ctx, Instant::now(), false, true);
+        assert!(rig.app.plaque_drawn.is_some());
+    }
+
+    /// Заглушка с событием: отдаёт плашку один раз.
+    struct Chime(Option<Plaque>);
+
+    impl Module for Chime {
+        fn key(&self) -> &'static str {
+            "chime"
+        }
+
+        fn title(&self, _t: &texts::Tr) -> &'static str {
+            "Chime"
+        }
+
+        fn refresh(&mut self, _monitor: &str) {}
+
+        fn ui(&mut self, _ui: &mut Ui, _cx: &mut Ctx) {}
+
+        fn events(&mut self, _settings: &Settings) -> Vec<Plaque> {
+            self.0.take().into_iter().collect()
+        }
+    }
+
+    /// Раньше таймер при выключенной полоске выдвигал панель и брал клавиатуру; теперь — только плашка, и полоска ни при чём.
+    #[test]
+    fn an_event_never_pulls_the_panel_out_even_with_the_strip_off() {
+        let mut rig = Rig::new();
+        anvil_ui::motion::set_reduced(&rig.ctx, true);
+        rig.app.edge = Edge::default();
+        rig.app.settings.strip = false;
+        rig.app.modules = vec![Box::new(Chime(Some(timers::done_plaque(Phase::Work, None))))];
+        let events = rig.app.modules_background();
+        assert_eq!(events.len(), 1);
+        assert!(rig.app.modules_background().is_empty(), "второй раз то же не отдаётся");
+        for plaque in events {
+            rig.app.post(plaque, Instant::now());
+        }
+        assert!(!rig.app.edge.shown && !rig.app.edge.keyboard(), "панель не выехала и клавиатуры не взяла");
+        rig.app.plaque_frame(&rig.ctx, Instant::now(), false, true);
+        rig.app.plaque_frame(&rig.ctx, Instant::now(), false, true);
+        assert_eq!(rig.app.plaque_drawn.as_ref().map(|p| p.title.clone()), Some(Say::WorkDone), "плашка — без полоски");
+    }
+
+    /// Окно плашки: размер плашки, по центру верхнего края; выезжает и уезжает за край долей `plaque_t`.
+    #[test]
+    fn the_plaque_window_is_as_big_as_the_plaque_and_slides_over_the_top_edge() {
+        let dev = r"\\.\TEST-PLAQUE-WINDOW";
+        let mut rig = Rig::new();
+        let rect = monitor::PxRect { left: 0, top: 0, right: 1920, bottom: 1080 };
+        rig.app.monitors = vec![monitor::Monitor { device: dev.into(), rect, primary: true, handle: 0 }];
+        rig.app.settings.monitor = dev.into();
+        rig.app.strip_kind = StripKind::Plaque;
+        for (t, y) in [(1.0, 0.0), (0.5, -24.0), (0.0, -48.0)] {
+            rig.app.plaque_t = t;
+            rig.app.place(&rig.ctx, 1.0, 0.0);
+            let (pos, size) = rig.app.placed.expect("окно поставлено");
+            assert_eq!((pos, size), (Pos2::new(774.0, y), Vec2::new(372.0, 48.0)), "доля {t}");
+        }
+        // Нет плашки и нет полоски — окно уведено прочь, а не стоит у края.
+        rig.app.strip_kind = StripKind::Off;
+        rig.app.place(&rig.ctx, 1.0, 0.0);
+        assert!(rig.app.placed.unwrap().0.x > 1920.0);
+    }
+
+    /// «Живые плашки» в «Панели»: подпись и четыре выключателя, каждый пишет в настройки; таймер выключателя не имеет.
+    #[test]
+    fn the_settings_card_has_a_switch_for_every_kind_of_plaque() {
+        let mut rig = Rig::new();
+        // Выше панель — все выключатели на виду (при 340 «Живые плашки» листают колесом).
+        rig.app.settings.height = MAX_HEIGHT;
+        rig.size.y = MAX_HEIGHT;
+        rig.app.settings.common.language = Lang::En;
+        rig.app.view = View::Settings;
+        rig.settle();
+        let text = painted(&rig);
+        // Подпись раздела набор рисует заглавными.
+        for word in ["LIVE PLAQUES", "Bluetooth", "USB drives", "GitHub", "Downloads"] {
+            assert!(text.contains(word), "нет «{word}»");
+        }
+        assert!(!text.contains("Timer"), "у таймера выключателя нет");
+        assert_eq!(rig.app.settings.plaques, config::Plaques::default());
+        rig.click_anchor("plaque-switch-usb");
+        rig.click_anchor("plaque-switch-downloads");
+        assert_eq!(
+            rig.app.settings.plaques,
+            config::Plaques { bluetooth: true, usb: false, github: true, downloads: false }
+        );
+        // Выключили и включили обратно.
+        rig.click_anchor("plaque-switch-usb");
+        assert!(rig.app.settings.plaques.usb);
     }
 }

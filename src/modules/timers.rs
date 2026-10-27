@@ -1,15 +1,16 @@
 // Таймеры: быстрые 5, 10, 15 минут и «помидор» (25 работы, 5 отдыха — по кругу). Идут, даже пока
-// панель спрятана; дошёл — панель выезжает с уведомлением (звука нет: звук панели исключён).
-// Хранятся только в памяти: после выхода из программы таймеров нет.
+// панель спрятана; дошёл — у края плашка «Таймер дошёл» с «Готово» (панель не выезжает и клавиатуру не берёт; панель
+// выдвинута — уведомление; звука нет: звук панели исключён). Хранятся только в памяти: после выхода таймеров нет.
 
 use std::time::{Duration, Instant};
 
 use anvil_ui::widgets::{self as w, Kind};
-use anvil_ui::{Icon, Palette};
+use anvil_ui::{Icon, Palette, Tone};
 use eframe::egui::{self, Ui};
 
 use super::{Action, Command, Ctx, Module, mine};
 use crate::config::Settings;
+use crate::plaque::{self, Do, Glyph, Look, Plaque, Say};
 use crate::texts::{self, Tr};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,9 +104,24 @@ fn badge_clock(d: Duration) -> String {
     if h > 0 { format!("{h}:{m:02}:{s:02}") } else { format!("{m:02}:{s:02}") }
 }
 
+/// Плашка «таймер дошёл»: висит, пока не нажмут «Готово» (как висела прежняя плашка таймера); щелчок по ней открывает
+/// «Таймеры». Своё имя — своя плашка: два таймера, что дошли вместе, видны оба.
+pub fn done_plaque(kind: Phase, name: Option<String>) -> Plaque {
+    let (key, say) = match (kind, name) {
+        (Phase::Plain, Some(name)) => (format!("timer:{name}"), Say::TimerDone(Some(name))),
+        (Phase::Plain, None) => ("timer".to_string(), Say::TimerDone(None)),
+        (Phase::Work, _) => ("timer:work".to_string(), Say::WorkDone),
+        (Phase::Rest, _) => ("timer:rest".to_string(), Say::RestDone),
+    };
+    Plaque::new(plaque::Kind::Timer, key, Glyph::Clock, Tone::Accent, say)
+        .button(Say::Done, Look::Primary, Do::Done)
+        .sticky()
+        .shelf("timers")
+}
+
 pub struct Timers {
     list: Vec<Timer>,
-    /// Что дошло с прошлого вопроса окна (и как оно называлось): окно покажет уведомление и выдвинет панель.
+    /// Что дошло с прошлого вопроса окна (и как оно называлось): окно покажет плашку.
     done: Vec<(Phase, Option<String>)>,
 }
 
@@ -164,15 +180,8 @@ impl Module for Timers {
         self.done.extend(done);
     }
 
-    fn attention(&mut self, t: &Tr) -> Option<String> {
-        let (kind, name) = self.done.pop()?;
-        self.done.clear();
-        Some(match (kind, name) {
-            (Phase::Plain, Some(name)) => t.timer_named_done.replace("{}", &name),
-            (Phase::Plain, None) => t.timer_done.to_string(),
-            (Phase::Work, _) => t.timer_work_done.to_string(),
-            (Phase::Rest, _) => t.timer_rest_done.to_string(),
-        })
+    fn events(&mut self, _settings: &Settings) -> Vec<Plaque> {
+        std::mem::take(&mut self.done).into_iter().map(|(kind, name)| done_plaque(kind, name)).collect()
     }
 
     /// Те же кнопки, что в карточке (5, 10, 15 минут, «Помидор»), и таймер из запроса «чай 5» (`timers:new:<минуты>:<имя>`).
@@ -428,22 +437,59 @@ mod tests {
         // Метка на вкладке и подсказка к ней называют его.
         let (left, hint) = timers.badge(ru, anvil_ui::Lang::Ru).expect("идёт — метка есть");
         assert_eq!(hint, format!("Идёт таймер «чай», осталось {left}"));
-        // Дошёл: уведомление со своим именем.
+        // Дошёл: плашка со своим именем.
+        let told = |timers: &mut Timers, lang: anvil_ui::Lang| -> Vec<String> {
+            timers.background(&Settings::default());
+            timers.events(&Settings::default()).iter().map(|p| texts::plaque_text(lang, &p.title)).collect()
+        };
         timers.list[0].left = Duration::ZERO;
-        timers.background(&Settings::default());
-        assert_eq!(timers.attention(ru).as_deref(), Some("Таймер «чай» дошёл"));
+        assert_eq!(told(&mut timers, anvil_ui::Lang::Ru), ["Таймер «чай» дошёл"]);
         assert!(timers.list.is_empty());
         run(&mut timers, "timers:new:5:tea");
         timers.list[0].left = Duration::ZERO;
-        timers.background(&Settings::default());
-        assert_eq!(timers.attention(en).as_deref(), Some("Timer “tea” is up"));
+        assert_eq!(told(&mut timers, anvil_ui::Lang::En), ["Timer “tea” is up"]);
         // Без имени — как у быстрых таймеров.
         run(&mut timers, "timers:new:7:");
         assert_eq!(timers.list[0].name, None);
         assert_eq!(Timers::label(&timers.list[0], en), "Timer");
         timers.list[0].left = Duration::ZERO;
-        timers.background(&Settings::default());
-        assert_eq!(timers.attention(ru).as_deref(), Some("Таймер дошёл"));
+        assert_eq!(told(&mut timers, anvil_ui::Lang::Ru), ["Таймер дошёл"]);
+    }
+
+    /// Плашка таймера: висит, пока не нажмут «Готово», открывает «Таймеры»; два таймера, что дошли вместе, — две плашки;
+    /// второй раз то же не отдаётся.
+    #[test]
+    fn a_finished_timer_gives_a_plaque_that_stays_with_a_done_button_and_is_given_once() {
+        let t0 = Instant::now();
+        let mut timers = Timers { list: Vec::new(), done: Vec::new() };
+        timers.list = vec![
+            Timer::named("чай", Duration::from_secs(60), t0),
+            Timer::new(Phase::Plain, Duration::from_secs(60), t0),
+            Timer::new(Phase::Work, WORK, t0),
+        ];
+        let at_end = t0 + WORK;
+        timers.done.extend(step(&mut timers.list, at_end));
+        let plaques = timers.events(&Settings::default());
+        assert_eq!(plaques.len(), 3, "по плашке на каждый таймер");
+        for p in &plaques {
+            assert!(p.sticky && p.kind == plaque::Kind::Timer && p.shelf == Some("timers"));
+            assert_eq!(p.buttons.len(), 1);
+            assert_eq!(
+                (p.buttons[0].look, &p.buttons[0].does, &p.buttons[0].label),
+                (Look::Primary, &Do::Done, &Say::Done)
+            );
+        }
+        let keys: Vec<&str> = plaques.iter().map(|p| p.key.as_str()).collect();
+        assert_eq!(keys, ["timer:чай", "timer", "timer:work"]);
+        assert_eq!(plaques[2].title, Say::WorkDone);
+        assert!(timers.events(&Settings::default()).is_empty(), "второй раз то же не отдаётся");
+        // Таймер выключить нельзя: событий нет только потому, что их нет, а не из-за настроек.
+        let off = Settings {
+            plaques: crate::config::Plaques { bluetooth: false, usb: false, github: false, downloads: false },
+            ..Settings::default()
+        };
+        timers.done.push((Phase::Plain, None));
+        assert_eq!(timers.events(&off).len(), 1);
     }
 
     #[test]

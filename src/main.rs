@@ -7,10 +7,12 @@ mod layout;
 mod look;
 mod modules;
 mod panel;
+mod plaque;
 mod search;
 mod shot;
 mod sys;
 mod texts;
+mod watch;
 
 fn main() -> eframe::Result<()> {
     let s = config::load();

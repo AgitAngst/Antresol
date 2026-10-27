@@ -25,7 +25,12 @@ pub struct Device {
     /// Заряд 0..100; `None` — Windows не знает.
     pub battery: Option<u8>,
     pub address: u64,
+    /// Аудио или видео по классу устройства (наушники, колонки): плашка «подключены» рисует наушники.
+    pub audio: bool,
 }
+
+/// Старшие классы устройства (биты 8–12 `ulClassofDevice`): 4 — аудио и видео.
+const MAJOR_AUDIO: u32 = 4;
 
 /// Адрес из ID узла устройства: последний кусок из ровно 12 шестнадцатеричных знаков.
 /// `BTHENUM\{0000111e-…}_LOCALMFG&0002\7&27e1d9e9&0&A0B1C2D3E4F5_C00000000` → 0xA0B1C2D3E4F5.
@@ -73,13 +78,14 @@ fn batteries() -> Vec<(u64, u8)> {
     out
 }
 
-/// Сопряжённые устройства: подключённые — первыми.
+/// Сопряжённые устройства: подключённые — первыми. В демо и в тестах (`sys::fake_reads`) — выдуманные: настоящие
+/// устройства этого ПК не читаются.
 pub fn devices() -> Vec<Device> {
-    if super::demo() {
+    if super::fake_reads() {
         return vec![
-            Device { name: "Headphones".into(), connected: true, battery: Some(80), address: 1 },
-            Device { name: "Mouse".into(), connected: true, battery: Some(45), address: 2 },
-            Device { name: "Keyboard".into(), connected: false, battery: None, address: 3 },
+            Device { name: "Headphones".into(), connected: true, battery: Some(80), address: 1, audio: true },
+            Device { name: "Mouse".into(), connected: true, battery: Some(45), address: 2, audio: false },
+            Device { name: "Keyboard".into(), connected: false, battery: None, address: 3, audio: false },
         ];
     }
     let mut out = Vec::new();
@@ -103,6 +109,7 @@ pub fn devices() -> Vec<Device> {
                 connected: info.fConnected.as_bool(),
                 battery: None,
                 address: info.Address.Anonymous.ullLong,
+                audio: (info.ulClassofDevice >> 8) & 0x1F == MAJOR_AUDIO,
             });
             info = BLUETOOTH_DEVICE_INFO { dwSize: size_of::<BLUETOOTH_DEVICE_INFO>() as u32, ..Default::default() };
             if BluetoothFindNextDevice(find, &mut info).is_err() {
@@ -127,12 +134,25 @@ pub fn devices() -> Vec<Device> {
 mod tests {
     use super::*;
 
+    /// Настоящий вызов Windows (только чтение): адаптера может не быть — тогда список пуст, но без паники. Не в общем
+    /// прогоне — `cargo test -- --ignored`: в обычных тестах устройства этого ПК не читаются.
     #[test]
+    #[ignore]
     fn reads_this_pc_without_crashing() {
-        // Настоящий вызов Windows: адаптера может не быть — тогда список пуст, но без паники.
+        crate::sys::LIVE_READS.store(true, std::sync::atomic::Ordering::Relaxed);
         for d in devices() {
             assert!(d.battery.is_none_or(|b| b <= 100));
         }
+    }
+
+    /// В тестах и демо читается выдуманный мир, а не устройства этого ПК.
+    #[test]
+    fn tests_and_the_demo_read_the_invented_devices() {
+        assert!(crate::sys::fake_reads());
+        let list = devices();
+        assert_eq!(list.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["Headphones", "Mouse", "Keyboard"]);
+        assert!(list[0].audio && !list[1].audio, "наушники — аудио, мышь — нет");
+        assert!(list[2].battery.is_none(), "у отключённого заряда нет");
     }
 
     #[test]

@@ -270,6 +270,26 @@ pub struct Tr {
     pub clip_fix: &'static str,
     /// Надпись на самой кнопке «Исправить раскладку» (по-русски короче); полное название — подсказка и диктор.
     pub clip_fix_chip: &'static str,
+    // Живые плашки у края (2.4.0): один блок. `{}` — имя, число или размер (см. `plaque_text`).
+    pub plaques: &'static str,
+    pub plaques_usb: &'static str,
+    pub plaques_downloads: &'static str,
+    pub plaque_connected: &'static str,
+    pub plaque_bt_charge: &'static str,
+    pub plaque_low: &'static str,
+    pub plaque_battery: &'static str,
+    pub plaque_usb: &'static str,
+    pub plaque_usb_in: &'static str,
+    pub plaque_open: &'static str,
+    pub plaque_eject: &'static str,
+    pub plaque_safe: &'static str,
+    pub plaque_busy: &'static str,
+    pub plaque_build_failed: &'static str,
+    pub plaque_build_passed: &'static str,
+    pub plaque_downloaded: &'static str,
+    pub plaque_in_downloads: &'static str,
+    pub plaque_to_tray: &'static str,
+    pub plaque_close: &'static str,
 }
 
 const RU: Tr = Tr {
@@ -537,6 +557,25 @@ const RU: Tr = Tr {
     clip_open: "Открыть в браузере",
     clip_fix: "Исправить раскладку",
     clip_fix_chip: "Исправить",
+    plaques: "Живые плашки",
+    plaques_usb: "Флешки",
+    plaques_downloads: "Загрузки",
+    plaque_connected: "{} подключены",
+    plaque_bt_charge: "Bluetooth · заряд {} %",
+    plaque_low: "{} разряжается",
+    plaque_battery: "Заряд {} %",
+    plaque_usb: "Флешка «{}»",
+    plaque_usb_in: "{} · вставлена",
+    plaque_open: "Открыть",
+    plaque_eject: "Извлечь",
+    plaque_safe: "Можно вынимать",
+    plaque_busy: "Не извлечь: диск занят",
+    plaque_build_failed: "{}: сборка упала",
+    plaque_build_passed: "{}: сборка прошла",
+    plaque_downloaded: "{} скачан",
+    plaque_in_downloads: "{} · Загрузки",
+    plaque_to_tray: "В лоток",
+    plaque_close: "Закрыть",
 };
 
 const EN: Tr = Tr {
@@ -804,6 +843,25 @@ const EN: Tr = Tr {
     clip_open: "Open in the browser",
     clip_fix: "Fix layout",
     clip_fix_chip: "Fix layout",
+    plaques: "Live plaques",
+    plaques_usb: "USB drives",
+    plaques_downloads: "Downloads",
+    plaque_connected: "{} connected",
+    plaque_bt_charge: "Bluetooth · battery {}%",
+    plaque_low: "{} is running low",
+    plaque_battery: "Battery {}%",
+    plaque_usb: "USB drive “{}”",
+    plaque_usb_in: "{} · plugged in",
+    plaque_open: "Open",
+    plaque_eject: "Eject",
+    plaque_safe: "Safe to remove",
+    plaque_busy: "Can’t eject: the drive is busy",
+    plaque_build_failed: "{}: build failed",
+    plaque_build_passed: "{}: build passed",
+    plaque_downloaded: "{} downloaded",
+    plaque_in_downloads: "{} · Downloads",
+    plaque_to_tray: "To tray",
+    plaque_close: "Close",
 };
 
 pub fn tr(lang: Lang) -> &'static Tr {
@@ -1228,6 +1286,63 @@ pub fn clip_age(lang: Lang, secs: u64) -> String {
     }
 }
 
+// ─── Живые плашки у края (2.4.0) ────────────────────────────────────────────
+
+/// Размер файла или диска в плашке: «32 ГБ», «1,2 МБ» — как `res::bytes`, но без лишнего «,0».
+pub fn plaque_size(lang: Lang, bytes: u64) -> String {
+    let text = crate::sys::res::bytes(bytes as f64, lang == Lang::Ru);
+    text.replace(",0 ", " ").replace(".0 ", " ")
+}
+
+/// Слова плашки по языку: ключ и числа из данных собираются здесь, при показе; «сколько назад» — от `now` (секунды с 1970).
+pub fn plaque_text_at(lang: Lang, say: &crate::plaque::Say, now: i64) -> String {
+    use crate::plaque::Say;
+    let t = tr(lang);
+    let with = |template: &str, value: &str| template.replace("{}", value);
+    match say {
+        Say::None => String::new(),
+        Say::TimerDone(Some(name)) => with(t.timer_named_done, name),
+        Say::TimerDone(None) => t.timer_done.to_string(),
+        Say::WorkDone => t.timer_work_done.to_string(),
+        Say::RestDone => t.timer_rest_done.to_string(),
+        Say::Connected(name) => with(t.plaque_connected, name),
+        Say::BtCharge(Some(percent)) => with(t.plaque_bt_charge, &percent.to_string()),
+        Say::BtCharge(None) => t.bluetooth.to_string(),
+        Say::Low(name) => with(t.plaque_low, name),
+        Say::Battery(percent) => with(t.plaque_battery, &percent.to_string()),
+        Say::Usb(name) => with(t.plaque_usb, name),
+        Say::UsbIn(bytes) => with(t.plaque_usb_in, &plaque_size(lang, *bytes)),
+        Say::Safe => t.plaque_safe.to_string(),
+        Say::Busy => t.plaque_busy.to_string(),
+        Say::BuildFailed(repo) => with(t.plaque_build_failed, repo),
+        Say::BuildPassed(repo) => with(t.plaque_build_passed, repo),
+        Say::RunAge { branch, at } => {
+            let ago = at.map(|at| ago(lang, now - at)).unwrap_or_default();
+            match (branch.is_empty(), ago.is_empty()) {
+                (false, false) => format!("{branch} · {ago}"),
+                (false, true) => branch.clone(),
+                (true, _) => ago,
+            }
+        }
+        Say::Downloaded(name) => with(t.plaque_downloaded, name),
+        Say::InDownloads(bytes) => with(t.plaque_in_downloads, &plaque_size(lang, *bytes)),
+        Say::Failed(name) => format!("{}: {name}", t.failed),
+        Say::Open => t.plaque_open.to_string(),
+        Say::Eject => t.plaque_eject.to_string(),
+        Say::ToTray => t.plaque_to_tray.to_string(),
+        Say::Done => t.done.to_string(),
+    }
+}
+
+/// То же от сегодняшнего времени.
+pub fn plaque_text(lang: Lang, say: &crate::plaque::Say) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or_default();
+    plaque_text_at(lang, say, now)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1260,5 +1375,55 @@ mod tests {
         assert_eq!(time_diff(Lang::Ru, -30), "−30 мин");
         assert_eq!(time_diff(Lang::Ru, 330), "+5 ч 30 мин");
         assert_eq!(time_diff(Lang::En, 0), "same as here");
+    }
+
+    /// Слова плашек по дизайну 2.4.0, на обоих языках; у каждого значения подставляется своё.
+    #[test]
+    fn plaque_words_in_both_languages() {
+        use crate::plaque::Say;
+        let words = |lang: Lang, say: Say| plaque_text_at(lang, &say, 10_000);
+        let gib = 1024u64 * 1024 * 1024;
+        let cases: Vec<(Say, &str, &str)> = vec![
+            (Say::Connected("Headphones".into()), "Headphones подключены", "Headphones connected"),
+            (Say::BtCharge(Some(80)), "Bluetooth · заряд 80 %", "Bluetooth · battery 80%"),
+            (Say::BtCharge(None), "Bluetooth", "Bluetooth"),
+            (Say::Low("Mouse".into()), "Mouse разряжается", "Mouse is running low"),
+            (Say::Battery(12), "Заряд 12 %", "Battery 12%"),
+            (Say::Usb("DEMO".into()), "Флешка «DEMO»", "USB drive “DEMO”"),
+            (Say::UsbIn(32 * gib), "32 ГБ · вставлена", "32 GB · plugged in"),
+            (Say::Safe, "Можно вынимать", "Safe to remove"),
+            (Say::Busy, "Не извлечь: диск занят", "Can’t eject: the drive is busy"),
+            (Say::BuildFailed("demo/site".into()), "demo/site: сборка упала", "demo/site: build failed"),
+            (Say::BuildPassed("demo/site".into()), "demo/site: сборка прошла", "demo/site: build passed"),
+            (Say::Downloaded("report.pdf".into()), "report.pdf скачан", "report.pdf downloaded"),
+            (Say::InDownloads(1_258_291), "1,2 МБ · Загрузки", "1.2 MB · Downloads"),
+            (Say::Failed("report.pdf".into()), "Не получилось: report.pdf", "Failed: report.pdf"),
+            (Say::Open, "Открыть", "Open"),
+            (Say::Eject, "Извлечь", "Eject"),
+            (Say::ToTray, "В лоток", "To tray"),
+            (Say::Done, "Готово", "Done"),
+            (Say::TimerDone(None), "Таймер дошёл", "Timer is up"),
+            (Say::TimerDone(Some("tea".into())), "Таймер «tea» дошёл", "Timer “tea” is up"),
+            (Say::None, "", ""),
+        ];
+        for (say, ru, en) in cases {
+            assert_eq!(words(Lang::Ru, say.clone()), ru, "{say:?}");
+            assert_eq!(words(Lang::En, say.clone()), en, "{say:?}");
+        }
+        assert_eq!(plaque_size(Lang::Ru, 5 * gib / 2), "2,5 ГБ");
+        assert_eq!(plaque_size(Lang::En, 512), "512 B");
+        assert_eq!(plaque_size(Lang::En, 10 * 1024 * 1024), "10 MB", "«10.0 MB» без нуля");
+    }
+
+    #[test]
+    fn the_age_of_a_run_is_counted_when_the_plaque_is_shown() {
+        use crate::plaque::Say;
+        let run = |branch: &str, at: Option<i64>| Say::RunAge { branch: branch.into(), at };
+        // Ветка и «сколько назад» — через « · »; чего нет — того нет.
+        assert_eq!(plaque_text_at(Lang::Ru, &run("main", Some(1000)), 1000 + 5 * 60), "main · 5 мин назад");
+        assert_eq!(plaque_text_at(Lang::En, &run("main", Some(1000)), 1000 + 30), "main · just now");
+        assert_eq!(plaque_text_at(Lang::En, &run("", Some(1000)), 1000 + 7200), "2 h ago");
+        assert_eq!(plaque_text_at(Lang::En, &run("main", None), 5), "main");
+        assert_eq!(plaque_text_at(Lang::En, &run("", None), 5), "");
     }
 }

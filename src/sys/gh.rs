@@ -13,6 +13,8 @@ use windows::core::{PCWSTR, w};
 /// Последний прогон CI.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Run {
+    /// Номер прогона на GitHub (0 — не прочитался).
+    pub id: u64,
     pub name: String,
     /// `queued`, `in_progress`, `completed`.
     pub status: String,
@@ -20,6 +22,8 @@ pub struct Run {
     pub conclusion: String,
     /// `2026-10-22T05:12:00Z`.
     pub updated: String,
+    /// Ветка, на которой шёл прогон.
+    pub branch: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -135,6 +139,15 @@ pub fn field(json: &str, key: &str, from: usize) -> Option<String> {
     None
 }
 
+/// Число в поле `"key": 123` (первое после `from`); не число или нет поля — `None`.
+pub fn number(json: &str, key: &str, from: usize) -> Option<u64> {
+    let pat = format!("\"{key}\"");
+    let at = json[from..].find(&pat)? + from + pat.len();
+    let rest = json[at..].trim_start().strip_prefix(':')?.trim_start();
+    let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
 /// Первый прогон из ответа `/actions/runs`; прогонов нет — `None`.
 pub fn parse_run(json: &str) -> Option<Run> {
     let start = json.find("\"workflow_runs\"")?;
@@ -144,6 +157,9 @@ pub fn parse_run(json: &str) -> Option<Run> {
     }
     let first = json[list..].find('{')? + list;
     Some(Run {
+        // `id` — первое поле прогона; ветка — `head_branch`.
+        id: number(json, "id", first).unwrap_or_default(),
+        branch: field(json, "head_branch", first).unwrap_or_default(),
         name: field(json, "name", first).unwrap_or_default(),
         status: field(json, "status", first).unwrap_or_default(),
         conclusion: field(json, "conclusion", first).unwrap_or_default(),
@@ -202,14 +218,21 @@ pub fn iso_to_unix(s: &str) -> Option<i64> {
     Some(days * 86400 + hh * 3600 + mm * 60 + ss)
 }
 
-/// Прочитать репозиторий `owner/name`.
-pub fn read(repo: &str, token: Option<&str>) -> Repo {
+/// Только последний прогон репозитория `owner/name` — один запрос вместо двух: так следят за прогонами, пока панель
+/// спрятана (без токена GitHub даёт 60 запросов в час). Число PR не читается (`open_prs` — `None`).
+pub fn read_runs(repo: &str, token: Option<&str>) -> Repo {
     let mut out = Repo { name: repo.to_string(), ..Default::default() };
     match get(&format!("/repos/{repo}/actions/runs?per_page=1"), token) {
         Ok((200, body)) => out.run = parse_run(&body),
         Ok((code, _)) => out.error = Some(code.to_string()),
         Err(e) => out.error = Some(e),
     }
+    out
+}
+
+/// Прочитать репозиторий `owner/name`: последний прогон и открытые PR.
+pub fn read(repo: &str, token: Option<&str>) -> Repo {
+    let mut out = read_runs(repo, token);
     if out.error.is_none() {
         match get(&format!("/repos/{repo}/pulls?state=open&per_page=100"), token) {
             Ok((200, body)) => out.open_prs = Some(count_prs(&body)),
@@ -231,6 +254,7 @@ mod tests {
         let r = parse_run(RUNS).unwrap();
         assert_eq!((r.name.as_str(), r.status.as_str(), r.conclusion.as_str()), ("CI", "completed", "failure"));
         assert_eq!(r.updated, "2026-10-22T05:12:00Z");
+        assert_eq!((r.id, r.branch.as_str()), (1, "main"), "номер и ветка первого прогона, а не второго");
         assert!(parse_run(r#"{"total_count":0,"workflow_runs":[]}"#).is_none(), "прогонов нет");
     }
 
@@ -249,6 +273,16 @@ mod tests {
         assert_eq!(iso_to_unix("2000-03-01T00:00:00Z"), Some(951_868_800));
         assert_eq!(iso_to_unix("2026-10-22T05:12:00Z"), Some(1_792_645_920));
         assert_eq!(iso_to_unix("nope"), None);
+    }
+
+    #[test]
+    fn numbers_in_fields() {
+        let j = r#"{"id": 7412, "node_id": "x", "run_number": 12, "big": 99999999999999999999, "s": "5"}"#;
+        assert_eq!(number(j, "id", 0), Some(7412), "именно `id`, а не `node_id`");
+        assert_eq!(number(j, "run_number", 0), Some(12));
+        assert_eq!(number(j, "big", 0), None, "не влезло в число");
+        assert_eq!(number(j, "s", 0), None, "строка — не число");
+        assert_eq!(number(j, "nope", 0), None);
     }
 
     #[test]

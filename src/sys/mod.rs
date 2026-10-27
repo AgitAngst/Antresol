@@ -13,8 +13,10 @@ pub mod net;
 pub mod nightlight;
 pub mod ocr;
 pub mod res;
+pub mod shell;
 pub mod system;
 pub mod tz;
+pub mod usb;
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -557,6 +559,12 @@ mod tests {
         assert_eq!(net::set_vpn("guard-test-vpn", true), Ok(()));
         assert_eq!(nightlight::set(true), Ok(()));
         assert_eq!(clip::write_text("guard-test"), Ok(()));
+        assert_eq!(
+            usb::eject(r"Y:\"),
+            Ok(()),
+            "выдуманный мир: нет такого тома — извлекать нечего, и всё равно «готово»"
+        );
+        assert_eq!(shell::drag_file(r"C:\guard-test\file.txt"), Ok(()));
         let mut dib = vec![0u8; 40];
         dib[0..4].copy_from_slice(&40u32.to_le_bytes());
         dib[4..8].copy_from_slice(&2i32.to_le_bytes());
@@ -575,6 +583,8 @@ mod tests {
             "set_vpn guard-test-vpn true",
             "nightlight::set true",
             "clip::write_text guard-test",
+            r"usb::eject Y:\",
+            r"drag_file C:\guard-test\file.txt",
             "clip::write_image 2x1 40 bytes",
             "media::act Previous",
             "media::act PlayPause",
@@ -667,6 +677,8 @@ mod tests {
             "TrySkipPreviousAsync",
             "TryTogglePlayPauseAsync",
             "TrySkipNextAsync",
+            "CM_Request_Device_EjectW",
+            "SHDoDragDrop",
             "Command::new",
             "fs::write",
         ];
@@ -679,6 +691,8 @@ mod tests {
             ("sys/nightlight.rs", include_str!("nightlight.rs")),
             ("sys/clip.rs", include_str!("clip.rs")),
             ("sys/media.rs", include_str!("media.rs")),
+            ("sys/usb.rs", include_str!("usb.rs")),
+            ("sys/shell.rs", include_str!("shell.rs")),
             ("config.rs", include_str!("../config.rs")),
         ];
         let mut seen = 0;
@@ -701,6 +715,6 @@ mod tests {
                 }
             }
         }
-        assert!(seen >= 21, "тест нашёл всего {seen} записей: список имён или файлов устарел");
+        assert!(seen >= 23, "тест нашёл всего {seen} записей: список имён или файлов устарел");
     }
 }
