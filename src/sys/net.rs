@@ -1,9 +1,10 @@
 // Сеть: Wi‑Fi (радио Windows.Devices.Radios, имя сети — Windows.Networking.Connectivity) и VPN
-// Windows (RAS: подключения «Параметры → Сеть → VPN»; вкл/выкл — `rasdial` с сохранёнными данными).
+// Windows (RAS: подключения «Параметры → Сеть → VPN»; вкл/выкл — `rasdial` с сохранёнными данными). Радио Bluetooth — тоже
+// отсюда, но только чтение: карточка «Bluetooth» серит «Подключить», пока оно выключено.
 // WinRT отвечает асинхронно — звать из потока модуля (после `media::init_thread`), не из окна.
 //
 // В демо и в тестах (`sys::fake_reads`) Wi‑Fi выдуманный: включён, сеть «Demo-Net», помнит, что в него записали (писатель
-// за заслоном); VPN — одно подключение «Demo Office».
+// за заслоном); VPN — одно подключение «Demo Office»; радио Bluetooth включено.
 
 use std::os::windows::process::CommandExt;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -43,11 +44,21 @@ static FAKE_WIFI: AtomicBool = AtomicBool::new(true);
 #[cfg(test)]
 pub static FAKE_WIFI_FAILS: AtomicBool = AtomicBool::new(false);
 
-/// Выдуманный Wi‑Fi включён, как вначале (для тестов).
+/// Выдуманное радио Bluetooth: включено ли. Только читается; выключают снимок «Bluetooth выключен» и тесты ([`fake_bluetooth`]).
+static FAKE_BLUETOOTH: AtomicBool = AtomicBool::new(true);
+
+/// Включить или выключить выдуманное радио Bluetooth: для снимков (`ANTRESOL_VIEW=bluetooth-off` в демо) и тестов. Настоящее
+/// радио отсюда не трогается — Bluetooth в панели только читается.
+pub fn fake_bluetooth(on: bool) {
+    FAKE_BLUETOOTH.store(on, Ordering::Relaxed);
+}
+
+/// Выдуманный Wi‑Fi включён, радио Bluetooth тоже, как вначале (для тестов).
 #[cfg(test)]
 pub fn fake_reset() {
     FAKE_WIFI.store(true, Ordering::Relaxed);
     FAKE_WIFI_FAILS.store(false, Ordering::Relaxed);
+    FAKE_BLUETOOTH.store(true, Ordering::Relaxed);
 }
 
 /// Wi‑Fi: включено ли радио и к какой сети подключены (пусто — ни к какой).
@@ -57,14 +68,33 @@ pub struct Wifi {
     pub network: String,
 }
 
-fn wifi_radio() -> Result<Option<Radio>> {
+fn radio_of(kind: RadioKind) -> Result<Option<Radio>> {
     let radios = wait!(Radio::GetRadiosAsync()?)?;
     for r in radios {
-        if r.Kind()? == RadioKind::WiFi {
+        if r.Kind()? == kind {
             return Ok(Some(r));
         }
     }
     Ok(None)
+}
+
+fn wifi_radio() -> Result<Option<Radio>> {
+    radio_of(RadioKind::WiFi)
+}
+
+/// Включено ли радио Bluetooth: `Some(false)` — выключено или отключено (устройства не подключить); радио нет, Windows не ответила
+/// или не знает состояния — `None`: тогда панель не мешает. Только чтение: Bluetooth из панели не включают. Звать из потока с COM
+/// (`btaudio::Com`).
+pub fn bluetooth_on() -> Option<bool> {
+    if super::fake_reads() {
+        return Some(FAKE_BLUETOOTH.load(Ordering::Relaxed));
+    }
+    let radio = radio_of(RadioKind::Bluetooth).ok()??;
+    match radio.State().ok()? {
+        RadioState::On => Some(true),
+        RadioState::Off | RadioState::Disabled => Some(false),
+        _ => None,
+    }
 }
 
 /// Имя сети Wi‑Fi, через которую выход в интернет; не Wi‑Fi — пусто.

@@ -7,6 +7,8 @@
 # поиск действий (`view = "search"`, `query` — запрос, `ANTRESOL_QUERY`), настройки (`settings-ask` — с тем же вопросом у
 # сцены), «Свой цвет…», полоска у края, живые плашки (`view = "strip-plaque-<вид>"`: bluetooth, battery, usb, ejecting, eject, busy, gone,
 # github, downloads, downloads-many, downloads-danger, timer, meeting — выдуманные данные на языке кадра, панель спрятана, снимается только окно плашки). Тёмная RU и светлая EN.
+# Карточка «Bluetooth» на полке «Система» (`shelf = "2"`): обычная (`shelf-system-*`: наушники и мышь подключены, колонка с «Подключить», клавиатура без
+# кнопки), «Подключение…» (`view = "bluetooth-connecting"`: колонка в работе, поток не заводится) и «Bluetooth выключен» (`view = "bluetooth-off"`: «Подключить» серая).
 # Полка «День» (`shelf = "3"`): с календарём (`calendar=` — выдуманная ссылка; встречи — выдуманные, из самой программы), список календарей
 # (`view = "meetings-manage"`, два календаря) и без календаря.
 # У кадра может быть своя высота панели (`height`, по умолчанию 340): «Под рукой» снимается на 400 — буферу с чипами нужны
@@ -43,6 +45,10 @@ $scenes = @(
   @{ n = "panel-light-en";   lang = "en"; theme = "light"; view = "" },
   @{ n = "shelf-system-dark-ru";  lang = "ru"; theme = "dark";  view = ""; shelf = "2" },
   @{ n = "shelf-system-light-en"; lang = "en"; theme = "light"; view = ""; shelf = "2" },
+  @{ n = "bluetooth-connecting-dark-ru";  lang = "ru"; theme = "dark";  view = "bluetooth-connecting"; shelf = "2" },
+  @{ n = "bluetooth-connecting-light-en"; lang = "en"; theme = "light"; view = "bluetooth-connecting"; shelf = "2" },
+  @{ n = "bluetooth-off-dark-ru";  lang = "ru"; theme = "dark";  view = "bluetooth-off"; shelf = "2" },
+  @{ n = "bluetooth-off-light-en"; lang = "en"; theme = "light"; view = "bluetooth-off"; shelf = "2" },
   @{ n = "shelf-day-dark-ru";     lang = "ru"; theme = "dark";  view = ""; shelf = "3"; extra = @($calendar) },
   @{ n = "shelf-day-light-en";    lang = "en"; theme = "light"; view = ""; shelf = "3"; extra = @($calendar) },
   @{ n = "shelf-day-manage-dark-ru";  lang = "ru"; theme = "dark";  view = "meetings-manage"; shelf = "3"; extra = @($calendar, $calendar2) },

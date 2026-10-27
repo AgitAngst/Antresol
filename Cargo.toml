@@ -18,6 +18,8 @@ eframe = "0.36.2"
 # Win32: мониторы, режимы экрана и масштаб, DDC/CI, запуск, горячая клавиша, автозапуск; съёмные диски и безопасное
 # извлечение (IO, Ioctl, режим ошибок потока), перетаскивание файла с плашки (Ole, Shell);
 # WinRT: медиа-сеансы (что играет), WIC — обложка; ресурсы: процессор, память, сеть, батарея, диски, PDH.
+# Bluetooth-звук (2.6): точки и фильтры Windows (Media_Audio), команды драйвера «переподключить» и «отключить» (Media_KernelStreaming),
+# ContainerId точки (Com_StructuredStorage, Variant, Shell_PropertiesSystem).
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = [
     "Devices_Radios",
@@ -33,6 +35,8 @@ windows = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_Graphics_Imaging",
+    "Win32_Media_Audio",
+    "Win32_Media_KernelStreaming",
     "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_Ndis",
     "Win32_NetworkManagement_Rras",
@@ -43,6 +47,7 @@ windows = { version = "0.62.2", features = [
     "Win32_Devices_Display",
     "Win32_Devices_Properties",
     "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
     "Win32_System_DataExchange",
     "Win32_System_Diagnostics_Debug",
     "Win32_System_IO",
@@ -55,9 +60,11 @@ windows = { version = "0.62.2", features = [
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
     "Win32_System_Time",
+    "Win32_System_Variant",
     "Win32_System_WinRT",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
+    "Win32_UI_Shell_PropertiesSystem",
     "Win32_UI_WindowsAndMessaging",
 ] }
 

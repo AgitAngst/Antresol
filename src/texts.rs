@@ -317,6 +317,19 @@ pub struct Tr {
     pub meetings_calendars_hint: &'static str,
     pub meetings_dup: &'static str,
     pub plaque_meeting: &'static str,
+    // Наушники одним щелчком (2.6.0): один блок. «Подключить» и «Отключить» — уже есть (`connect`, `disconnect`). `{}` — имя устройства.
+    pub bt_connected: &'static str,
+    pub bt_not_connected: &'static str,
+    pub bt_connecting: &'static str,
+    pub bt_disconnecting: &'static str,
+    pub bt_click_connect: &'static str,
+    pub bt_click_disconnect: &'static str,
+    pub bt_by_itself: &'static str,
+    pub bt_off: &'static str,
+    pub bt_connect_failed: &'static str,
+    pub bt_disconnect_failed: &'static str,
+    pub bt_search_connect: &'static str,
+    pub bt_search_disconnect: &'static str,
 }
 
 const RU: Tr = Tr {
@@ -629,6 +642,18 @@ const RU: Tr = Tr {
     meetings_calendars_hint: "Календари (или правый щелчок по карточке)",
     meetings_dup: "Этот календарь уже есть",
     plaque_meeting: "{} через {} мин",
+    bt_connected: "Подключено",
+    bt_not_connected: "Не подключено",
+    bt_connecting: "Подключение…",
+    bt_disconnecting: "Отключение…",
+    bt_click_connect: "Щелчок — подключить",
+    bt_click_disconnect: "Щелчок — отключить",
+    bt_by_itself: "Подключается само, когда устройство включают",
+    bt_off: "Bluetooth выключен",
+    bt_connect_failed: "Не удалось подключить «{}»: включите устройство и поднесите ближе",
+    bt_disconnect_failed: "Не удалось отключить «{}»",
+    bt_search_connect: "Подключить «{}»",
+    bt_search_disconnect: "Отключить «{}»",
 };
 
 const EN: Tr = Tr {
@@ -941,6 +966,18 @@ const EN: Tr = Tr {
     meetings_calendars_hint: "Calendars (or right-click the card)",
     meetings_dup: "This calendar is already added",
     plaque_meeting: "{} in {} min",
+    bt_connected: "Connected",
+    bt_not_connected: "Not connected",
+    bt_connecting: "Connecting…",
+    bt_disconnecting: "Disconnecting…",
+    bt_click_connect: "Click to connect",
+    bt_click_disconnect: "Click to disconnect",
+    bt_by_itself: "Connects by itself when the device is turned on",
+    bt_off: "Bluetooth is off",
+    bt_connect_failed: "Couldn’t connect “{}”: turn the device on and bring it closer",
+    bt_disconnect_failed: "Couldn’t disconnect “{}”",
+    bt_search_connect: "Connect “{}”",
+    bt_search_disconnect: "Disconnect “{}”",
 };
 
 pub fn tr(lang: Lang) -> &'static Tr {
@@ -1755,5 +1792,76 @@ mod tests {
         );
         assert_eq!(en.meetings_google, "Google: Calendar settings → Secret address in iCal format");
         assert_eq!(en.meetings_outlook, "Outlook: Settings → Calendar → Shared calendars → Publish a calendar → ICS");
+    }
+
+    /// «Наушники одним щелчком» (2.6.0): слова карточки, уведомлений и поиска на обоих языках — по design.md, §5.
+    #[test]
+    fn bluetooth_connect_words_in_both_languages() {
+        let (ru, en) = (tr(Lang::Ru), tr(Lang::En));
+        let words = |t: &Tr| {
+            [
+                t.bt_connected,
+                t.bt_not_connected,
+                t.bt_connecting,
+                t.bt_disconnecting,
+                t.connect,
+                t.disconnect,
+                t.bt_click_connect,
+                t.bt_click_disconnect,
+                t.bt_by_itself,
+                t.bt_off,
+                t.bt_connect_failed,
+                t.bt_disconnect_failed,
+                t.bt_search_connect,
+                t.bt_search_disconnect,
+            ]
+        };
+        assert_eq!(
+            words(ru),
+            [
+                "Подключено",
+                "Не подключено",
+                "Подключение…",
+                "Отключение…",
+                "Подключить",
+                "Отключить",
+                "Щелчок — подключить",
+                "Щелчок — отключить",
+                "Подключается само, когда устройство включают",
+                "Bluetooth выключен",
+                "Не удалось подключить «{}»: включите устройство и поднесите ближе",
+                "Не удалось отключить «{}»",
+                "Подключить «{}»",
+                "Отключить «{}»",
+            ]
+        );
+        assert_eq!(
+            words(en),
+            [
+                "Connected",
+                "Not connected",
+                "Connecting…",
+                "Disconnecting…",
+                "Connect",
+                "Disconnect",
+                "Click to connect",
+                "Click to disconnect",
+                "Connects by itself when the device is turned on",
+                "Bluetooth is off",
+                "Couldn’t connect “{}”: turn the device on and bring it closer",
+                "Couldn’t disconnect “{}”",
+                "Connect “{}”",
+                "Disconnect “{}”",
+            ]
+        );
+        // Имя подставляется в `{}` — по одному на строку, где оно есть; без `{}` в остальных.
+        for t in [ru, en] {
+            for named in [t.bt_connect_failed, t.bt_disconnect_failed, t.bt_search_connect, t.bt_search_disconnect] {
+                assert_eq!(named.matches("{}").count(), 1, "{named}");
+            }
+            for plain in [t.bt_connected, t.bt_not_connected, t.bt_connecting, t.bt_disconnecting, t.bt_off] {
+                assert!(!plain.contains("{}"), "{plain}");
+            }
+        }
     }
 }

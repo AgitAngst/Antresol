@@ -1,6 +1,7 @@
 // Всё, что идёт в Windows напрямую. Остальная программа зовёт только эти функции.
 
 pub mod bt;
+pub mod btaudio;
 pub mod clip;
 pub mod ddc;
 pub mod dib;
@@ -69,18 +70,19 @@ pub fn fake_reads() -> bool {
 #[cfg(test)]
 pub static LIVE_READS: AtomicBool = AtomicBool::new(false);
 
-/// Тесты, что ставят и читают выдуманную тему, уведомления, план питания, ночной свет и Wi‑Fi (один на все тесты мир), и
-/// тест заслона идут по одному. Берут первым, до `KEYS_TEST`, чтобы замки не ждали друг друга по кругу.
+/// Тесты, что ставят и читают выдуманную тему, уведомления, план питания, ночной свет, Wi‑Fi, радио и устройства Bluetooth
+/// (один на все тесты мир), и тест заслона идут по одному. Берут первым, до `KEYS_TEST`, чтобы замки не ждали друг друга по кругу.
 #[cfg(test)]
 pub static WORLD_TEST: Mutex<()> = Mutex::new(());
 
 /// Выдуманная система как вначале: тема тёмная, уведомления включены, план «Balanced», ночной свет выключен, Wi‑Fi
-/// включён. Звать под `WORLD_TEST`.
+/// включён, радио Bluetooth включено, подключены наушники и мышь. Звать под `WORLD_TEST`.
 #[cfg(test)]
 pub fn reset_fake_world() {
     system::fake_reset();
     nightlight::fake_reset();
     net::fake_reset();
+    bt::fake_reset();
 }
 
 /// Что заслон не пропустил в тестах: по строке на каждую остановленную запись (для проверки заслона).
@@ -569,6 +571,9 @@ mod tests {
         assert_eq!(system::set_plan(&windows::core::GUID::from_u128(0x6a8d)), Ok(()));
         assert_eq!(net::set_wifi(true), Ok(()));
         assert_eq!(net::set_vpn("guard-test-vpn", true), Ok(()));
+        // Устройства с таким адресом в выдуманном мире нет: заслон оставляет метку, а подключать нечем — как у настоящего без точек.
+        assert!(btaudio::set_connected(0xFA11, "guard-test-bt", true).is_err());
+        assert!(btaudio::set_connected(0xFA11, "guard-test-bt", false).is_err());
         assert_eq!(nightlight::set(true), Ok(()));
         assert_eq!(clip::write_text("guard-test"), Ok(()));
         let guard_drive = usb::Volume::invented(r"Y:\", "GUARD", 1 << 30);
@@ -591,6 +596,8 @@ mod tests {
             "set_plan",
             "set_wifi true",
             "set_vpn guard-test-vpn true",
+            "bt connect guard-test-bt",
+            "bt disconnect guard-test-bt",
             "nightlight::set true",
             "clip::write_text guard-test",
             r"usb::eject Y:\",
@@ -684,6 +691,7 @@ mod tests {
             "SetThreadExecutionState",
             "SendMessageTimeoutW",
             "SetStateAsync",
+            "KsProperty",
             "TrySkipPreviousAsync",
             "TryTogglePlayPauseAsync",
             "TrySkipNextAsync",
@@ -698,6 +706,7 @@ mod tests {
             ("sys/ddc.rs", include_str!("ddc.rs")),
             ("sys/system.rs", include_str!("system.rs")),
             ("sys/net.rs", include_str!("net.rs")),
+            ("sys/btaudio.rs", include_str!("btaudio.rs")),
             ("sys/nightlight.rs", include_str!("nightlight.rs")),
             ("sys/clip.rs", include_str!("clip.rs")),
             ("sys/media.rs", include_str!("media.rs")),
@@ -725,6 +734,6 @@ mod tests {
                 }
             }
         }
-        assert!(seen >= 23, "тест нашёл всего {seen} записей: список имён или файлов устарел");
+        assert!(seen >= 24, "тест нашёл всего {seen} записей: список имён или файлов устарел");
     }
 }
