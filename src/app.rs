@@ -4602,6 +4602,10 @@ mod tests {
     #[test]
     fn switching_shelves_animates_the_height() {
         let mut rig = fitted(1300.0);
+        // Движение — прямо в состоянии набора, как в тесте выезда плашки: на машинах сборки GitHub анимации Windows
+        // выключены, и `set_reduced(false)` их не включит.
+        let key = egui::Id::new("anvil-ui-motion");
+        rig.ctx.data_mut(|d| d.insert_temp(key, anvil_ui::motion::Motion { enabled: true }));
         rig.app.settings.shelves[1].height = Some(500);
         let from = rig.app.height;
         rig.app.set_shelf(1);
