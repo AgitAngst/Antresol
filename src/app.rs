@@ -61,6 +61,8 @@ const NUM_KEYS: [egui::Key; 9] = [
 const GAP: f32 = 10.0;
 /// Сколько точек плавного колеса над вкладками — как один щелчок колеса: соседняя полка.
 const TAB_WHEEL: f32 = 40.0;
+/// Мышь ближе к новому низу, чем это (или ниже его), — панель не становится ниже (`step_height`).
+const SHRINK_ROOM: f32 = 24.0;
 /// Задержка выезда в настройках — чипами, мс.
 const DELAYS: [u32; 4] = [0, 150, 300, 600];
 /// Полоска у края, пока панель спрятана: ширина и высота в точках при размере 100 % (`Settings::strip_scale`).
@@ -508,25 +510,36 @@ impl App {
     }
 
     /// Какой высоты панели быть: в виде без полки и в правке полок — той, что была на входе; на полке — своей высоты полки, а
-    /// нет её — сколько нужно карточкам по замеру (`fit`); пока замера нет — `height=` из файла.
+    /// нет её — сколько нужно карточкам по замеру (`fit`); пока полку не измерили — та, что сейчас (замер придёт кадром позже,
+    /// и ход не начнётся не туда; при запуске это `height=` из файла).
     fn target_height(&self) -> f32 {
         if let Some(h) = self.held {
             return h;
         }
         let own = self.settings.shelves.get(self.shelf).and_then(|s| s.height).map(f32::from);
         let fit = self.fit.get(self.shelf).copied().flatten();
-        own.or(fit).unwrap_or(self.settings.height).clamp(MIN_HEIGHT, MAX_HEIGHT)
+        own.or(fit).unwrap_or(self.height).clamp(MIN_HEIGHT, MAX_HEIGHT)
     }
 
     /// Высота этого кадра: к нужной за `motion::LAYOUT`; спрятанная панель и панель, которую тянут за край, — сразу.
-    fn step_height(&mut self, ctx: &egui::Context) {
+    /// `pointer` — где мышь по высоте над панелью (точки от её верха), `None` — мышь не над ней. Ниже панель не становится,
+    /// пока мышь у нового низа или под ним: иначе мышь, нажавшая кнопку внизу карточки («Очистить», строку списка), окажется
+    /// под панелью, и та уедет. Смена полки — мышь на вкладке, высоко: не мешает.
+    fn step_height(&mut self, ctx: &egui::Context, pointer: Option<f32>) {
         let free = self.view == View::Cards && self.editing.is_none();
+        if self.editing.is_some() {
+            // Полки в правке переставляют и убирают: замеры по номерам полок больше не их.
+            self.fit.clear();
+        }
         if free {
             self.held = None;
         } else if self.held.is_none() {
-            self.held = Some(self.height);
+            self.held = Some(self.target_height());
         }
-        let target = self.target_height();
+        let mut target = self.target_height();
+        if target < self.height && pointer.is_some_and(|y| y > target - SHRINK_ROOM) {
+            target = self.height;
+        }
         let secs = if self.drawn <= 0.0 || self.grip.is_some() { 0.0 } else { motion::LAYOUT };
         self.height = Motion::of(ctx).value(ctx, egui::Id::new("panel-height"), target, secs);
     }
@@ -1097,7 +1110,9 @@ impl App {
 
         let t = Motion::of(ctx).toggle(ctx, egui::Id::new("panel-shown"), self.edge.shown, motion::ENTER);
         self.drawn = t;
-        self.step_height(ctx);
+        let inside = (left..=right).contains(&cursor.0) && (m.rect.top..=bottom).contains(&cursor.1);
+        let pointer = (t > 0.0 && inside).then(|| (cursor.1 - m.rect.top) as f32 / ppp);
+        self.step_height(ctx, pointer);
         self.set_no_activate(self.wants_no_activate());
         self.place(ctx, ppp, t);
 
@@ -1991,6 +2006,9 @@ impl App {
         ui.spacing_mut().item_spacing.x = spacing;
         // Колесо мыши над вкладками: вверх — предыдущая полка, вниз — следующая. Щелчок колеса — сразу полка; плавное
         // (тачпад, точное колесо) копится, пока не наберётся на щелчок (`TAB_WHEEL`).
+        if !strip.is_some_and(|s| ui.rect_contains_pointer(s)) {
+            self.tab_wheel = 0.0;
+        }
         if let Some(strip) = strip
             && ui.rect_contains_pointer(strip)
         {
@@ -3099,13 +3117,16 @@ impl App {
         if hot && self.held.is_none() {
             let t = texts::tr(self.lang());
             let own = self.settings.shelves.get(self.shelf).is_some_and(|s| s.height.is_some());
-            ui.painter().text(
-                Pos2::new(c.x + 30.0, b - 8.0),
-                egui::Align2::LEFT_CENTER,
-                if own { t.height_own } else { t.height_fit },
-                egui::FontId::proportional(11.5),
-                p.weak,
-            );
+            let font = egui::FontId::proportional(11.5);
+            let text = if own { t.height_own } else { t.height_fit };
+            let width = ui.painter().layout_no_wrap(text.to_string(), font.clone(), p.weak).size().x;
+            // Справа от чёрточки, а тесно (узкая панель: справа угловая ручка) — слева от неё.
+            let (at, align) = if c.x + 30.0 + width <= panel.right() - 24.0 {
+                (Pos2::new(c.x + 30.0, b - 8.0), egui::Align2::LEFT_CENTER)
+            } else {
+                (Pos2::new(c.x - 30.0, b - 8.0), egui::Align2::RIGHT_CENTER)
+            };
+            ui.painter().text(at, align, text, font, p.weak);
         }
     }
 
@@ -4056,7 +4077,8 @@ mod tests {
 
         fn frame(&mut self, events: Vec<Event>) {
             // Как `tick` перед кадром: высота панели, и окно (`screen_rect`) — её высоты.
-            self.app.step_height(&self.ctx);
+            let inside = Rect::from_min_size(Pos2::ZERO, self.size).contains(self.mouse);
+            self.app.step_height(&self.ctx, inside.then_some(self.mouse.y));
             self.size.y = self.app.height;
             let input = egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, self.size)),
@@ -4609,6 +4631,8 @@ mod tests {
         assert!(painted(&rig).contains("Своя высота"), "подпись у края");
         rig.double_click(edge);
         assert_eq!(rig.app.settings.shelves[0].height, None);
+        // Мышь у низа держит высоту (`step_height`): уводим её наверх.
+        rig.move_to(Pos2::new(20.0, 20.0));
         rig.frames(20);
         assert_eq!(Some(rig.app.height), rig.app.fit[0]);
         rig.move_to(Pos2::new(rig.size.x / 2.0 + 100.0, rig.size.y - 3.0));
@@ -4623,6 +4647,7 @@ mod tests {
             rig.app.settings.shelves[0].height = Some(480);
             rig.frames(20);
             rig.app.view = open;
+            rig.frames(2);
             rig.app.settings.shelves[0].height = Some(200);
             rig.frames(20);
             assert_eq!(rig.app.height, 480.0, "{}", open as u8);
@@ -4637,17 +4662,101 @@ mod tests {
         assert_eq!(rig.app.height, h, "правка полок");
     }
 
-    /// Своя высота полок — в `config.txt` строкой `shelf_heights=` по порядку полок; «по полке» — пусто.
+    /// Содержимое стало короче, а мышь у низа (нажали «Очистить», строку внизу списка): панель не становится ниже, пока мышь
+    /// там, — иначе мышь окажется под панелью и та уедет. Ушла мышь вверх — становится.
     #[test]
-    fn shelf_heights_survive_the_file() {
-        let mut s = Settings::default();
-        s.shelves[1].height = Some(470);
-        let text = config::format(&s);
-        assert!(text.contains("shelf_heights=,470,,\n"), "{text}");
-        let back = config::parse(&text);
-        let heights: Vec<Option<u16>> = back.shelves.iter().map(|s| s.height).collect();
-        assert_eq!(heights, [None, Some(470), None, None]);
-        assert!(!config::format(&Settings::default()).contains("shelf_heights"), "все по полке — строки нет");
+    fn the_panel_does_not_shrink_from_under_the_mouse() {
+        let zones = ["Tokyo Standard Time", "Eastern Standard Time"];
+        let mut rig = fitted(1300.0);
+        let day = day(&rig);
+        rig.app.settings.clocks =
+            (0..8).map(|i| config::Clock { name: format!("C{i}"), zone: zones[i % 2].into() }).collect();
+        rig.app.set_shelf(day);
+        rig.frames(30);
+        let tall = rig.app.height;
+        rig.move_to(Pos2::new(rig.size.x - 200.0, tall - 30.0));
+        rig.app.settings.clocks.truncate(1);
+        rig.frames(30);
+        assert_eq!(rig.app.height, tall, "мышь у низа — высота держится");
+        rig.move_to(Pos2::new(rig.size.x - 200.0, 30.0));
+        rig.frames(30);
+        assert!(rig.app.height < tall - 20.0, "мышь ушла вверх — ниже: {tall} → {}", rig.app.height);
+    }
+
+    /// Буфер без записей: полка «Под рукой» по полке не зависит от высоты, с которой на неё пришли.
+    #[test]
+    fn an_empty_clipboard_lets_its_shelf_shrink() {
+        let mut heights = Vec::new();
+        for from in [200u16, 500] {
+            let mut rig = fitted(1300.0);
+            let hand = rig.app.settings.shelves.iter().position(|s| s.name == "@hand").expect("полка «Под рукой»");
+            rig.app.settings.shelves[0].height = Some(from);
+            rig.frames(20);
+            rig.app.settings.shelves[0].height = None;
+            rig.app.set_shelf(hand);
+            rig.frames(40);
+            heights.push(rig.app.height);
+        }
+        assert!((heights[0] - heights[1]).abs() < 1.0, "{heights:?}");
+    }
+
+    /// Колесо над списком, что листается: сначала список, ряд стоит; с Shift — ряд.
+    #[test]
+    fn the_wheel_scrolls_a_long_list_before_the_row() {
+        let zones = ["Tokyo Standard Time", "Eastern Standard Time", "GMT Standard Time", "Russian Standard Time"];
+        let mut rig = Rig::sized(700.0);
+        let day = day(&rig);
+        rig.app.settings.shelves[day].cards = vec!["clocks".into(), "meetings".into(), "timers".into()];
+        rig.app.settings.clocks =
+            (0..12).map(|i| config::Clock { name: format!("C{i}"), zone: zones[i % 4].into() }).collect();
+        rig.app.set_shelf(day);
+        rig.settle();
+        let id = egui::Id::new(("anchor", "card-clocks"));
+        let before = rig.rect(id).left();
+        let over = rig.rect(id).center();
+        rig.wheel(over, -1.0, Modifiers::NONE);
+        assert_eq!(rig.rect(id).left(), before, "листается список, а не ряд");
+        rig.wheel(over, -1.0, Modifiers::SHIFT);
+        assert!(rig.rect(id).left() < before - 20.0, "Shift + колесо — ряд");
+    }
+
+    /// Колесо над вкладками: щелчок колеса — соседняя полка; плавное — когда накрутили на щелчок; ушла мышь — накопленное
+    /// забыто.
+    #[test]
+    fn the_wheel_over_the_tabs_switches_shelves() {
+        let point = |dy: f32| Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: Vec2::new(0.0, dy),
+            phase: egui::TouchPhase::Move,
+            modifiers: Modifiers::NONE,
+        };
+        let mut rig = Rig::new();
+        let tab = rig.tab(0).center();
+        rig.wheel(tab, -1.0, Modifiers::NONE);
+        assert_eq!(rig.app.shelf, 1, "щелчок колеса");
+        let tab = rig.tab(1).center();
+        rig.move_to(tab);
+        rig.frame(vec![point(-25.0)]);
+        assert_eq!(rig.app.shelf, 1, "мало");
+        rig.move_to(Pos2::new(tab.x, BODY_TOP + 60.0));
+        rig.move_to(tab);
+        rig.frame(vec![point(-25.0)]);
+        assert_eq!(rig.app.shelf, 1, "накопленное забыто, когда мышь ушла");
+        rig.frame(vec![point(-25.0)]);
+        rig.settle();
+        assert_eq!(rig.app.shelf, 2, "набралось на щелчок");
+    }
+
+    /// Настройки на узкой панели листаются вбок простым колесом.
+    #[test]
+    fn the_wheel_scrolls_the_settings_sideways() {
+        let mut rig = Rig::sized(700.0);
+        rig.app.view = View::Settings;
+        rig.settle();
+        let shapes = |rig: &Rig| painted(rig);
+        let before = shapes(&rig);
+        rig.wheel(Pos2::new(350.0, BODY_TOP + 20.0), -3.0, Modifiers::NONE);
+        assert_ne!(shapes(&rig), before, "колонки настроек не сдвинулись");
     }
 
     /// Колесо без Shift над рядом, что не помещается: над карточкой без прокрутки листает ряд.

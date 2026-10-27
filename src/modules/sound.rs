@@ -162,10 +162,8 @@ impl Sound {
             r
         });
         let mut changed = row.inner.changed();
-        let wheel: f32 = ui.input(|i| {
-            i.events.iter().map(|e| if let egui::Event::MouseWheel { delta, .. } = e { delta.y } else { 0.0 }).sum()
-        });
-        if wheel != 0.0 && ui.rect_contains_pointer(row.response.rect) {
+        let wheel = super::slider_wheel(ui, row.response.rect);
+        if wheel != 0.0 {
             pct = (pct + wheel.signum() * 5.0).clamp(0.0, 100.0);
             changed = true;
         }

@@ -270,6 +270,28 @@ impl ShowNoted for egui::ScrollArea {
     }
 }
 
+/// Тело карточки без прокрутки, что занимает место до низа (раскладка `bottom_up`): сколько в нём осталось пустого места —
+/// иначе панель решила бы, что карточке нужна вся высота, и полка не стала бы ниже.
+pub fn note_spare(ui: &Ui) {
+    let over = -ui.available_height().max(0.0);
+    ui.ctx().data_mut(|d| {
+        let v = d.get_temp_mut_or(overflow_id(), f32::NEG_INFINITY);
+        *v = v.max(over);
+    });
+}
+
+/// Колесо над ползунком (`rect` — его строка): шаг значения. Пока мышь над строкой, колесо целиком её — ни список карточки,
+/// ни ряд карточек его не получают (egui раздаёт плавное колесо на несколько кадров, поэтому гасим каждый кадр).
+pub fn slider_wheel(ui: &Ui, rect: egui::Rect) -> f32 {
+    if !ui.is_enabled() || !ui.rect_contains_pointer(rect) {
+        return 0.0;
+    }
+    ui.input_mut(|i| {
+        i.smooth_scroll_delta = egui::Vec2::ZERO;
+        i.events.iter().map(|e| if let egui::Event::MouseWheel { delta, .. } = e { delta.y } else { 0.0 }).sum()
+    })
+}
+
 /// Что записали `note_overflow` с прошлого вызова; не было прокрутки — `None`.
 pub fn take_overflow(ctx: &egui::Context) -> Option<f32> {
     ctx.data_mut(|d| d.remove_temp::<f32>(overflow_id())).filter(|v| v.is_finite())
@@ -501,5 +523,39 @@ mod tests {
         let mut unique = keys.clone();
         unique.dedup();
         assert_eq!(unique.len(), keys.len(), "ключи не повторяются");
+    }
+
+    /// Колесо над строкой ползунка — его: плавное колесо гасится, ни список, ни ряд его не получают; мимо строки — не трогает.
+    #[test]
+    fn the_slider_takes_the_whole_wheel() {
+        let ctx = egui::Context::default();
+        let row = egui::Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(200.0, 28.0));
+        let wheel = |at: egui::Pos2| egui::RawInput {
+            events: vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Line,
+                    delta: egui::vec2(0.0, -1.0),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            ..Default::default()
+        };
+        for (at, mine) in [(row.center(), true), (egui::pos2(400.0, 200.0), false)] {
+            let mut step = 0.0;
+            let mut left = egui::Vec2::ZERO;
+            let mut out = ctx.run_ui(wheel(at), |ui| {
+                step = slider_wheel(ui, row);
+                left = ui.input(|i| i.smooth_scroll_delta());
+            });
+            out.textures_delta.clear();
+            if mine {
+                assert_eq!((step, left), (-1.0, egui::Vec2::ZERO));
+            } else {
+                assert_eq!(step, 0.0);
+                assert_ne!(left, egui::Vec2::ZERO, "мимо строки колесо остаётся другим");
+            }
+        }
     }
 }

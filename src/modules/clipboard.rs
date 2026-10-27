@@ -1142,6 +1142,8 @@ impl Module for Clipboard {
                     if history_on {
                         w::note(ui, t.clipboard_empty);
                     }
+                    // Прокрутки нет, а `bottom_up` занимает карточку до низа: сколько пусто — для высоты по полке.
+                    super::note_spare(ui);
                     return;
                 }
                 egui::ScrollArea::vertical().id_salt("clip").auto_shrink([false, false]).show_noted(ui, |ui| {

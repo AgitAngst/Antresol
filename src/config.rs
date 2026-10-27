@@ -941,7 +941,7 @@ pub fn parse(text: &str) -> Settings {
             "shelf_heights" => {
                 shelf_heights = value
                     .split(',')
-                    .map(|h| h.trim().parse::<f32>().ok().map(|h| h.clamp(MIN_HEIGHT, MAX_HEIGHT).round() as u16))
+                    .map(|h| h.trim().parse::<u16>().ok().map(|h| h.clamp(MIN_HEIGHT as u16, MAX_HEIGHT as u16)))
                     .collect();
             }
             // Порядок из версий до 1.9: нужен только для перехода на полки, обратно не пишется.
@@ -1909,5 +1909,32 @@ mod tests {
         let b = parse_buttons("only name\n | x\nSite | https://example.com\n", env);
         assert_eq!(b.len(), 1);
         assert_eq!(b[0].icon, Icon::Broadcast);
+    }
+
+    /// Своя высота полок — `shelf_heights=` по порядку строк `shelf=`; «по полке» — пусто; все по полке — строки нет.
+    #[test]
+    fn shelf_heights_survive_the_file() {
+        let mut s = Settings::default();
+        s.shelves[1].height = Some(470);
+        let text = format(&s);
+        assert!(text.contains("shelf_heights=,470,,\n"), "{text}");
+        let heights: Vec<Option<u16>> = parse(&text).shelves.iter().map(|s| s.height).collect();
+        assert_eq!(heights, [None, Some(470), None, None]);
+        assert!(!format(&Settings::default()).contains("shelf_heights"));
+    }
+
+    /// Высота идёт за строкой `shelf=`: пропущенная полка (пустое имя) уносит свою, кривое значение и NaN — «по полке», лишнее —
+    /// в пределы; полка, что заводит сама программа («День» у старых полок), — по полке.
+    #[test]
+    fn shelf_heights_follow_their_lines() {
+        let s = parse(
+            "shelf=@av|display\nshelf=|tray\nshelf=@sys|quick\nshelf=@hand|clipboard\n\
+             shelf_heights=300,999,NaN,9000\n",
+        );
+        let got: Vec<(&str, Option<u16>)> = s.shelves.iter().map(|sh| (sh.name.as_str(), sh.height)).collect();
+        assert_eq!(got[0], ("@av", Some(300)));
+        assert_eq!(got[1], ("@sys", None), "у пустой полки было 999 — оно ушло с ней; NaN — по полке");
+        assert_eq!(got[2], ("@hand", Some(MAX_HEIGHT as u16)));
+        assert!(got[3..].iter().all(|(_, h)| h.is_none()), "добавленные программой — по полке: {got:?}");
     }
 }
