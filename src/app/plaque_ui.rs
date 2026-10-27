@@ -18,6 +18,12 @@ enum Hit {
     Drag,
 }
 
+/// Можно ли плашке быть на экране: панель спрятана совсем (`panel_shown` — выдвинута, `panel_t` — доля выезда в прошлом кадре, пока
+/// она ещё уезжает, окно принадлежит ей), на мониторе нет игры во весь экран (`fullscreen`) и программа не из «Не выезжать» (`excluded`).
+pub(super) fn may_show(panel_shown: bool, panel_t: f32, excluded: bool, fullscreen: bool) -> bool {
+    !panel_shown && panel_t <= 0.0 && !excluded && !fullscreen
+}
+
 impl App {
     /// Событие. Панель спрятана — плашка у края (очередь), выдвинута — уведомление набора, плашки нет.
     pub(super) fn post(&mut self, plaque: Plaque, now: Instant) {

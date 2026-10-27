@@ -53,7 +53,10 @@ pub struct Github {
     known: HashMap<String, Option<gh::Run>>,
     /// Плашки GitHub включены и репозитории есть, мы следим: иначе прежнее чтение сверять не с чем.
     watching: bool,
+    /// Когда последний раз читали (любое чтение): слежка для плашек не чаще раза в 5 минут.
     asked: Option<Instant>,
+    /// Когда последний раз читали целиком, с пулл-реквестами: карточка при открытии не ждёт короткого чтения слежки.
+    asked_full: Option<Instant>,
     /// Что спрашивали в последний раз: сменился список — спросить сразу.
     asked_for: Vec<String>,
     /// Пишут имя нового репозитория.
@@ -138,6 +141,9 @@ impl Github {
             s.busy = true;
         }
         self.asked = Some(Instant::now());
+        if full {
+            self.asked_full = self.asked;
+        }
         self.asked_for = self.wanted.clone();
         let (repos, token, shared) = (self.wanted.clone(), self.token.clone(), self.shared.clone());
         std::thread::spawn(move || {
@@ -221,7 +227,7 @@ impl Module for Github {
         if self.wanted.is_empty() && !sys::demo() {
             return;
         }
-        if self.asked.is_none_or(|at| at.elapsed() >= EVERY) || self.asked_for != self.wanted {
+        if self.asked_full.is_none_or(|at| at.elapsed() >= EVERY) || self.asked_for != self.wanted {
             self.fetch(true);
         }
     }
@@ -623,6 +629,34 @@ mod tests {
         assert_eq!(s.repos[0].open_prs, Some(3));
         assert_eq!(s.repos[0].run.as_ref().map(|r| r.id), Some(2), "а прогон — новый");
         assert_eq!(s.version, 2);
+    }
+
+    /// Слежка читает коротко (только прогоны), но карточка при открытии всё равно читает целиком — иначе до пяти минут не было бы
+    /// числа пулл-реквестов.
+    #[test]
+    fn opening_the_card_after_a_short_watch_read_still_reads_the_pull_requests() {
+        let mut github = Github::default();
+        let on = Settings { github: vec!["demo/site".into()], ..Settings::default() };
+        github.background(&on);
+        assert!(github.asked.is_some() && github.asked_full.is_none(), "слежка — короткое чтение");
+        let wait = |github: &Github, version: u64| {
+            let start = Instant::now();
+            while github.shared.lock().unwrap().version < version {
+                assert!(start.elapsed() < Duration::from_secs(3), "поток чтения не ответил");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            // Поток отпускает «занято» сразу после ответа.
+            while github.shared.lock().unwrap().busy {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        };
+        wait(&github, 1);
+        github.refresh("");
+        assert!(github.asked_full.is_some(), "карточка прочла целиком, не дожидаясь пяти минут");
+        wait(&github, 2);
+        // А целиком уже читали — повторно в ближайшие пять минут не читает.
+        github.refresh("");
+        assert_eq!(github.shared.lock().unwrap().version, 2);
     }
 
     /// Слежка идёт, только пока плашки включены и репозитории есть; в выдуманном мире — без сети, выдуманными прогонами.

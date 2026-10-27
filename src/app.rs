@@ -950,10 +950,11 @@ impl App {
             self.editing = None;
             self.renaming = None;
         }
-        // Плашкам можно быть на экране, пока панель спрятана, на мониторе не игра во весь экран и программа не из «Не выезжать»;
-        // мышь над плашкой — её время стоит. Полоска у края от этого не зависит: плашка видна и при выключенной полоске.
+        // Плашкам можно быть на экране, пока панель спрятана совсем, на мониторе не игра во весь экран и программа не из «Не
+        // выезжать»; мышь над плашкой — её время стоит. Полоска у края от этого не зависит: плашка видна и при выключенной полоске.
         let hovered = self.plaque_drawn.is_some() && plaque::over(cursor, &m.rect, ppp);
-        self.plaque_frame(ctx, now, hovered, !self.edge.shown && !excluded && !fullscreen);
+        let may = plaque_ui::may_show(self.edge.shown, self.drawn, excluded, fullscreen);
+        self.plaque_frame(ctx, now, hovered, may);
         self.strip_fill = self.edge.edge_progress(now, show_delay);
         self.playing = if self.settings.media_strip && self.strip_on && !self.edge.shown {
             self.modules.iter_mut().find_map(|m| m.playing(ctx))
@@ -6855,6 +6856,18 @@ mod tests {
         assert!(rig.app.plaque_drawn.is_none() && rig.app.plaques.current().is_some());
         rig.app.plaque_frame(&rig.ctx, Instant::now(), false, true);
         assert!(rig.app.plaque_drawn.is_some());
+    }
+
+    /// Плашке можно быть на экране, только когда панель спрятана совсем: ни выдвинута, ни ещё уезжает (иначе плашка вскочила бы
+    /// на место, пока окно ещё принадлежит панели), и на мониторе нет игры во весь экран и программы из «Не выезжать».
+    #[test]
+    fn a_plaque_may_show_only_when_the_panel_is_gone_and_nothing_forbids_it() {
+        use plaque_ui::may_show;
+        assert!(may_show(false, 0.0, false, false));
+        assert!(!may_show(true, 1.0, false, false), "панель выдвинута");
+        assert!(!may_show(false, 0.4, false, false), "панель ещё уезжает");
+        assert!(!may_show(false, 0.0, true, false), "программа из «Не выезжать»");
+        assert!(!may_show(false, 0.0, false, true), "игра во весь экран");
     }
 
     /// Заглушка с событием: отдаёт плашку один раз.
