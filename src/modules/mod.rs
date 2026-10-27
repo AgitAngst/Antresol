@@ -9,6 +9,7 @@ pub mod clocks;
 pub mod display;
 pub mod github;
 pub mod media;
+pub mod meetings;
 pub mod quick;
 pub mod resources;
 pub mod sound;
@@ -256,6 +257,8 @@ pub fn icon_of(key: &str) -> Icon {
         "quick" => Icon::Tiles,
         "tools" => Icon::Target,
         "clocks" => Icon::Clock,
+        // У «Встреч» значок свой (календаря в наборе нет): `card_header` рисует `meetings::paint_calendar`; здесь — запасной.
+        "meetings" => Icon::Clock,
         _ => Icon::Rocket,
     }
 }
@@ -272,6 +275,8 @@ pub fn card_header(ui: &mut Ui, key: &str, title: &str, meta: &str, hint: &str) 
         let (rect, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
         if key == "sound" {
             sound::paint_speaker(ui.painter(), rect, false, p.weak);
+        } else if key == "meetings" {
+            meetings::paint_calendar(ui.painter(), rect, p.weak);
         } else {
             anvil_ui::icons::paint(ui.painter(), rect, icon_of(key), p.weak);
         }
@@ -293,10 +298,11 @@ pub fn card_header(ui: &mut Ui, key: &str, title: &str, meta: &str, hint: &str) 
 
 /// Полки по умолчанию: ключ имени (`@…` — готовое, переводится при показе) и карточки по порядку. Здесь же —
 /// полный список знакомых панели карточек: чего тут нет, того на полках не бывает.
-pub const DEFAULT_SHELVES: [(&str, &[&str]); 3] = [
+pub const DEFAULT_SHELVES: [(&str, &[&str]); 4] = [
     ("@av", &["display", "brightness", "sound", "media"]),
-    ("@sys", &["quick", "resources", "bluetooth", "github", "clocks"]),
-    ("@hand", &["clipboard", "tray", "tools", "timers", "buttons"]),
+    ("@sys", &["quick", "resources", "bluetooth", "github"]),
+    ("@day", &["meetings", "timers", "clocks"]),
+    ("@hand", &["clipboard", "tray", "tools", "buttons"]),
 ];
 
 pub fn all() -> Vec<Box<dyn Module>> {
@@ -313,6 +319,7 @@ pub fn all() -> Vec<Box<dyn Module>> {
         Box::new(bluetooth::Bluetooth::default()),
         Box::new(timers::Timers::default()),
         Box::new(clocks::Clocks::default()),
+        Box::new(meetings::Meetings::default()),
         Box::new(github::Github::default()),
         Box::new(buttons::Buttons::default()),
     ]

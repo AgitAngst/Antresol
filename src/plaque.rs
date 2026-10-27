@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 
 use anvil_ui::Tone;
 
+use crate::ics::Service;
+
 /// Размер окна плашки, в точках: как плашка таймера была, но шире (значок, два текста, до двух кнопок).
 pub const WIDTH: f32 = 372.0;
 pub const HEIGHT: f32 = 48.0;
@@ -29,6 +31,8 @@ pub enum Kind {
     Usb,
     Github,
     Downloads,
+    /// Встреча из календаря начнётся через две минуты (2.5).
+    Meeting,
     Timer,
 }
 
@@ -43,6 +47,8 @@ pub enum Glyph {
     Branch,
     Download,
     Clock,
+    /// Календарь (2.5): своего значка в наборе нет — рисует `modules::meetings::paint_calendar`.
+    Calendar,
 }
 
 /// Слова плашки — ключ и числа, а не готовая строка: смена языка не требует повторной работы, а висящая долго плашка
@@ -89,10 +95,22 @@ pub enum Say {
     DownloadedMany(usize),
     /// «1,2 МБ · Загрузки» — размер в байтах.
     InDownloads(u64),
+    /// «Планёрка через 2 мин»: название встречи и когда она начнётся (секунды с 1970); сколько осталось, считается при показе.
+    MeetingIn {
+        title: String,
+        start: i64,
+    },
+    /// «10:30 · Zoom»: во сколько встреча (по часам ПК) и в какой она службе.
+    MeetingAt {
+        time: String,
+        service: Service,
+    },
     /// «Не получилось: report.pdf».
     Failed(String),
     // Кнопки.
     Open,
+    /// «Подключиться».
+    Join,
     /// «Показать в папке»: тот же текст, что у лотка.
     Reveal,
     Eject,
@@ -112,6 +130,7 @@ impl Say {
             | Say::BuildPassed(n)
             | Say::Downloaded(n)
             | Say::Failed(n) => Some(n),
+            Say::MeetingIn { title, .. } => Some(title),
             _ => None,
         }
     }
@@ -127,6 +146,7 @@ impl Say {
             Say::BuildPassed(_) => Say::BuildPassed(name),
             Say::Downloaded(_) => Say::Downloaded(name),
             Say::Failed(_) => Say::Failed(name),
+            Say::MeetingIn { start, .. } => Say::MeetingIn { title: name, start: *start },
             other => other.clone(),
         }
     }
@@ -204,6 +224,8 @@ pub struct Plaque {
     pub file: Option<PathBuf>,
     /// Привязана к предмету события («Флешка вставлена»): предмет пропал — плашка не нужна (`Queue::remove`).
     pub bound: bool,
+    /// Уходит сама в этот момент, даже важная и даже ждущая своей очереди (встреча началась — «Подключиться» уже не к месту).
+    pub expires: Option<Instant>,
 }
 
 impl Plaque {
@@ -220,6 +242,7 @@ impl Plaque {
             shelf: None,
             file: None,
             bound: false,
+            expires: None,
         }
     }
 
@@ -259,6 +282,12 @@ impl Plaque {
     /// Плашка о предмете, что может пропасть (флешка): пропал — она уходит.
     pub fn bound(mut self) -> Plaque {
         self.bound = true;
+        self
+    }
+
+    /// Плашка с сроком: в этот момент она уходит сама (встреча началась).
+    pub fn expires(mut self, at: Instant) -> Plaque {
+        self.expires = Some(at);
         self
     }
 
@@ -368,6 +397,12 @@ impl Queue {
     /// а время стоит); `idle` — окно уже убрало прежнюю плашку, можно ставить следующую. Следующая — первая из ждущих,
     /// которой можно (таймер обходит остальных, пока им нельзя).
     pub fn step(&mut self, now: Instant, hovered: bool, gate: Gate, idle: bool) {
+        // Плашка с сроком уходит в свой час — показанная или ждущая, мышь над ней или нет: событие уже прошло.
+        let gone = |p: &Plaque| p.expires.is_some_and(|at| now >= at);
+        if self.shown.as_ref().is_some_and(|s| s.held.is_none() && gone(&s.plaque)) {
+            self.shown = None;
+        }
+        self.wait.retain(|p| !gone(p));
         if let Some(s) = self.shown.as_mut() {
             let dt = now.saturating_duration_since(s.last);
             s.last = now;
@@ -491,7 +526,8 @@ pub fn over(cursor: (i32, i32), monitor: &crate::sys::monitor::PxRect, ppp: f32)
 
 /// Плашка с выдуманными данными для снимков (`ANTRESOL_VIEW=strip-plaque-<вид>`) и для документации: «bluetooth», «battery»,
 /// «usb», «ejecting» (та же флешка, кнопка «Извлечь» нажата), «eject», «busy», «gone», «github», «downloads»,
-/// «downloads-many», «downloads-danger» (файл, что при открытии запускается: «Показать в папке» вместо «Открыть»), «timer».
+/// «downloads-many», «downloads-danger» (файл, что при открытии запускается: «Показать в папке» вместо «Открыть»), «timer»,
+/// «meeting» (встреча через две минуты, Zoom).
 /// Имена — по языку кадра; настоящих устройств, дисков и файлов нет.
 pub fn sample(kind: &str, lang: anvil_ui::Lang) -> Option<Plaque> {
     use std::path::Path;
@@ -545,6 +581,7 @@ pub fn sample(kind: &str, lang: anvil_ui::Lang) -> Option<Plaque> {
             watch::download_plaque(downloads, &file("annual_report_2026_final_version.pdf.exe", 48_234_496))
         }
         "timer" => timers::done_plaque(Phase::Plain, None),
+        "meeting" => crate::modules::meetings::sample_plaque(lang),
         _ => return None,
     })
 }

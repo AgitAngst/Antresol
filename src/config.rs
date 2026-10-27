@@ -57,7 +57,7 @@ pub const MAX_SHELF_NAME: usize = 24;
 /// Полка — вкладка в шапке: имя и карточки по порядку (ключи модулей).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Shelf {
-    /// `@av`, `@sys`, `@hand` — имя по умолчанию (переводится при показе: смена языка файл не трогает);
+    /// `@av`, `@sys`, `@day`, `@hand` — имя по умолчанию (переводится при показе: смена языка файл не трогает);
     /// иначе — своё имя как есть.
     pub name: String,
     pub cards: Vec<String>,
@@ -71,7 +71,7 @@ impl Shelf {
     }
 }
 
-/// Полки по умолчанию: «Экран и звук», «Система», «Под рукой».
+/// Полки по умолчанию: «Экран и звук», «Система», «День», «Под рукой».
 pub fn default_shelves() -> Vec<Shelf> {
     crate::modules::DEFAULT_SHELVES
         .iter()
@@ -88,20 +88,21 @@ fn known_card(key: &str) -> bool {
 }
 
 /// Какие плашки событий показывать у края («Живые плашки» в карточке «Панель»). В файле — строка `plaques_off=` со списком
-/// выключенного (`bluetooth,usb,github,downloads`): нет строки или она пустая — включено всё. Список выключенного, а не
-/// включённого, чтобы новый вид событий (в 2.5 — «Встречи») у тех, кто уже сохранял настройки, был включён сам. Таймер
-/// выключить нельзя.
+/// выключенного (`bluetooth,usb,github,downloads,meetings`): нет строки или она пустая — включено всё. Список
+/// выключенного, а не включённого, чтобы новый вид событий (в 2.5 — «Встречи») у тех, кто уже сохранял настройки, был
+/// включён сам. Таймер выключить нельзя.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Plaques {
     pub bluetooth: bool,
     pub usb: bool,
     pub github: bool,
     pub downloads: bool,
+    pub meetings: bool,
 }
 
 impl Default for Plaques {
     fn default() -> Self {
-        Plaques { bluetooth: true, usb: true, github: true, downloads: true }
+        Plaques { bluetooth: true, usb: true, github: true, downloads: true, meetings: true }
     }
 }
 
@@ -110,7 +111,13 @@ impl Plaques {
     fn parse(value: &str) -> Plaques {
         let off = list(value);
         let has = |name: &str| off.iter().any(|v| v == name);
-        Plaques { bluetooth: !has("bluetooth"), usb: !has("usb"), github: !has("github"), downloads: !has("downloads") }
+        Plaques {
+            bluetooth: !has("bluetooth"),
+            usb: !has("usb"),
+            github: !has("github"),
+            downloads: !has("downloads"),
+            meetings: !has("meetings"),
+        }
     }
 
     /// Включить или выключить плашки этого вида (таймер — всегда включён).
@@ -121,6 +128,7 @@ impl Plaques {
             Kind::Usb => self.usb = on,
             Kind::Github => self.github = on,
             Kind::Downloads => self.downloads = on,
+            Kind::Meeting => self.meetings = on,
             Kind::Timer => {}
         }
     }
@@ -133,16 +141,22 @@ impl Plaques {
             Kind::Usb => self.usb,
             Kind::Github => self.github,
             Kind::Downloads => self.downloads,
+            Kind::Meeting => self.meetings,
             Kind::Timer => true,
         }
     }
 }
 
 impl std::fmt::Display for Plaques {
-    /// Только выключенное, по порядку: `bluetooth,usb,github,downloads`; всё включено — пусто.
+    /// Только выключенное, по порядку: `bluetooth,usb,github,downloads,meetings`; всё включено — пусто.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let all =
-            [("bluetooth", self.bluetooth), ("usb", self.usb), ("github", self.github), ("downloads", self.downloads)];
+        let all = [
+            ("bluetooth", self.bluetooth),
+            ("usb", self.usb),
+            ("github", self.github),
+            ("downloads", self.downloads),
+            ("meetings", self.meetings),
+        ];
         let off: Vec<&str> = all.iter().filter(|(_, on)| !*on).map(|(name, _)| *name).collect();
         f.write_str(&off.join(","))
     }
@@ -183,6 +197,9 @@ pub struct Settings {
     pub github: Vec<String>,
     /// Свой токен GitHub (вписывает владелец сам) — для закрытых репозиториев и большего лимита.
     pub github_token: Option<String>,
+    /// Календари для карточки «Встречи»: секретные ссылки `https://…` на файл .ics (`calendar=`, по строке на календарь, до
+    /// [`MAX_CALENDARS`]). Ссылка — секрет: живёт только здесь, в окне видна сокращённо (`ics::short_url`), в журнал не идёт.
+    pub calendars: Vec<String>,
     /// Любимые разрешения, до трёх на монитор, в порядке добавления.
     pub favorites: Vec<Res>,
     /// Какая частота была у разрешения в последний раз — её и ставим, когда на него переходят.
@@ -237,6 +254,9 @@ pub struct Clock {
 
 /// Сколько часов держим.
 pub const MAX_CLOCKS: usize = 8;
+
+/// Сколько календарей держим.
+pub const MAX_CALENDARS: usize = 5;
 
 // ─── Сцены (бывшие профили экрана) ──────────────────────────────────────────────
 
@@ -727,6 +747,7 @@ impl Default for Settings {
             hidden: Vec::new(),
             github: Vec::new(),
             github_token: None,
+            calendars: Vec::new(),
             favorites: Vec::new(),
             rates: Vec::new(),
             profiles: Vec::new(),
@@ -772,8 +793,9 @@ fn list(value: &str) -> Vec<String> {
 /// Раскладка из файла. `lines` — полки из `shelf=` (имя и ключи, как написаны), `legacy` — порядок из старого
 /// `modules=`. Незнакомые ключи и повторы отбрасываются (первая встреча побеждает); убранная карточка (`hidden`) на
 /// полке не стоит; знакомая карточка, которой нет ни на полке, ни среди убранных, встаёт в конец своей полки по
-/// умолчанию, а нет такой полки — в конец последней. Полок нет совсем (старый файл) — полки по умолчанию, порядок
-/// внутри них — по `legacy`: кто был раньше в ленте, тот раньше на полке.
+/// умолчанию; такой полки нет — новую («День» у настроенных до 2.5) заводят в конце, если полок меньше девяти, а у
+/// полок из 1.9 или при девяти полках карточка встаёт в конец последней. Полок нет совсем (старый файл) — полки по
+/// умолчанию, порядок внутри них — по `legacy`: кто был раньше в ленте, тот раньше на полке.
 fn build_shelves(lines: Vec<(String, Vec<String>)>, hidden: &[String], legacy: &[String]) -> Vec<Shelf> {
     let mut shelves: Vec<Shelf> = Vec::new();
     for (name, cards) in lines {
@@ -798,17 +820,33 @@ fn build_shelves(lines: Vec<(String, Vec<String>)>, hidden: &[String], legacy: &
             sh.cards.sort_by_key(|c| legacy.iter().position(|l| l == c).unwrap_or(usize::MAX));
         }
     }
+    // «Последняя» — последняя полка владельца: созданная ниже («День») ею не становится.
+    let last = shelves.len() - 1;
     for (home, cards) in crate::modules::DEFAULT_SHELVES {
         for key in cards {
             if hidden.iter().any(|h| h == key) || shelves.iter().any(|s| s.cards.iter().any(|c| c == key)) {
                 continue;
             }
-            let at = shelves.iter().position(|s| s.name == home).unwrap_or(shelves.len() - 1);
+            let at = match shelves.iter().position(|s| s.name == home) {
+                Some(at) => at,
+                // Полка, что появилась после 1.9 («День» в 2.5), у настроенных раньше полок есть не бывает: новая карточка
+                // заводит её в конце, а не встаёт в чужую (остальные карточки остаются где стояли). Полок уже девять —
+                // в последнюю.
+                None if !OLD_DEFAULT_SHELVES.contains(&home) && shelves.len() < MAX_SHELVES => {
+                    shelves.push(Shelf { name: home.to_string(), cards: Vec::new() });
+                    shelves.len() - 1
+                }
+                None => last,
+            };
             shelves[at].cards.push((*key).to_string());
         }
     }
     shelves
 }
+
+/// Полки по умолчанию, что были уже в 1.9: переименованную владельцем заново не заводим — карточка без своей полки встаёт в
+/// последнюю, как раньше.
+const OLD_DEFAULT_SHELVES: [&str; 3] = ["@av", "@sys", "@hand"];
 
 pub fn parse(text: &str) -> Settings {
     let mut s = Settings::default();
@@ -855,7 +893,7 @@ pub fn parse(text: &str) -> Settings {
                     }
                 }
             }
-            // Полка: `имя|ключ,ключ`; имя `@av`, `@sys`, `@hand` — готовое. Пустой список — пустая полка.
+            // Полка: `имя|ключ,ключ`; имя `@av`, `@sys`, `@day`, `@hand` — готовое. Пустой список — пустая полка.
             "shelf" => {
                 let (name, cards) = value.split_once('|').unwrap_or((value, ""));
                 shelf_lines.push((name.to_string(), list(cards)));
@@ -872,6 +910,15 @@ pub fn parse(text: &str) -> Settings {
                 s.github = list(value).into_iter().filter(|r| crate::modules::github::valid_repo(r)).collect();
             }
             "github_token" => s.github_token = Some(value.to_string()).filter(|t| !t.is_empty()),
+            // Только https (webcal:// читается как https://); негодная ссылка и лишние — пропускаются.
+            "calendar" => {
+                if let Some(url) = crate::ics::calendar_url(value)
+                    && s.calendars.len() < MAX_CALENDARS
+                    && !s.calendars.contains(&url)
+                {
+                    s.calendars.push(url);
+                }
+            }
             "tray" if !value.is_empty() && s.tray.len() < crate::modules::tray::KEEP => s.tray.push(value.to_string()),
             "favorite" => {
                 let words: Vec<&str> = value.split_whitespace().collect();
@@ -942,6 +989,9 @@ pub fn format(s: &Settings) -> String {
     out.push_str(&format!("hidden={}\ngithub={}\n", s.hidden.join(","), s.github.join(",")));
     if let Some(t) = &s.github_token {
         out.push_str(&format!("github_token={t}\n"));
+    }
+    for c in &s.calendars {
+        out.push_str(&format!("calendar={c}\n"));
     }
     for t in &s.tray {
         out.push_str(&format!("tray={t}\n"));
@@ -1141,14 +1191,19 @@ mod tests {
     #[test]
     fn plaques_are_all_on_by_default_and_the_file_lists_what_is_off() {
         use crate::plaque::Kind;
-        let none = Plaques { bluetooth: false, usb: false, github: false, downloads: false };
+        let none = Plaques { bluetooth: false, usb: false, github: false, downloads: false, meetings: false };
         assert_eq!(parse("").plaques, Plaques::default());
         assert_eq!(parse("plaques_off=\n").plaques, Plaques::default(), "пустая строка — выключенного нет");
         assert_eq!(
             parse("plaques_off=usb, github\n").plaques,
-            Plaques { bluetooth: true, usb: false, github: false, downloads: true }
+            Plaques { bluetooth: true, usb: false, github: false, downloads: true, meetings: true }
         );
-        assert_eq!(parse("plaques_off=bluetooth,usb,github,downloads\n").plaques, none);
+        assert_eq!(parse("plaques_off=bluetooth,usb,github,downloads,meetings\n").plaques, none);
+        // «Встречи» (2.5): в старом файле строки нет — вид включён сам; выключенный пишется и читается обратно.
+        assert!(parse("plaques_off=usb\n").plaques.meetings);
+        let no_meetings = Settings { plaques: Plaques { meetings: false, ..Plaques::default() }, ..Default::default() };
+        assert!(format(&no_meetings).contains("\nplaques_off=meetings\n"));
+        assert!(!parse(&format(&no_meetings)).plaques.meetings);
         assert_eq!(
             parse("plaques_off=usb,what,usb\n").plaques,
             Plaques { usb: false, ..Plaques::default() },
@@ -1532,11 +1587,12 @@ mod tests {
     #[test]
     fn default_shelves_round_trip() {
         let s = Settings::default();
-        assert_eq!(names(&s), ["@av", "@sys", "@hand"]);
+        assert_eq!(names(&s), ["@av", "@sys", "@day", "@hand"]);
         let text = format(&s);
         assert!(text.contains("shelf=@av|display,brightness,sound,media\n"));
-        assert!(text.contains("shelf=@sys|quick,resources,bluetooth,github,clocks\n"));
-        assert!(text.contains("shelf=@hand|clipboard,tray,tools,timers,buttons\n"));
+        assert!(text.contains("shelf=@sys|quick,resources,bluetooth,github\n"));
+        assert!(text.contains("shelf=@day|meetings,timers,clocks\n"));
+        assert!(text.contains("shelf=@hand|clipboard,tray,tools,buttons\n"));
         assert!(!text.contains("modules="), "старый порядок больше не пишется");
         assert_eq!(parse(&text), s);
         assert_eq!(parse("").shelves, default_shelves(), "пустой файл — полки по умолчанию");
@@ -1548,9 +1604,9 @@ mod tests {
         let mut s = Settings::default();
         assert!(s.place_card("media", 1, None));
         assert!(s.hide_card("tools"));
-        assert_eq!(s.add_shelf(Lang::Ru), Some(3));
-        assert!(s.rename_shelf(3, "Дом|Работа"));
-        assert_eq!(s.shelves[3], Shelf { name: "Дом Работа".into(), cards: Vec::new() });
+        assert_eq!(s.add_shelf(Lang::Ru), Some(4));
+        assert!(s.rename_shelf(4, "Дом|Работа"));
+        assert_eq!(s.shelves[4], Shelf { name: "Дом Работа".into(), cards: Vec::new() });
         let text = format(&s);
         assert!(text.contains("shelf=Дом Работа|\n"), "пустая полка остаётся");
         assert!(text.contains("hidden=tools\n"));
@@ -1562,9 +1618,11 @@ mod tests {
     fn old_file_moves_to_shelves() {
         // Сценарий из спецификации: «Медиа» убрана, «Кнопки» стояли раньше «Буфера обмена».
         let s = parse("modules=buttons,clipboard,timers,tray\nhidden=media,snippets\n");
-        assert_eq!(names(&s), ["@av", "@sys", "@hand"]);
+        assert_eq!(names(&s), ["@av", "@sys", "@day", "@hand"]);
         assert_eq!(s.shelves[0].cards, ["display", "brightness", "sound"]);
-        assert_eq!(s.shelves[2].cards, ["buttons", "clipboard", "timers", "tray", "tools"]);
+        // «Таймеры» были в ленте, «Встреч» в ней нет (новая карточка) — она после названных.
+        assert_eq!(s.shelves[2].cards, ["timers", "meetings", "clocks"]);
+        assert_eq!(s.shelves[3].cards, ["buttons", "clipboard", "tray", "tools"]);
         assert_eq!(s.hidden, ["media"], "«Заготовки» из старого файла пропущены");
         assert_whole(&s);
         let text = format(&s);
@@ -1576,8 +1634,9 @@ mod tests {
         assert_eq!(parse("modules=\nhidden=\n").shelves, default_shelves());
         let s = parse(full);
         assert_eq!(s.shelves[0].cards, ["display", "brightness", "media", "sound"]);
-        assert_eq!(s.shelves[1].cards, ["quick", "resources", "bluetooth", "clocks", "github"]);
-        assert_eq!(s.shelves[2].cards, ["clipboard", "tray", "tools", "timers", "buttons"]);
+        assert_eq!(s.shelves[1].cards, ["quick", "resources", "bluetooth", "github"]);
+        assert_eq!(s.shelves[2].cards, ["timers", "clocks", "meetings"]);
+        assert_eq!(s.shelves[3].cards, ["clipboard", "tray", "tools", "buttons"]);
         assert!(s.hidden.is_empty());
     }
 
@@ -1587,7 +1646,7 @@ mod tests {
         // закреплённое лежит в «Буфере обмена», и он возвращается домой.
         let s = parse("snippet=Спасибо\nhidden=clipboard\n");
         assert!(s.hidden.is_empty());
-        assert_eq!(s.shelf_of("clipboard"), Some(2));
+        assert_eq!(s.shelf_of("clipboard"), Some(3));
         assert_eq!(s.pinned, ["Спасибо"]);
         // Убраны обе — так и остаётся.
         let s = parse("hidden=clipboard,snippets\n");
@@ -1606,26 +1665,16 @@ mod tests {
         let text =
             "shelf=A|display,display,nope,media\nshelf=B|media,quick, bluetooth\nshelf=|tray\nhidden=github,nope\n";
         let s = parse(text);
-        assert_eq!(names(&s), ["A", "B"], "полка без имени пропущена");
+        assert_eq!(names(&s), ["A", "B", "@day"], "полка без имени пропущена; «День» завёл «Встречи»");
         assert_eq!(s.shelves[0].cards, ["display", "media"], "повтор и незнакомый ключ отброшены");
         assert_eq!(s.hidden, ["github"], "незнакомый ключ среди убранных отброшен");
-        // Не названные нигде карточки встают в конец последней полки (родных `@…` здесь нет), в порядке программы.
+        // Не названные нигде карточки встают в конец последней полки владельца (родных `@…` у неё нет), в порядке программы;
+        // карточки «Дня» — на новой полке «День», а не на последней.
         assert_eq!(
             s.shelves[1].cards,
-            [
-                "quick",
-                "bluetooth",
-                "brightness",
-                "sound",
-                "resources",
-                "clocks",
-                "clipboard",
-                "tray",
-                "tools",
-                "timers",
-                "buttons"
-            ]
+            ["quick", "bluetooth", "brightness", "sound", "resources", "clipboard", "tray", "tools", "buttons"]
         );
+        assert_eq!(s.shelves[2].cards, ["meetings", "timers", "clocks"]);
         assert_whole(&s);
         // Убранная и поставленная на полку одновременно — убрана.
         let s = parse("shelf=A|display,media\nhidden=media\n");
@@ -1638,18 +1687,61 @@ mod tests {
 
     #[test]
     fn new_card_goes_to_its_shelf() {
-        // «Часы», «Кнопки» и «Медиа» в этом файле нет (новые для него): «Часы» и «Кнопки» — домой, а у «Медиа» дома
-        // нет (первая полка названа по-своему) — в конец последней.
+        // «Часы», «Кнопки», «Медиа» и «Встречи» в этом файле нет (новые для него): «Кнопки» — домой; у «Медиа» дома нет
+        // (первая полка названа по-своему, а `@av` была в 1.9 — заново её не заводим) — в конец последней; у «Часов» и
+        // «Встреч» дом — «День»: такой полки в файле нет, и она заводится в конце, а не занимает чужую.
         let text = "shelf=Моя|display,brightness,sound\nshelf=@sys|quick,resources,bluetooth,github\n\
                     shelf=@hand|clipboard,tray,tools,timers\n";
         let s = parse(text);
         assert_eq!(s.shelves[0].cards, ["display", "brightness", "sound"]);
-        assert_eq!(s.shelves[1].cards, ["quick", "resources", "bluetooth", "github", "clocks"]);
+        assert_eq!(s.shelves[1].cards, ["quick", "resources", "bluetooth", "github"]);
         assert_eq!(s.shelves[2].cards, ["clipboard", "tray", "tools", "timers", "media", "buttons"]);
+        assert_eq!(s.shelves[3], Shelf { name: "@day".into(), cards: vec!["meetings".into(), "clocks".into()] });
         assert_whole(&s);
         // Убранная новой не считается и сама не возвращается.
         let s = parse("shelf=@sys|quick\nhidden=clocks\n");
         assert!(s.is_hidden("clocks") && s.shelf_of("clocks").is_none());
+    }
+
+    /// Переход 1.9–2.4 → 2.5: у настроенных полок появляется «День» с одной новой карточкой «Встречи», остальное не
+    /// двигается; убранную карточку, девять полок и уже заведённый «День» новая карточка уважает.
+    #[test]
+    fn meetings_arrive_on_a_new_today_shelf_and_nothing_else_moves() {
+        // Файл 2.4, где полки перестроили: «Часы» ушли на «Под рукой», а «Таймеры» — на «Систему».
+        let old = "shelf=@av|display,brightness,sound,media\nshelf=@sys|quick,resources,bluetooth,github,timers\n\
+                   shelf=@hand|clipboard,tray,tools,clocks,buttons\nhidden=\ngithub=\n";
+        let s = parse(old);
+        assert_eq!(names(&s), ["@av", "@sys", "@hand", "@day"], "«День» — в конце, а не между чужими");
+        assert_eq!(s.shelves[0].cards, ["display", "brightness", "sound", "media"]);
+        assert_eq!(s.shelves[1].cards, ["quick", "resources", "bluetooth", "github", "timers"]);
+        assert_eq!(s.shelves[2].cards, ["clipboard", "tray", "tools", "clocks", "buttons"]);
+        assert_eq!(s.shelves[3].cards, ["meetings"], "на новой полке только новая карточка");
+        assert_whole(&s);
+        // После первого сохранения «День» уже в файле, и следующее чтение его не двоит.
+        let text = format(&s);
+        assert!(text.contains("shelf=@day|meetings\n"));
+        assert_eq!(parse(&text), s);
+        // «Встречи» убрали (ручной файл, `hidden=`) — полка не заводится и карточка не возвращается.
+        let s = parse("shelf=@sys|timers,clocks\nhidden=meetings\n");
+        assert!(s.is_hidden("meetings") && s.shelf_of("meetings").is_none());
+        assert!(
+            !names(&s).contains(&"@day"),
+            "незачем заводить пустую полку: все её карточки уже где-то стоят или убраны"
+        );
+        // «День» уже есть — карточка встаёт в него.
+        let s = parse("shelf=@day|timers,clocks\n");
+        assert_eq!(s.shelf_of("meetings"), s.shelf_of("timers"));
+        assert_eq!(
+            s.shelves[s.shelf_of("meetings").unwrap()].cards[..2],
+            ["timers", "clocks"],
+            "прежние на своих местах"
+        );
+        // Полок уже девять — новую не заводим: «Встречи» в конец последней.
+        let nine: String = (0..9).map(|i| format!("shelf=P{i}|display\n")).collect();
+        let s = parse(&nine);
+        assert_eq!(s.shelves.len(), MAX_SHELVES);
+        assert_eq!(s.shelf_of("meetings"), Some(MAX_SHELVES - 1));
+        assert_whole(&s);
     }
 
     #[test]
@@ -1683,24 +1775,24 @@ mod tests {
     #[test]
     fn add_rename_remove_shelves() {
         let mut s = Settings::default();
-        assert_eq!(s.add_shelf(Lang::Ru), Some(3));
         assert_eq!(s.add_shelf(Lang::Ru), Some(4));
-        assert_eq!((s.shelves[3].name.as_str(), s.shelves[4].name.as_str()), ("Полка 1", "Полка 2"));
+        assert_eq!(s.add_shelf(Lang::Ru), Some(5));
+        assert_eq!((s.shelves[4].name.as_str(), s.shelves[5].name.as_str()), ("Полка 1", "Полка 2"));
         // «Полка 1» освободилась — следующая берёт её номер.
-        assert!(s.rename_shelf(3, "Работа"));
-        assert_eq!(s.add_shelf(Lang::En), Some(5));
-        assert_eq!(s.shelves[5].name, "Shelf 1");
-        assert_eq!(s.add_shelf(Lang::Ru), Some(6));
-        assert_eq!(s.shelves[6].name, "Полка 1");
+        assert!(s.rename_shelf(4, "Работа"));
+        assert_eq!(s.add_shelf(Lang::En), Some(6));
+        assert_eq!(s.shelves[6].name, "Shelf 1");
+        assert_eq!(s.add_shelf(Lang::Ru), Some(7));
+        assert_eq!(s.shelves[7].name, "Полка 1");
         // Пустое имя и то же самое — ничего; больше 24 знаков — обрезается.
-        assert!(!s.rename_shelf(3, "  ") && !s.rename_shelf(3, "Работа") && !s.rename_shelf(9, "x"));
-        assert!(s.rename_shelf(4, &"я".repeat(40)));
-        assert_eq!(s.shelves[4].name.chars().count(), MAX_SHELF_NAME);
+        assert!(!s.rename_shelf(4, "  ") && !s.rename_shelf(4, "Работа") && !s.rename_shelf(9, "x"));
+        assert!(s.rename_shelf(5, &"я".repeat(40)));
+        assert_eq!(s.shelves[5].name.chars().count(), MAX_SHELF_NAME);
         // Убрали полку — её карточки в убранных, остальные полки целы.
-        assert!(s.place_card("tray", 3, None) && s.place_card("tools", 3, None));
-        assert!(s.remove_shelf(3));
+        assert!(s.place_card("tray", 4, None) && s.place_card("tools", 4, None));
+        assert!(s.remove_shelf(4));
         assert_eq!(s.hidden, ["tray", "tools"]);
-        assert_eq!(s.shelves.len(), 6);
+        assert_eq!(s.shelves.len(), 7);
         assert_whole(&s);
         // Больше девяти не заводится.
         while s.add_shelf(Lang::En).is_some() {}
@@ -1708,6 +1800,9 @@ mod tests {
         assert_eq!(s.add_shelf(Lang::En), None);
         // Последнюю полку убрать нельзя.
         let mut one = parse("shelf=Одна|\n");
+        while one.shelves.len() > 1 {
+            assert!(one.remove_shelf(1));
+        }
         assert_eq!(one.shelves.len(), 1);
         assert!(!one.remove_shelf(0));
         assert_whole(&one);

@@ -328,7 +328,7 @@ impl App {
     }
 
     /// «Живые плашки» в настройках: по чипу на вид событий — включён (подложка акцента) или выключен; чипы переносятся на
-    /// новую строку, когда не помещаются (в 2.5 к ним добавятся «Встречи»). Таймера среди них нет — его плашка всегда.
+    /// новую строку, когда не помещаются. Таймера среди них нет — его плашка всегда.
     pub(super) fn plaque_chips(&mut self, ui: &mut Ui) {
         use plaque::Kind;
         let t = texts::tr(self.lang());
@@ -339,6 +339,7 @@ impl App {
                 (Kind::Usb, t.plaques_usb, "usb"),
                 (Kind::Github, t.github, "github"),
                 (Kind::Downloads, t.plaques_downloads, "downloads"),
+                (Kind::Meeting, t.meetings, "meetings"),
             ] {
                 let on = self.settings.plaques.on(kind);
                 let r = modules::chip(ui, ("plaque-chip", key), on, label, None);
@@ -513,6 +514,7 @@ fn paint_glyph(painter: &Painter, rect: Rect, glyph: Glyph, color: Color32) {
         Glyph::Branch => kit(Icon::Branch),
         Glyph::Download => kit(Icon::Download),
         Glyph::Clock => kit(Icon::Clock),
+        Glyph::Calendar => modules::meetings::paint_calendar(painter, rect, color),
         Glyph::Headphones | Glyph::Usb | Glyph::Battery => {
             let scale = rect.width().min(rect.height()) / 24.0;
             let origin = rect.center() - Vec2::splat(12.0) * scale;

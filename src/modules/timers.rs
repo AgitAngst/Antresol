@@ -485,7 +485,13 @@ mod tests {
         assert!(timers.events(&Settings::default()).is_empty(), "второй раз то же не отдаётся");
         // Таймер выключить нельзя: событий нет только потому, что их нет, а не из-за настроек.
         let off = Settings {
-            plaques: crate::config::Plaques { bluetooth: false, usb: false, github: false, downloads: false },
+            plaques: crate::config::Plaques {
+                bluetooth: false,
+                usb: false,
+                github: false,
+                downloads: false,
+                meetings: false,
+            },
             ..Settings::default()
         };
         timers.done.push((Phase::Plain, None));

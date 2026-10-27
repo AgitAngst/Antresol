@@ -3995,12 +3995,11 @@ mod tests {
     fn edit_veil_blocks_clicks_to_modules() {
         // Первая кнопка «Таймеров» («5 мин»): щелчок заводит таймер, и модуль просит кадры (`ticking`).
         let ticking = |rig: &Rig| rig.app.modules.iter().any(|m| m.ticking());
-        // Контроль: вне правки щелчок кнопку нажимает (пять карточек поровну; «Таймеры» — четвёртая).
+        // Контроль: вне правки щелчок кнопку нажимает («День»: «Встречи» полторы доли, «Таймеры» и «Часы» по одной).
         let mut rig = Rig::new();
         rig.app.set_shelf(2);
         rig.settle();
-        let width = (SIZE.x - 24.0 - 4.0 * GAP) / 5.0;
-        let timers = 12.0 + 3.0 * (width + GAP);
+        let timers = 12.0 + (SIZE.x - 24.0 - 2.0 * GAP) * 1.5 / 3.5 + GAP;
         assert!(!ticking(&rig));
         rig.click(Pos2::new(timers + 16.0 + 40.0, BODY_TOP + 70.0));
         assert!(ticking(&rig), "вне правки кнопка работает — иначе проверка ниже ничего не стоит");
@@ -4437,12 +4436,12 @@ mod tests {
     #[test]
     fn edit_keyboard_does_not_reach_modules() {
         let ticking = |rig: &Rig| rig.app.modules.iter().any(|m| m.ticking());
-        // Контроль: вне правки Tab доводит фокус до кнопки «Таймеров» (четвёртая карточка третьей полки), Enter заводит таймер.
+        // Контроль: вне правки Tab доводит фокус до кнопки «Таймеров» (вторая карточка полки «День»), Enter заводит таймер.
         let mut rig = Rig::new();
         rig.app.set_shelf(2);
         rig.settle();
-        let width = (SIZE.x - 24.0 - 4.0 * GAP) / 5.0;
-        let timers = Rect::from_min_size(Pos2::new(12.0 + 3.0 * (width + GAP), BODY_TOP), Vec2::new(width, 280.0));
+        let width = (SIZE.x - 24.0 - 2.0 * GAP) / 3.5;
+        let timers = Rect::from_min_size(Pos2::new(12.0 + 1.5 * width + GAP, BODY_TOP), Vec2::new(width, 280.0));
         let content = Rect::from_min_max(timers.min + Vec2::new(0.0, 50.0), timers.max);
         let mut reached = false;
         for _ in 0..80 {
@@ -4505,9 +4504,9 @@ mod tests {
         rig.key(Key::Tab, Modifiers { shift: true, ..CTRL });
         assert_eq!(rig.app.shelf, 0);
         rig.key(Key::Tab, Modifiers { shift: true, ..CTRL });
-        assert_eq!(rig.app.shelf, 2, "по кругу");
+        assert_eq!(rig.app.shelf, 3, "по кругу: с первой — на четвёртую («Под рукой»)");
         rig.key(Key::Num9, CTRL);
-        assert_eq!(rig.app.shelf, 2, "нет такой полки — остаётся");
+        assert_eq!(rig.app.shelf, 3, "нет такой полки — остаётся");
     }
 
     #[test]
@@ -4541,12 +4540,13 @@ mod tests {
         rig.settle();
         let before = rig.app.settings.shelves[2].cards.clone();
         rig.click(rig.rect(egui::Id::new(("shelf-close", 2))).center());
-        assert_eq!(rig.app.settings.shelves.len(), 2);
+        assert_eq!(rig.app.settings.shelves.len(), 3);
         for card in &before {
             assert!(rig.app.settings.is_hidden(card), "{card} ушла в «Убранные»");
         }
-        assert_eq!(rig.app.shelf, 1, "открытой стала соседняя");
+        assert_eq!(rig.app.shelf, 2, "открытой стала та, что встала на её место");
         // Единственную полку убрать нельзя: крестика нет.
+        rig.app.settings.remove_shelf(1);
         rig.app.settings.remove_shelf(1);
         rig.settle();
         assert!(rig.ctx.read_response(egui::Id::new(("shelf-close", 0))).is_none());
@@ -4556,10 +4556,10 @@ mod tests {
     fn empty_shelf_offers_editing() {
         let mut rig = Rig::new();
         rig.app.settings.shelves.push(config::Shelf { name: "Пусто".into(), cards: Vec::new() });
-        rig.app.set_shelf(3);
+        rig.app.set_shelf(4);
         rig.settle();
         assert!(rig.app.editing.is_none());
-        assert!(rig.app.shelf_modules(3).is_empty());
+        assert!(rig.app.shelf_modules(4).is_empty());
     }
 
     // ─── Сцены ──────────────────────────────────────────────────────────────
@@ -5423,7 +5423,7 @@ mod tests {
         let system = config::SceneSystem { wifi: Some(false), bright: Some(30), ..Default::default() };
         let mut rig = scene_rig(dev, vec![only("Trip", system)]);
         let t = texts::tr(rig.app.lang());
-        // Открыта третья полка («Под рукой»): ни «Быстрых настроек», ни «Яркости» на ней нет.
+        // Открыта третья полка («День»): ни «Быстрых настроек», ни «Яркости» на ней нет.
         rig.app.set_shelf(2);
         rig.settle();
         assert!(rig.app.shelf_modules(2).iter().all(|&m| !["quick", "brightness"].contains(&rig.app.modules[m].key())));
@@ -5817,7 +5817,7 @@ mod tests {
         rig.type_text("чай 5");
         let found = rig.app.found();
         assert_eq!(found.hits[0].title, "Таймер «чай» на 5 мин");
-        assert_eq!(found.hits[0].sub, "Таймеры · Под рукой");
+        assert_eq!(found.hits[0].sub, "Таймеры · День");
         rig.key(Key::Enter, NO_KEYS);
         assert!(rig.app.view == View::Cards);
         let (t, lang) = (texts::tr(Lang::Ru), Lang::Ru);
@@ -5949,7 +5949,7 @@ mod tests {
         rig.type_text("shelf");
         assert_eq!(
             titles(&rig),
-            ["Open the “System” shelf", "Open the “At hand” shelf"],
+            ["Open the “System” shelf", "Open the “Today” shelf", "Open the “At hand” shelf"],
             "открытую полку не предлагаем"
         );
         rig.key(Key::Enter, NO_KEYS);
@@ -5976,15 +5976,15 @@ mod tests {
         let mut rig = search_rig(r"\\.\TEST-SEARCH-SHELVES", Lang::En);
         let place_of = |rig: &Rig, id: &str| rig.app.all_actions().into_iter().find(|a| a.id == id).map(|a| a.place);
         assert_eq!(place_of(&rig, "media:next").as_deref(), Some("Media · Display & sound"));
-        assert_eq!(place_of(&rig, "timers:min:5").as_deref(), Some("Timers · At hand"));
+        assert_eq!(place_of(&rig, "timers:min:5").as_deref(), Some("Timers · Today"));
         assert_eq!(place_of(&rig, "bluetooth:settings").as_deref(), Some("Bluetooth · System"));
         // Убрали карточку с полок — её действий нет; вернули — есть.
         rig.app.settings.hide_card("media");
         assert!(place_of(&rig, "media:next").is_none());
-        rig.app.settings.place_card("media", 2, None);
+        rig.app.settings.place_card("media", 3, None);
         assert_eq!(place_of(&rig, "media:next").as_deref(), Some("Media · At hand"));
         // Имя своей полки в месте — как на вкладке.
-        rig.app.settings.rename_shelf(2, "Мой стол");
+        rig.app.settings.rename_shelf(3, "Мой стол");
         assert_eq!(place_of(&rig, "media:next").as_deref(), Some("Media · Мой стол"));
     }
 
@@ -6018,10 +6018,10 @@ mod tests {
         rig.app.pointer_over = true;
         let grey = pick(&rig);
         assert!(!grey.enabled && grey.reason.as_deref() == Some(t.search_pointer));
-        // «Добавить пояс» открывает поиск пояса в карточке — и полку, где она: «Часы» на «Системе».
+        // «Добавить пояс» открывает поиск пояса в карточке — и полку, где она: «Часы» на «Дне».
         assert_eq!(rig.app.shelf, 0);
         rig.app.run_action("clocks:add");
-        assert_eq!(rig.app.shelf, 1, "карточка «Часы» должна быть на виду");
+        assert_eq!(rig.app.shelf, 2, "карточка «Часы» должна быть на виду");
         assert!(rig.app.typing_here());
     }
 
@@ -6344,10 +6344,10 @@ mod tests {
     fn ctrl_k_and_letters_stay_in_a_text_field_of_a_card() {
         let mut rig = Rig::new();
         rig.app.edge.shown = true;
-        // GitHub — на «Системе», четвёртая карточка из пяти; поле «owner/repo» — в нижней строке карточки.
+        // GitHub — на «Системе», четвёртая карточка из четырёх; поле «owner/repo» — в нижней строке карточки.
         rig.app.set_shelf(1);
         rig.settle();
-        let x = 12.0 + 3.0 * ((SIZE.x - 24.0 - 4.0 * GAP) / 5.0 + GAP) + 60.0;
+        let x = 12.0 + 3.0 * ((SIZE.x - 24.0 - 3.0 * GAP) / 4.0 + GAP) + 60.0;
         let mut focused = false;
         for y in (120..330).step_by(4) {
             rig.click(Pos2::new(x, y as f32));
@@ -7364,7 +7364,7 @@ mod tests {
         rig.settle();
         let text = painted(&rig);
         // Подпись раздела набор рисует заглавными.
-        for word in ["LIVE PLAQUES", "Bluetooth", "USB drives", "GitHub", "Downloads"] {
+        for word in ["LIVE PLAQUES", "Bluetooth", "USB drives", "GitHub", "Downloads", "Meetings"] {
             assert!(text.contains(word), "нет «{word}»");
         }
         assert!(!text.contains("Timer"), "у таймера чипа нет");
@@ -7376,12 +7376,19 @@ mod tests {
         rig.click_anchor("plaque-chip-downloads");
         assert_eq!(
             rig.app.settings.plaques,
-            config::Plaques { bluetooth: true, usb: false, github: true, downloads: false }
+            config::Plaques { bluetooth: true, usb: false, github: true, downloads: false, meetings: true }
         );
         // Выключили и включили обратно.
         rig.click_anchor("plaque-chip-usb");
         assert!(rig.app.settings.plaques.usb);
         assert!(rig.app.settings.plaques.on(plaque::Kind::Timer));
+        // «Встречи» (2.5) — пятый чип: выключает плашки встреч, и только их.
+        assert!(rig.app.settings.plaques.on(plaque::Kind::Meeting));
+        rig.click_anchor("plaque-chip-meetings");
+        assert!(!rig.app.settings.plaques.on(plaque::Kind::Meeting) && rig.app.settings.plaques.usb);
+        assert!(config::format(&rig.app.settings).contains("\nplaques_off=downloads,meetings\n"));
+        rig.click_anchor("plaque-chip-meetings");
+        assert!(rig.app.settings.plaques.on(plaque::Kind::Meeting));
     }
 
     /// Чипы переносятся на новую строку, когда в карточке тесно, а не обрезаются и не уходят за край.
@@ -7393,12 +7400,282 @@ mod tests {
         rig.app.settings.common.language = Lang::Ru;
         rig.app.view = View::Settings;
         rig.settle();
-        let chips: Vec<Rect> = ["bluetooth", "usb", "github", "downloads"]
+        let chips: Vec<Rect> = ["bluetooth", "usb", "github", "downloads", "meetings"]
             .iter()
             .map(|k| rig.anchor(&format!("plaque-chip-{k}")))
             .collect();
         let card_right = 930.0 / 3.0;
         assert!(chips.iter().all(|c| c.right() <= card_right + 0.5), "чипы в пределах карточки: {chips:?}");
         assert!(chips.iter().any(|c| c.top() > chips[0].top()), "не поместились в ряд — перенеслись: {chips:?}");
+    }
+
+    // ─── Встречи (2.5.0) ────────────────────────────────────────────────────
+    //
+    // Календарь читает поток модуля; в тестах — выдуманный (без сети): «сейчас» 10:18 по UTC, «Планёрка» (Zoom) в 10:30, «Обзор
+    // макетов» (Meet) в 14:00, «Созвон по выпуску» (Teams) в 16:30, завтра — «Ретроспектива» без ссылки. Читает его `background`,
+    // которого у окна теста нет, — зовём сами.
+
+    const CALENDAR: &str = "https://calendar.example.com/work/demo.ics";
+    const ZOOM: &str = "https://us02web.zoom.us/j/123456789";
+
+    impl Rig {
+        /// Кадры, пока на экране нет `word`: поток чтения отвечает не сразу.
+        fn wait_for(&mut self, word: &str) {
+            let start = Instant::now();
+            while !painted(self).contains(word) {
+                assert!(start.elapsed() < Duration::from_secs(3), "на экране так и нет «{word}»");
+                self.app.modules_background();
+                self.frame(Vec::new());
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            self.settle();
+        }
+    }
+
+    /// Панель на полке «День» с выдуманным календарём, дождавшаяся встреч.
+    fn day_rig(lang: Lang) -> Rig {
+        let mut rig = Rig::new();
+        rig.app.settings.common.language = lang;
+        rig.app.settings.calendars = vec![CALENDAR.into()];
+        rig.app.edge.shown = true;
+        rig.app.set_shelf(2);
+        rig.wait_for(if lang == Lang::Ru { "Планёрка" } else { "Daily stand-up" });
+        rig
+    }
+
+    #[test]
+    fn the_day_shelf_is_meetings_timers_and_clocks_and_the_first_card_is_wider() {
+        let mut rig = Rig::editing();
+        rig.app.set_shelf(2);
+        rig.settle();
+        let (meetings, timers, clocks) = (rig.drop_zone("meetings"), rig.drop_zone("timers"), rig.drop_zone("clocks"));
+        assert!(
+            meetings.right() < timers.left() && timers.right() < clocks.left(),
+            "по порядку: встречи, таймеры, часы"
+        );
+        assert!((meetings.width() / timers.width() - 1.5).abs() < 0.05, "«Встречи» — полторы доли, как на макете");
+        assert!((timers.width() - clocks.width()).abs() < 0.5);
+        assert_eq!(rig.app.settings.shelves[2].name, "@day");
+    }
+
+    #[test]
+    fn the_meetings_card_shows_the_next_meeting_and_the_rest_of_the_day_and_join_opens_the_link() {
+        let mut rig = day_rig(Lang::Ru);
+        let text = painted(&rig);
+        for word in [
+            "ВСТРЕЧИ",
+            "Календарь «Работа»",
+            "Планёрка",
+            "Zoom",
+            "10:30–10:45 · через 12 мин",
+            "Подключиться",
+            "ДАЛЬШЕ СЕГОДНЯ",
+            "14:00",
+            "Обзор макетов",
+            "Meet",
+            "16:30",
+            "Созвон по выпуску",
+            "Teams",
+        ] {
+            assert!(text.contains(word), "нет «{word}» в {text:?}");
+        }
+        assert!(
+            !text.contains("Ретроспектива") && !text.contains("Завтра"),
+            "завтра, пока есть сегодня, не показывается"
+        );
+        assert!(!text.contains("calendar.example.com/work"), "ссылка календаря в окне — только сокращённо");
+        // «Подключиться» открывает ссылку, как двойной щелчок; строка со ссылкой — то же.
+        rig.click_anchor("meetings-join");
+        assert!(launched(ZOOM));
+        rig.click_anchor("meetings-row-0");
+        assert!(launched("https://meet.google.com/abc-defg-hij"));
+        rig.click_anchor("meetings-row-1");
+        assert!(launched("https://teams.microsoft.com/l/meetup-join/demo"));
+        // Кнопка и строки называют себя для диктора.
+        let events = {
+            let at = rig.anchor("meetings-row-0").center();
+            rig.click_events(at)
+        };
+        assert!(
+            events.iter().any(|e| matches!(e, egui::output::OutputEvent::Clicked(info) if info.label.as_deref() == Some("Обзор макетов, 14:00–15:00"))),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn the_meetings_card_in_english_has_no_russian_words() {
+        let rig = day_rig(Lang::En);
+        let text = painted(&rig);
+        for word in [
+            "MEETINGS",
+            "“Work” calendar",
+            "Daily stand-up",
+            "10:30–10:45 · in 12 min",
+            "Join",
+            "LATER TODAY",
+            "Mockup review",
+            "Release call",
+        ] {
+            assert!(text.contains(word), "нет «{word}» в {text:?}");
+        }
+        assert!(
+            !text.chars().any(|c| ('\u{0400}'..='\u{04ff}').contains(&c)),
+            "русские буквы на английском кадре: {text:?}"
+        );
+    }
+
+    #[test]
+    fn without_a_calendar_the_card_says_how_to_connect_and_a_link_is_added_from_the_field() {
+        let mut rig = Rig::new();
+        rig.app.settings.common.language = Lang::Ru;
+        rig.app.edge.shown = true;
+        rig.app.set_shelf(2);
+        rig.settle();
+        let text = painted(&rig);
+        for word in [
+            "Покажу ближайшие встречи и кнопку «Подключиться» из календаря Google или Outlook по секретной ссылке .ics",
+            "Ссылка на календарь",
+            "Добавить",
+            "Google: Настройки календаря → Секретный адрес в формате iCal",
+            "Outlook: Параметры → Календарь → Общие календари → Опубликовать календарь → ICS",
+        ] {
+            assert!(text.contains(word), "нет «{word}» в {text:?}");
+        }
+        // Негодная ссылка: слова под полем, календаря нет, «Добавить» не работает.
+        rig.click_anchor("meetings-field");
+        assert!(rig.app.typing_here(), "пока фокус в поле, Esc отменяет ввод, а не прячет панель");
+        rig.type_text("не ссылка");
+        assert!(painted(&rig).contains("Нужна ссылка вида https://… или webcal://…"));
+        rig.click_anchor("meetings-add");
+        assert!(rig.app.settings.calendars.is_empty());
+        // Esc в поле стирает набранное и не прячет панель.
+        rig.click_anchor("meetings-field");
+        rig.key(Key::Escape, NO_KEYS);
+        assert!(rig.app.edge.shown, "Esc в поле спрятал панель");
+        assert!(!painted(&rig).contains("Нужна ссылка вида"), "Esc не стёр набранное");
+        assert!(!rig.app.typing_here(), "ввод кончен: следующий Esc спрячет панель, как обычно");
+        // Годная ссылка: набранное видно точками, а под полем — сайт и конец; «Добавить» кладёт её в настройки.
+        rig.click_anchor("meetings-field");
+        rig.type_text("webcal://calendar.example.com/ical/me%40example.com/private-SECRET0123/basic.ics");
+        let text = painted(&rig);
+        assert!(text.contains("calendar.example.com/…/basic.ics"), "{text:?}");
+        assert!(!text.contains("SECRET") && !text.contains("private"), "секрет в окне не виден: {text:?}");
+        rig.click_anchor("meetings-add");
+        assert_eq!(
+            rig.app.settings.calendars,
+            ["https://calendar.example.com/ical/me%40example.com/private-SECRET0123/basic.ics"],
+            "webcal:// читается как https://"
+        );
+        assert!(!painted(&rig).contains("Нужна ссылка"), "поле очищено");
+        let saved = config::format(&rig.app.settings);
+        assert!(saved.contains("\ncalendar=https://calendar.example.com/ical/"), "ссылка уходит в config.txt");
+    }
+
+    #[test]
+    fn the_calendars_button_and_a_right_click_open_the_list_where_a_calendar_is_removed() {
+        let mut rig = day_rig(Lang::Ru);
+        rig.click_anchor("meetings-calendars");
+        let text = painted(&rig);
+        for word in ["КАЛЕНДАРИ", "Работа", "calendar.example.com/…/demo.ics", "Готово", "ДОБАВИТЬ КАЛЕНДАРЬ"]
+        {
+            assert!(text.contains(word), "нет «{word}» в {text:?}");
+        }
+        assert!(!text.contains("Планёрка"), "вместо встреч — список календарей");
+        // «Готово» возвращает встречи.
+        let done = rig.app.settings.calendars.clone();
+        rig.click_anchor("meetings-remove-0");
+        assert!(rig.app.settings.calendars.is_empty() && done.len() == 1, "крестик убрал календарь");
+        let text = painted(&rig);
+        assert!(text.contains("Покажу ближайшие встречи"), "календарей нет — как подключить: {text:?}");
+        // Правый щелчок по карточке — то же, что значок.
+        let mut rig = day_rig(Lang::Ru);
+        let at = rig.anchor("meetings-plate").center();
+        rig.right_click(at);
+        assert!(painted(&rig).contains("КАЛЕНДАРИ") && !painted(&rig).contains("Планёрка"));
+        rig.right_click(Pos2::new(60.0, BODY_TOP + 200.0));
+        assert!(painted(&rig).contains("Планёрка"), "второй правый щелчок возвращает встречи");
+    }
+
+    #[test]
+    fn the_plaque_of_a_meeting_has_words_a_join_button_and_a_cross_in_both_languages() {
+        for (lang, words) in [
+            (Lang::Ru, ["Планёрка через 2 мин", "10:30 · Zoom", "Подключиться"]),
+            (Lang::En, ["Daily stand-up in 2 min", "10:30 · Zoom", "Join"]),
+        ] {
+            let mut rig = plaque_rig(plaque::sample("meeting", lang).unwrap());
+            rig.app.settings.common.language = lang;
+            rig.settle();
+            let text = painted(&rig);
+            for word in words {
+                assert!(text.contains(word), "{lang:?}: нет «{word}» в {text:?}");
+            }
+            // Одна главная кнопка и крестик (плашка висит, пока не закроют или не начнётся встреча); полоски «сколько осталось» нет.
+            let (button, cross) = (rig.anchor("plaque-button-0"), rig.anchor("plaque-close"));
+            assert!(button.right() < cross.left() && button.height() == 28.0);
+            // «Подключиться» открывает ссылку и убирает плашку, панель не выезжает.
+            rig.click_anchor("plaque-button-0");
+            assert!(launched(ZOOM));
+            assert!(rig.app.plaques.current().is_none() && !rig.app.edge.shown);
+        }
+        // Крестик убирает, ничего не открывая.
+        let mut rig = plaque_rig(plaque::sample("meeting", Lang::En).unwrap());
+        rig.click_anchor("plaque-close");
+        assert!(rig.app.plaques.current().is_none());
+        // Щелчок по телу открывает панель на полке «День» (там карточка «Встречи»).
+        let mut rig = plaque_rig(plaque::sample("meeting", Lang::En).unwrap());
+        rig.click(Pos2::new(120.0, 24.0));
+        assert!(rig.app.edge.shown);
+        assert_eq!(rig.app.shelf, 2);
+    }
+
+    #[test]
+    fn with_the_panel_open_a_meeting_is_told_by_a_notice_not_a_plaque() {
+        let mut rig = Rig::new();
+        rig.app.settings.common.language = Lang::En;
+        rig.app.edge.shown = true;
+        rig.app.post(plaque::sample("meeting", Lang::En).unwrap(), Instant::now());
+        assert!(rig.app.plaques.current().is_none() && !rig.app.plaques.has_any());
+        let told: Vec<String> =
+            rig.app.toasts.since(Instant::now() - Duration::from_secs(5)).into_iter().map(|(t, _)| t).collect();
+        assert!(told.iter().any(|t| t == "Daily stand-up in 2 min · 10:30 · Zoom"), "{told:?}");
+    }
+
+    #[test]
+    fn search_finds_join_for_the_nearest_meetings_and_enter_opens_the_link() {
+        let _world = world();
+        let mut rig = search_rig(r"\\.\TEST-MEETINGS-SEARCH", Lang::Ru);
+        rig.app.settings.calendars = vec![CALENDAR.into()];
+        let start = Instant::now();
+        while !rig.app.all_actions().iter().any(|a| a.id.starts_with("meetings:join:")) {
+            assert!(start.elapsed() < Duration::from_secs(3), "календарь не прочитался");
+            rig.app.modules_background();
+            rig.frame(Vec::new());
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        rig.key(Key::K, CTRL);
+        rig.type_text("планёрка");
+        assert_eq!(titles(&rig)[0], "Подключиться к «Планёрка»");
+        assert_eq!(rig.app.found().hits[0].sub, "Встречи · День");
+        rig.key(Key::Enter, NO_KEYS);
+        assert!(launched(ZOOM));
+        // По слову «созвон» находятся и встреча, и «Подключиться» — а «Ретроспектива» без ссылки не предлагается.
+        rig.key(Key::K, CTRL);
+        rig.type_text("ретроспектива");
+        assert!(!titles(&rig).iter().any(|t| t.contains("Ретроспектива")));
+    }
+
+    #[test]
+    fn a_meeting_plaque_waits_for_the_screen_to_be_free_and_the_panel_to_be_hidden() {
+        let mut rig = Rig::new();
+        anvil_ui::motion::set_reduced(&rig.ctx, true);
+        rig.app.edge = Edge::default();
+        rig.app.drawn = 0.0;
+        let t0 = Instant::now();
+        rig.app.post(plaque::sample("meeting", Lang::En).unwrap(), t0);
+        // Показ экрана или игра: плашка с названием встречи не всплывает (таймеру можно, ей нет).
+        rig.app.plaque_frame(&rig.ctx, t0, false, Gate::TimerOnly);
+        assert!(rig.app.plaque_drawn.is_none() && rig.app.plaques.has_any());
+        rig.app.plaque_frame(&rig.ctx, t0 + Duration::from_millis(100), false, Gate::Open);
+        assert!(rig.app.plaque_drawn.is_some());
     }
 }

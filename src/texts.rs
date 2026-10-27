@@ -293,6 +293,28 @@ pub struct Tr {
     pub plaque_close: &'static str,
     pub plaque_gone: &'static str,
     pub plaque_ejecting: &'static str,
+    // Встречи (2.5.0): один блок. `{}` в `plaque_meeting` — название и число минут (см. `plaque_text`).
+    pub meetings: &'static str,
+    pub shelf_day: &'static str,
+    pub meetings_join: &'static str,
+    pub meetings_later: &'static str,
+    pub meetings_none_today: &'static str,
+    pub meetings_tomorrow: &'static str,
+    pub meetings_link: &'static str,
+    pub meetings_add: &'static str,
+    pub meetings_refresh: &'static str,
+    pub meetings_calendars: &'static str,
+    pub meetings_add_calendar: &'static str,
+    pub meetings_failed: &'static str,
+    pub meetings_not_calendar: &'static str,
+    pub meetings_big: &'static str,
+    pub meetings_loading: &'static str,
+    pub meetings_empty: &'static str,
+    pub meetings_google: &'static str,
+    pub meetings_outlook: &'static str,
+    pub meetings_link_bad: &'static str,
+    pub meetings_how: &'static str,
+    pub plaque_meeting: &'static str,
 }
 
 const RU: Tr = Tr {
@@ -582,6 +604,27 @@ const RU: Tr = Tr {
     plaque_close: "Закрыть",
     plaque_gone: "Флешку уже вынули",
     plaque_ejecting: "Извлекаю…",
+    meetings: "Встречи",
+    shelf_day: "День",
+    meetings_join: "Подключиться",
+    meetings_later: "Дальше сегодня",
+    meetings_none_today: "Сегодня встреч больше нет",
+    meetings_tomorrow: "Завтра",
+    meetings_link: "Ссылка на календарь",
+    meetings_add: "Добавить",
+    meetings_refresh: "Обновить",
+    meetings_calendars: "Календари",
+    meetings_add_calendar: "Добавить календарь",
+    meetings_failed: "Календарь не ответил",
+    meetings_not_calendar: "Ссылка не на календарь",
+    meetings_big: "Календарь большой — прочитана только часть",
+    meetings_loading: "Читаю календарь…",
+    meetings_empty: "Покажу ближайшие встречи и кнопку «Подключиться» из календаря Google или Outlook по секретной ссылке .ics",
+    meetings_google: "Google: Настройки календаря → Секретный адрес в формате iCal",
+    meetings_outlook: "Outlook: Параметры → Календарь → Общие календари → Опубликовать календарь → ICS",
+    meetings_link_bad: "Нужна ссылка вида https://… или webcal://…",
+    meetings_how: "Календарь — по ссылке .ics из Google или Outlook, учётная запись Windows не нужна.",
+    plaque_meeting: "{} через {} мин",
 };
 
 const EN: Tr = Tr {
@@ -871,6 +914,27 @@ const EN: Tr = Tr {
     plaque_close: "Close",
     plaque_gone: "The drive is already gone",
     plaque_ejecting: "Ejecting…",
+    meetings: "Meetings",
+    shelf_day: "Today",
+    meetings_join: "Join",
+    meetings_later: "Later today",
+    meetings_none_today: "No more meetings today",
+    meetings_tomorrow: "Tomorrow",
+    meetings_link: "Calendar link",
+    meetings_add: "Add",
+    meetings_refresh: "Refresh",
+    meetings_calendars: "Calendars",
+    meetings_add_calendar: "Add a calendar",
+    meetings_failed: "The calendar did not answer",
+    meetings_not_calendar: "The link is not a calendar",
+    meetings_big: "The calendar is big — only part of it was read",
+    meetings_loading: "Reading the calendar…",
+    meetings_empty: "I’ll show your next meetings and a “Join” button from a Google or Outlook calendar by its secret .ics link",
+    meetings_google: "Google: Calendar settings → Secret address in iCal format",
+    meetings_outlook: "Outlook: Settings → Calendar → Shared calendars → Publish a calendar → ICS",
+    meetings_link_bad: "A link like https://… or webcal://… is needed",
+    meetings_how: "The calendar comes from an .ics link from Google or Outlook; no Windows account needed.",
+    plaque_meeting: "{} in {} min",
 };
 
 pub fn tr(lang: Lang) -> &'static Tr {
@@ -898,11 +962,12 @@ pub fn more_cards(lang: Lang, n: usize) -> String {
     }
 }
 
-/// Имя полки для вкладки: `@av`, `@sys`, `@hand` — готовые (переводятся), остальное — как ввели.
+/// Имя полки для вкладки: `@av`, `@sys`, `@day`, `@hand` — готовые (переводятся), остальное — как ввели.
 pub fn shelf_title<'a>(t: &'a Tr, name: &'a str) -> &'a str {
     match name {
         "@av" => t.shelf_av,
         "@sys" => t.shelf_sys,
+        "@day" => t.shelf_day,
         "@hand" => t.shelf_hand,
         other => other,
     }
@@ -1295,6 +1360,91 @@ pub fn clip_age(lang: Lang, secs: u64) -> String {
     }
 }
 
+// ─── Встречи (2.5.0) ────────────────────────────────────────────────────────
+
+/// Имя службы видеосвязи (по сайту ссылки): «Zoom», «Meet», «Teams», «Телемост»…
+pub fn service_name(lang: Lang, service: crate::ics::Service) -> &'static str {
+    use crate::ics::Service;
+    match (service, lang) {
+        (Service::Zoom, _) => "Zoom",
+        (Service::Meet, _) => "Meet",
+        (Service::Teams, _) => "Teams",
+        (Service::Telemost, Lang::Ru) => "Телемост",
+        (Service::Telemost, Lang::En) => "Telemost",
+        (Service::Jazz, _) => "Jazz",
+        (Service::Jitsi, _) => "Jitsi",
+        (Service::Webex, _) => "Webex",
+        (Service::Whereby, _) => "Whereby",
+        (Service::Discord, _) => "Discord",
+    }
+}
+
+/// Сколько до встречи или до её конца: «12 мин», «1 ч 20 мин», «2 ч».
+pub fn span(lang: Lang, minutes: i64) -> String {
+    let (h, m) = (minutes / 60, minutes % 60);
+    match (lang, h, m) {
+        (Lang::Ru, 0, _) => format!("{m} мин"),
+        (Lang::Ru, _, 0) => format!("{h} ч"),
+        (Lang::Ru, _, _) => format!("{h} ч {m} мин"),
+        (Lang::En, 0, _) => format!("{m} min"),
+        (Lang::En, _, 0) => format!("{h} h"),
+        (Lang::En, _, _) => format!("{h} h {m} min"),
+    }
+}
+
+/// «через 12 мин» / «in 12 min».
+pub fn meeting_in(lang: Lang, minutes: i64) -> String {
+    match lang {
+        Lang::Ru => format!("через {}", span(lang, minutes)),
+        Lang::En => format!("in {}", span(lang, minutes)),
+    }
+}
+
+/// «идёт · ещё 20 мин» / «now · 20 min left».
+pub fn meeting_left(lang: Lang, minutes: i64) -> String {
+    match lang {
+        Lang::Ru => format!("идёт · ещё {}", span(lang, minutes)),
+        Lang::En => format!("now · {} left", span(lang, minutes)),
+    }
+}
+
+/// Первая завтрашняя встреча, когда сегодня их больше нет: «Завтра 09:30 · Планёрка».
+pub fn meeting_tomorrow(t: &Tr, time: &str, title: &str) -> String {
+    format!("{} {time} · {title}", t.meetings_tomorrow)
+}
+
+/// Справа в заголовке карточки при одном календаре: «Календарь «Работа»» / “Work” calendar.
+pub fn meetings_calendar(lang: Lang, name: &str) -> String {
+    match lang {
+        Lang::Ru => format!("Календарь «{name}»"),
+        Lang::En => format!("“{name}” calendar"),
+    }
+}
+
+/// То же при нескольких: «Календарей: 2».
+pub fn meetings_calendars_n(lang: Lang, n: usize) -> String {
+    match lang {
+        Lang::Ru => format!("Календарей: {n}"),
+        Lang::En => format!("{n} calendars"),
+    }
+}
+
+/// Крестик у календаря в списке: «Убрать календарь «Работа»» (и подсказка, и имя для диктора).
+pub fn meetings_remove(lang: Lang, name: &str) -> String {
+    match lang {
+        Lang::Ru => format!("Убрать календарь «{name}»"),
+        Lang::En => format!("Remove the “{name}” calendar"),
+    }
+}
+
+/// Действие поиска: «Подключиться к «Планёрка»» / Join “Daily stand-up”.
+pub fn search_join(lang: Lang, title: &str) -> String {
+    match lang {
+        Lang::Ru => format!("Подключиться к «{title}»"),
+        Lang::En => format!("Join “{title}”"),
+    }
+}
+
 // ─── Живые плашки у края (2.4.0) ────────────────────────────────────────────
 
 /// Размер файла или диска в плашке: «32 ГБ», «1,2 МБ» — как `res::bytes`, но без лишнего «,0».
@@ -1339,6 +1489,17 @@ pub fn plaque_text_at(lang: Lang, say: &crate::plaque::Say, now: i64) -> String 
         Say::DownloadedMany(count) => with(t.plaque_many, &count.to_string()),
         Say::InDownloads(bytes) => with(t.plaque_in_downloads, &plaque_size(lang, *bytes)),
         Say::Failed(name) => format!("{}: {name}", t.failed),
+        Say::MeetingIn { title, start } => {
+            // «Планёрка через 2 мин»: минуты считаются при показе — висящая плашка не врёт. Шаблон: название, потом число.
+            let minutes = (((*start - now).max(0) + 59) / 60).max(1).to_string();
+            let title = if title.is_empty() { t.media_untitled } else { title };
+            let mut parts = t.plaque_meeting.splitn(3, "{}");
+            let (before, middle, after) =
+                (parts.next().unwrap_or_default(), parts.next().unwrap_or_default(), parts.next().unwrap_or_default());
+            format!("{before}{title}{middle}{minutes}{after}")
+        }
+        Say::MeetingAt { time, service } => format!("{time} · {}", service_name(lang, *service)),
+        Say::Join => t.meetings_join.to_string(),
         Say::Open => t.plaque_open.to_string(),
         Say::Reveal => t.tray_reveal.to_string(),
         Say::Eject => t.plaque_eject.to_string(),
@@ -1442,5 +1603,119 @@ mod tests {
         assert_eq!(plaque_text_at(Lang::En, &run("", Some(1000)), 1000 + 7200), "2 h ago");
         assert_eq!(plaque_text_at(Lang::En, &run("main", None), 5), "main");
         assert_eq!(plaque_text_at(Lang::En, &run("", None), 5), "");
+    }
+
+    /// «Встречи» (2.5.0): слова карточки, плашки и поиска на обоих языках; полка «День».
+    #[test]
+    fn meetings_words_in_both_languages() {
+        use crate::ics::Service;
+        // Сколько до встречи или до её конца.
+        for (minutes, ru, en) in [
+            (1, "1 мин", "1 min"),
+            (12, "12 мин", "12 min"),
+            (60, "1 ч", "1 h"),
+            (80, "1 ч 20 мин", "1 h 20 min"),
+            (125, "2 ч 5 мин", "2 h 5 min"),
+        ] {
+            assert_eq!(span(Lang::Ru, minutes), ru);
+            assert_eq!(span(Lang::En, minutes), en);
+        }
+        assert_eq!(
+            (meeting_in(Lang::Ru, 12).as_str(), meeting_in(Lang::En, 12).as_str()),
+            ("через 12 мин", "in 12 min")
+        );
+        assert_eq!(meeting_in(Lang::Ru, 80), "через 1 ч 20 мин");
+        assert_eq!(
+            (meeting_left(Lang::Ru, 20).as_str(), meeting_left(Lang::En, 20).as_str()),
+            ("идёт · ещё 20 мин", "now · 20 min left")
+        );
+        assert_eq!(meeting_tomorrow(tr(Lang::Ru), "09:30", "Планёрка"), "Завтра 09:30 · Планёрка");
+        assert_eq!(meeting_tomorrow(tr(Lang::En), "09:30", "Stand-up"), "Tomorrow 09:30 · Stand-up");
+        assert_eq!(
+            (meetings_calendar(Lang::Ru, "Работа").as_str(), meetings_calendar(Lang::En, "Work").as_str()),
+            ("Календарь «Работа»", "“Work” calendar")
+        );
+        assert_eq!(
+            (meetings_calendars_n(Lang::Ru, 2).as_str(), meetings_calendars_n(Lang::En, 2).as_str()),
+            ("Календарей: 2", "2 calendars")
+        );
+        assert_eq!(
+            (meetings_remove(Lang::Ru, "Работа").as_str(), meetings_remove(Lang::En, "Work").as_str()),
+            ("Убрать календарь «Работа»", "Remove the “Work” calendar")
+        );
+        assert_eq!(
+            (search_join(Lang::Ru, "Планёрка").as_str(), search_join(Lang::En, "Stand-up").as_str()),
+            ("Подключиться к «Планёрка»", "Join “Stand-up”")
+        );
+        // Службы: свои имена, а Телемост — по языку.
+        for (service, name) in [
+            (Service::Zoom, "Zoom"),
+            (Service::Meet, "Meet"),
+            (Service::Teams, "Teams"),
+            (Service::Jazz, "Jazz"),
+            (Service::Jitsi, "Jitsi"),
+            (Service::Webex, "Webex"),
+            (Service::Whereby, "Whereby"),
+            (Service::Discord, "Discord"),
+        ] {
+            assert_eq!((service_name(Lang::Ru, service), service_name(Lang::En, service)), (name, name));
+        }
+        assert_eq!(
+            (service_name(Lang::Ru, Service::Telemost), service_name(Lang::En, Service::Telemost)),
+            ("Телемост", "Telemost")
+        );
+        // Плашка: название режется по шаблону, а у встречи без названия — «Без названия».
+        let say = |title: &str| crate::plaque::Say::MeetingIn { title: title.into(), start: 1000 };
+        assert_eq!(plaque_text_at(Lang::Ru, &say("Планёрка"), 1000 - 120), "Планёрка через 2 мин");
+        assert_eq!(plaque_text_at(Lang::En, &say("Stand-up"), 1000 - 61), "Stand-up in 2 min");
+        assert_eq!(plaque_text_at(Lang::En, &say("Stand-up"), 1000 - 60), "Stand-up in 1 min");
+        assert_eq!(plaque_text_at(Lang::En, &say("Stand-up"), 1000 + 5), "Stand-up in 1 min", "началась — не «0 мин»");
+        assert_eq!(plaque_text_at(Lang::Ru, &say(""), 1000 - 90), "Без названия через 2 мин");
+        assert_eq!(
+            plaque_text_at(Lang::Ru, &say("{} через {}"), 1000 - 60),
+            "{} через {} через 1 мин",
+            "фигурные скобки в названии — не шаблон"
+        );
+        // Полка «День» переводится, как остальные готовые.
+        assert_eq!((shelf_title(tr(Lang::Ru), "@day"), shelf_title(tr(Lang::En), "@day")), ("День", "Today"));
+        assert_eq!(shelf_title(tr(Lang::En), "Мой стол"), "Мой стол");
+        // Тексты подключения: ничего не пропущено ни на одном языке.
+        for lang in [Lang::Ru, Lang::En] {
+            let t = tr(lang);
+            for text in [
+                t.meetings,
+                t.shelf_day,
+                t.meetings_join,
+                t.meetings_later,
+                t.meetings_none_today,
+                t.meetings_tomorrow,
+                t.meetings_link,
+                t.meetings_add,
+                t.meetings_refresh,
+                t.meetings_calendars,
+                t.meetings_add_calendar,
+                t.meetings_failed,
+                t.meetings_not_calendar,
+                t.meetings_big,
+                t.meetings_loading,
+                t.meetings_empty,
+                t.meetings_google,
+                t.meetings_outlook,
+                t.meetings_link_bad,
+                t.meetings_how,
+                t.plaque_meeting,
+            ] {
+                assert!(!text.is_empty());
+            }
+            assert_eq!(t.plaque_meeting.matches("{}").count(), 2, "название и число минут");
+        }
+        let (ru, en) = (tr(Lang::Ru), tr(Lang::En));
+        assert_eq!(ru.meetings_google, "Google: Настройки календаря → Секретный адрес в формате iCal");
+        assert_eq!(
+            ru.meetings_outlook,
+            "Outlook: Параметры → Календарь → Общие календари → Опубликовать календарь → ICS"
+        );
+        assert_eq!(en.meetings_google, "Google: Calendar settings → Secret address in iCal format");
+        assert_eq!(en.meetings_outlook, "Outlook: Settings → Calendar → Shared calendars → Publish a calendar → ICS");
     }
 }
