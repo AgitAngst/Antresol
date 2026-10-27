@@ -90,8 +90,16 @@ python E:/dev_personal/tools/checks.py --repo . -j 4 fmt test clippy
 - `.github/workflows/ci.yml` — одна система, `windows-latest`: `cargo fmt --check`, `cargo clippy --locked --all-targets
   --all-features -- -D warnings`, `cargo test --locked --all-features --no-fail-fast`, `cargo build --release --locked`;
   собранный `antresol.exe` — артефакт запуска на 14 дней. Rust — `1.98.1`, как на ПК (поднимать вместе с ПК).
-- Запуск — кнопкой (Actions → CI → Run workflow, или `ghci.py run` из скилла `github-ci`) и сам на тег выпуска `v*`;
-  на пуш в ветку не запускается. Репозиторий открытый — минуты не считаются; кнопку нажимают после новой версии и перед
+- Запуск — кнопкой (Actions → CI → Run workflow, или `ghci.py run` из скилла `github-ci`); на пуш в ветку и на тег
+  не запускается. Репозиторий открытый — минуты не считаются; кнопку нажимают после новой версии и перед
   выпуском, по решению владельца. Новый запуск отменяет идущий, потолок — 60 минут.
 - Перед кнопкой — те же команды с теми же флагами на ПК (`CARGO_TARGET_DIR` на E:). Тесты в CI идут в выдуманном мире,
   как и на ПК: в Windows раннера ничего не пишется.
+
+## Выпуск
+
+- `.github/workflows/release.yml` — общий выпуск семьи Anvil (`rust-release.yml` из репозитория Anvil, тег набора — как
+  у `anvil-ui` в `Cargo.toml`). Запускается сам на тег `vX.Y.Z`: сборка под Windows, `antresol-X.Y.Z-windows-x64.zip`,
+  `SHA256SUMS`, GitHub Release.
+- Заметки выпуска — из аннотации тега: `git tag -a vX.Y.Z -F заметки.txt` (по-английски; строки с `#` git выбрасывает).
+- Тег и выпуск — по команде владельца.
