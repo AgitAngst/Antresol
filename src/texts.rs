@@ -268,6 +268,8 @@ pub struct Tr {
     pub clip_nothing: &'static str,
     pub clip_open: &'static str,
     pub clip_fix: &'static str,
+    /// Надпись на самой кнопке «Исправить раскладку» (по-русски короче); полное название — подсказка и диктор.
+    pub clip_fix_chip: &'static str,
 }
 
 const RU: Tr = Tr {
@@ -534,6 +536,7 @@ const RU: Tr = Tr {
     clip_nothing: "Здесь пока ничего нет",
     clip_open: "Открыть в браузере",
     clip_fix: "Исправить раскладку",
+    clip_fix_chip: "Исправить",
 };
 
 const EN: Tr = Tr {
@@ -800,6 +803,7 @@ const EN: Tr = Tr {
     clip_nothing: "Nothing here yet",
     clip_open: "Open in the browser",
     clip_fix: "Fix layout",
+    clip_fix_chip: "Fix layout",
 };
 
 pub fn tr(lang: Lang) -> &'static Tr {
@@ -1190,12 +1194,17 @@ pub fn search_clocks_full(lang: Lang, max: usize) -> String {
 
 // ─── Буфер: картинки, ссылки, цвета, раскладка (2.3.0) ──────────────────────
 
-/// Строка картинки в истории: «Картинка · 1280 × 720».
+/// Название картинки в истории (подсказка и имя для диктора): «Картинка · 1280 × 720».
 pub fn clip_image(lang: Lang, width: u32, height: u32) -> String {
     match lang {
-        Lang::Ru => format!("Картинка · {width} × {height}"),
-        Lang::En => format!("Image · {width} × {height}"),
+        Lang::Ru => format!("Картинка · {}", clip_size(width, height)),
+        Lang::En => format!("Image · {}", clip_size(width, height)),
     }
+}
+
+/// Размер картинки в самой строке: «1280 × 720» (миниатюра и так говорит, что это картинка).
+pub fn clip_size(width: u32, height: u32) -> String {
+    format!("{width} × {height}")
 }
 
 /// Подсказка к «Исправить раскладку»: на что похож текст и что получится.
@@ -1225,6 +1234,7 @@ mod tests {
 
     #[test]
     fn clipboard_words() {
+        assert_eq!(clip_size(1280, 720), "1280 × 720");
         assert_eq!(clip_image(Lang::Ru, 1280, 720), "Картинка · 1280 × 720");
         assert_eq!(clip_image(Lang::En, 1280, 720), "Image · 1280 × 720");
         assert_eq!(clip_age(Lang::Ru, 0), "сейчас");

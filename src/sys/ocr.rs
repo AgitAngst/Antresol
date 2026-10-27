@@ -15,9 +15,9 @@ use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
 use windows::Win32::System::Ole::CF_DIB;
 use windows::core::{Error, HRESULT, Result};
 
+use super::dib::Layout;
+
 const TIMEOUT: Duration = Duration::from_secs(10);
-/// Наибольшая сторона картинки из буфера, пикселей.
-const MAX_SIDE: usize = 16_384;
 
 /// Картинка: ширина, высота и пиксели BGRA сверху вниз.
 pub struct Image {
@@ -26,48 +26,17 @@ pub struct Image {
     pub bgra: Vec<u8>,
 }
 
-fn u32_at(b: &[u8], i: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(b.get(i..i + 4)?.try_into().ok()?))
-}
-
-fn u16_at(b: &[u8], i: usize) -> Option<u16> {
-    Some(u16::from_le_bytes(b.get(i..i + 2)?.try_into().ok()?))
-}
-
-/// CF_DIB (BITMAPINFOHEADER и пиксели) → BGRA сверху вниз. Только 24 и 32 бита без палитры.
+/// CF_DIB (BITMAPINFOHEADER и пиксели) → BGRA сверху вниз. Только 24 и 32 бита без палитры (`sys::dib`): таблица цветов перед
+/// пикселями и порядок каналов по маскам учитываются.
 pub fn dib_to_bgra(b: &[u8]) -> Option<Image> {
-    let header = u32_at(b, 0)? as usize;
-    let width = i32::from_le_bytes(b.get(4..8)?.try_into().ok()?);
-    let height = i32::from_le_bytes(b.get(8..12)?.try_into().ok()?);
-    let bits = u16_at(b, 14)?;
-    let compression = u32_at(b, 16)?;
-    if width <= 0
-        || height == 0
-        || header < 40
-        || !(bits == 24 || bits == 32)
-        || !(compression == 0 || compression == 3)
-    {
-        return None;
-    }
-    // BI_BITFIELDS с заголовком 40 — за ним три маски.
-    let start = header + if compression == 3 && header == 40 { 12 } else { 0 };
-    let (w, h) = (width as usize, height.unsigned_abs() as usize);
-    // Чужие данные: размеры с запасом под любой снимок экрана, без переполнений.
-    if w > MAX_SIDE || h > MAX_SIDE {
-        return None;
-    }
-    let bpp = bits as usize / 8;
-    let stride = w.checked_mul(bpp)?.div_ceil(4) * 4;
-    let pixels = b.get(start..start.checked_add(stride.checked_mul(h)?)?)?;
+    let layout = Layout::parse(b)?;
+    let (w, h) = (layout.width, layout.height);
     let mut out = vec![0u8; w.checked_mul(h)?.checked_mul(4)?];
     for y in 0..h {
-        // Положительная высота — строки снизу вверх.
-        let src_y = if height > 0 { h - 1 - y } else { y };
-        let row = &pixels[src_y * stride..src_y * stride + w * bpp];
+        let row = layout.row(b, y)?;
         for x in 0..w {
-            let s = &row[x * bpp..x * bpp + 3];
-            let d = &mut out[(y * w + x) * 4..(y * w + x) * 4 + 4];
-            d.copy_from_slice(&[s[0], s[1], s[2], 255]);
+            let [r, g, bl] = layout.rgb(row, x);
+            out[(y * w + x) * 4..][..4].copy_from_slice(&[bl, g, r, 255]);
         }
     }
     Some(Image { width: w as u32, height: h as u32, bgra: out })

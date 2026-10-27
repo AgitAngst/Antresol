@@ -3,6 +3,7 @@
 pub mod bt;
 pub mod clip;
 pub mod ddc;
+pub mod dib;
 pub mod display;
 pub mod gh;
 pub mod kamerton;

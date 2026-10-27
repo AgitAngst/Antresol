@@ -2,12 +2,15 @@
 // текст, ссылки, цвета и картинки; щелчок по строке — положить обратно в буфер, булавка — закрепить текст или открепить.
 // Чипы над историей фильтруют по виду; у текста, набранного не в той раскладке, — «Исправить раскладку» (`layout.rs`).
 // История только в памяти (на диск не пишется) и собирается, даже пока панель спрятана: номер копирования проверяется
-// каждый кадр панели — это ничего не стоит. Приватные копии (менеджеры паролей) не запоминаются; запоминание выключается в
-// настройках (закреплённое при этом остаётся, а уже запомненное лежит в памяти до выхода, но не показывается).
+// каждый кадр панели — это ничего не стоит. Читает буфер и считает миниатюру отдельный поток (`Reader`), кадр только видит,
+// что номер сменился, и забирает готовое. Приватные копии (менеджеры паролей) не запоминаются; запоминание выключается в
+// настройках: недавнее при этом стирается (картинки тоже), закреплённое остаётся.
 //
 // Цвет «Пипетки» в историю кладёт сам буфер: «Пипетка» кладёт в него код `#rrggbb`, а история узнаёт в нём цвет.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Instant;
 
 use anvil_ui::widgets::{self as w, Kind};
@@ -17,15 +20,20 @@ use eframe::egui::{self, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind,
 use super::{Action, Command, Ctx, Module, anchor, chips, mine, row, stable_key};
 use crate::config::{MAX_PINNED, Settings};
 use crate::layout;
-use crate::sys::{self, clip, ocr};
+use crate::sys::dib::Layout;
+use crate::sys::{self, clip};
 use crate::texts::{self, Tr};
 
 /// Сколько записей помнить.
 pub const KEEP: usize = 20;
 /// Из них картинок — не больше: старые уходят первыми.
 pub const KEEP_IMAGES: usize = 5;
+/// И не больше стольких байт на все картинки вместе (одна — до `clip::MAX_IMAGE_BYTES`, 40 МБ): старые уходят первыми.
+pub const MAX_IMAGES_BYTES: usize = 80 * 1024 * 1024;
 /// Длиннее не храним: огромные копии (логи, файлы) — не то, что вставляют из истории.
 const MAX_LEN: usize = 4000;
+/// В подсказке к строке — не больше стольких знаков текста или адреса.
+const TIP_LEN: usize = 300;
 /// Место справа в строке под булавку.
 const PIN_ROOM: f32 = 30.0;
 /// И под «Открыть в браузере» у ссылки: кнопка левее булавки.
@@ -33,8 +41,8 @@ const OPEN_ROOM: f32 = 26.0;
 /// Миниатюра картинки в строке, точек; у самой миниатюры пикселей вдвое больше — чётко при масштабе 200 %.
 const THUMB: Vec2 = Vec2::new(36.0, 24.0);
 const THUMB_PX: (usize, usize) = (72, 48);
-/// Подписи справа и слева от текста строки не должны съесть его целиком: меньше этого места остаётся — «Исправить раскладку»
-/// уступает значку.
+/// Подписи справа и слева от текста строки не должны съесть его целиком: меньше этого места остаётся — надпись на
+/// «Исправить раскладку» уступает значку.
 const MIN_LABEL: f32 = 70.0;
 
 /// Цвет: красный, зелёный, синий.
@@ -45,7 +53,11 @@ pub type Rgb = [u8; 3];
 enum Clip {
     Text(String),
     Link(String),
-    Color(Rgb),
+    /// Цвет и текст, каким его скопировали: в буфер он возвращается таким же (`rgb(79, 122, 18)`, `#FFF`), а не `#rrggbb`.
+    Color {
+        rgb: Rgb,
+        text: String,
+    },
     Image(ClipImage),
 }
 
@@ -99,7 +111,7 @@ impl Clip {
     /// Вид записи по тексту: цвет, ссылка или просто текст.
     fn from_text(text: String) -> Clip {
         if let Some(rgb) = parse_color(&text) {
-            Clip::Color(rgb)
+            Clip::Color { rgb, text: text.trim().to_string() }
         } else if link_of(&text).is_some() {
             Clip::Link(text)
         } else {
@@ -107,16 +119,22 @@ impl Clip {
         }
     }
 
+    /// Картинка с миниатюрой, посчитанной тут же (в тестах); поток чтения считает её сам и зовёт `image_with`.
+    #[cfg(test)]
     fn image(image: clip::Image) -> Clip {
         let thumb_px = make_thumb(&image.bytes);
+        Clip::image_with(image, thumb_px)
+    }
+
+    fn image_with(image: clip::Image, thumb_px: Option<egui::ColorImage>) -> Clip {
         Clip::Image(ClipImage { image, thumb_px, thumb: None })
     }
 
-    /// Как запись лежит в буфере текстом: у цвета — код `#rrggbb`; у картинки текста нет.
+    /// Как запись лежит в буфере текстом: цвет — как его скопировали; у картинки текста нет.
     fn text(&self) -> Option<String> {
         match self {
             Clip::Text(s) | Clip::Link(s) => Some(s.clone()),
-            Clip::Color(c) => Some(hex(*c)),
+            Clip::Color { text, .. } => Some(text.clone()),
             Clip::Image(_) => None,
         }
     }
@@ -125,20 +143,18 @@ impl Clip {
         match self {
             Clip::Text(_) => Filter::Text,
             Clip::Link(_) => Filter::Links,
-            Clip::Color(_) => Filter::Colors,
+            Clip::Color { .. } => Filter::Colors,
             Clip::Image(_) => Filter::Images,
         }
     }
 
-    /// Та же запись (повтор поднимается, а не дублируется).
+    /// Та же запись (повтор поднимается, а не дублируется); цвет — тот же, как бы его ни записали (`#FFF`, `#ffffff`).
     fn same(&self, other: &Clip) -> bool {
-        self == other
+        match (self, other) {
+            (Clip::Color { rgb: a, .. }, Clip::Color { rgb: b, .. }) => a == b,
+            _ => self == other,
+        }
     }
-}
-
-/// Код цвета «#4f7a12».
-fn hex(c: Rgb) -> String {
-    format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2])
 }
 
 /// Цвет из текста: `#rrggbb`, `#rgb` (если в нём есть буква: «#123» — скорее номер, чем цвет) и `rgb(r, g, b)`.
@@ -180,12 +196,13 @@ fn link_of(text: &str) -> Option<(String, String, String)> {
     if t.is_empty() || t.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return None;
     }
-    let lower = t.to_ascii_lowercase();
-    let (open, body, www) = if lower.starts_with("https://") {
+    // Начало без учёта регистра — без копии всего текста в нижнем регистре.
+    let starts = |prefix: &str| t.get(..prefix.len()).is_some_and(|head| head.eq_ignore_ascii_case(prefix));
+    let (open, body, www) = if starts("https://") {
         (t.to_string(), &t[8..], false)
-    } else if lower.starts_with("http://") {
+    } else if starts("http://") {
         (t.to_string(), &t[7..], false)
-    } else if lower.starts_with("www.") {
+    } else if starts("www.") {
         (format!("https://{t}"), t, true)
     } else {
         return None;
@@ -198,32 +215,42 @@ fn link_of(text: &str) -> Option<(String, String, String)> {
     Some((open, site.to_string(), rest.to_string()))
 }
 
-/// Миниатюра для строки: середина картинки по пропорции 3 : 2, усреднением по площади до `THUMB_PX`. Не разобрать
-/// (палитра, сжатие) — `None`: строка нарисует значок вместо неё.
+/// Миниатюра для строки: середина картинки по пропорции 3 : 2, усреднением по площади до `THUMB_PX`. Пиксели берутся прямо
+/// из строк DIB (`sys::dib`: таблица цветов, порядок каналов по маскам) — картинка целиком в другой вид не копируется. Не
+/// разобрать (палитра, сжатие) — `None`: строка нарисует значок вместо неё.
 fn make_thumb(dib: &[u8]) -> Option<egui::ColorImage> {
-    let img = ocr::dib_to_bgra(dib)?;
-    let (w, h) = (img.width as usize, img.height as usize);
+    let layout = Layout::parse(dib)?;
+    let (w, h) = (layout.width, layout.height);
     let (tw, th) = THUMB_PX;
     // Окно 3 : 2 по центру: у широкой картинки срезаются края слева и справа, у высокой — сверху и снизу.
     let (cw, ch) = if w * th >= h * tw { ((h * tw / th).max(1), h) } else { (w, (w * th / tw).max(1)) };
     let (x0, y0) = ((w - cw) / 2, (h - ch) / 2);
+    // Какие пиксели окна `len` от `start` попадают в клетку `t` из `n`: хотя бы один.
+    let span = |t: usize, start: usize, len: usize, n: usize| {
+        let from = start + t * len / n;
+        (from, (start + (t + 1) * len / n).max(from + 1).min(start + len))
+    };
     let mut rgba = Vec::with_capacity(tw * th * 4);
     for ty in 0..th {
-        let (sy0, sy1) = (y0 + ty * ch / th, (y0 + (ty + 1) * ch / th).max(y0 + ty * ch / th + 1).min(y0 + ch));
-        for tx in 0..tw {
-            let (sx0, sx1) = (x0 + tx * cw / tw, (x0 + (tx + 1) * cw / tw).max(x0 + tx * cw / tw + 1).min(x0 + cw));
-            let (mut sum, mut n) = ([0u32; 3], 0u32);
-            for y in sy0..sy1 {
+        // Строки клетки читаются по одной подряд, суммы набираются сразу по всем клеткам ряда.
+        let (sy0, sy1) = span(ty, y0, ch, th);
+        let mut sums = vec![[0u32; 3]; tw];
+        let mut counts = vec![0u32; tw];
+        for y in sy0..sy1 {
+            let row = layout.row(dib, y)?;
+            for tx in 0..tw {
+                let (sx0, sx1) = span(tx, x0, cw, tw);
                 for x in sx0..sx1 {
-                    let i = (y * w + x) * 4;
-                    // BGRA → по каналам RGB.
-                    sum[0] += u32::from(img.bgra[i + 2]);
-                    sum[1] += u32::from(img.bgra[i + 1]);
-                    sum[2] += u32::from(img.bgra[i]);
-                    n += 1;
+                    let [r, g, b] = layout.rgb(row, x);
+                    sums[tx][0] += u32::from(r);
+                    sums[tx][1] += u32::from(g);
+                    sums[tx][2] += u32::from(b);
                 }
+                counts[tx] += (sx1 - sx0) as u32;
             }
-            let n = n.max(1);
+        }
+        for (sum, n) in sums.iter().zip(&counts) {
+            let n = (*n).max(1);
             rgba.extend_from_slice(&[(sum[0] / n) as u8, (sum[1] / n) as u8, (sum[2] / n) as u8, 255]);
         }
     }
@@ -249,18 +276,74 @@ fn demo_thumb() -> egui::ColorImage {
     egui::ColorImage::from_rgba_unmultiplied([tw, th], &rgba)
 }
 
+/// Чем читают буфер: настоящим `clip::read`, а в тестах — своим (настоящий буфер владельца тесты не трогают).
+type ReadFn = Arc<dyn Fn() -> Result<Option<clip::Copied>, ()> + Send + Sync>;
+
+/// Ответ потока чтения: что прочитано (`Err` — буфер занят другой программой) и, у картинки, миниатюра.
+struct Read {
+    seq: u32,
+    copied: Result<Option<clip::Copied>, ()>,
+    thumb: Option<egui::ColorImage>,
+}
+
+/// Поток чтения буфера (как «Текст с экрана» в `tools.rs`): кадр шлёт номер копирования, поток открывает буфер, копирует
+/// нужное, закрывает его и только потом считает миниатюру. Кадр не ждёт ни чужую программу, которая отдаёт картинку по
+/// запросу, ни копирование, ни миниатюру.
+struct Reader {
+    jobs: Sender<u32>,
+    done: Receiver<Read>,
+    /// За каким номером копирования послано чтение, а ответа ещё нет.
+    pending: Option<u32>,
+}
+
+impl Reader {
+    fn start(read: ReadFn) -> Reader {
+        let (jobs, rx) = mpsc::channel::<u32>();
+        let (tx, done) = mpsc::channel();
+        std::thread::spawn(move || {
+            while let Ok(seq) = rx.recv() {
+                // Сбой на чужих данных не убивает поток: запись просто не берётся.
+                let answer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| prepare(seq, &read)))
+                    .unwrap_or(Read { seq, copied: Ok(None), thumb: None });
+                if tx.send(answer).is_err() {
+                    break;
+                }
+            }
+        });
+        Reader { jobs, done, pending: None }
+    }
+}
+
+/// Одно чтение в потоке: что скопировали и, если это картинка, её миниатюра — после того, как буфер закрыт.
+fn prepare(seq: u32, read: &ReadFn) -> Read {
+    let copied = read();
+    let thumb = match &copied {
+        Ok(Some(clip::Copied::Image(image))) => make_thumb(&image.bytes),
+        _ => None,
+    };
+    Read { seq, copied, thumb }
+}
+
 /// То, что было в буфере до запуска, тоже возьмём — с первым кадром. В демо-режиме история выдуманная (`demo_rows`), своя
 /// не собирается.
-#[derive(Default)]
 pub struct Clipboard {
     history: VecDeque<Entry>,
     seen: u32,
     filter: Filter,
     /// Текстура выдуманной картинки демо-режима: одна на все кадры.
     demo_image: Option<egui::TextureHandle>,
+    /// Поток чтения заводится, когда впервые понадобился.
+    reader: Option<Reader>,
+    read: ReadFn,
 }
 
-/// Положить запись наверх истории: повтор поднимается, а не дублируется; картинок не больше `KEEP_IMAGES`.
+impl Default for Clipboard {
+    fn default() -> Self {
+        Clipboard::with_reader(Arc::new(clip::read))
+    }
+}
+
+/// Положить запись наверх истории: повтор поднимается, а не дублируется; картинок не больше `KEEP_IMAGES` и `MAX_IMAGES_BYTES`.
 fn remember(history: &mut VecDeque<Entry>, clip: Clip) {
     remember_at(history, clip, Instant::now());
 }
@@ -274,12 +357,18 @@ fn remember_at(history: &mut VecDeque<Entry>, clip: Clip, at: Instant) {
     history.retain(|e| !e.clip.same(&clip));
     let fix = if let Clip::Text(t) = &clip { layout::suggest(t) } else { None };
     history.push_front(Entry { clip, at, fix });
-    // Сверху новые: оставляем первые пять картинок, остальные — старые — уходят.
-    let mut images = 0;
+    // Сверху новые: картинки считаем сверху вниз, пока их не больше `KEEP_IMAGES` штук и `MAX_IMAGES_BYTES` байт; с той, что не
+    // влезла, и все старше неё уходят — старые первыми.
+    let (mut count, mut bytes, mut full) = (0usize, 0usize, false);
     history.retain(|e| {
-        let image = matches!(e.clip, Clip::Image(_));
-        images += usize::from(image);
-        !image || images <= KEEP_IMAGES
+        let Clip::Image(img) = &e.clip else { return true };
+        let len = img.image.bytes.len();
+        if full || count + 1 > KEEP_IMAGES || bytes.saturating_add(len) > MAX_IMAGES_BYTES {
+            full = true;
+            return false;
+        }
+        (count, bytes) = (count + 1, bytes + len);
+        true
     });
     history.truncate(KEEP);
 }
@@ -295,6 +384,15 @@ fn raise(history: &mut VecDeque<Entry>, i: usize) {
 /// Одна строка для списка: переводы строк и табуляции — пробелами.
 fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Первые `n` знаков, дальше многоточие.
+fn cut(text: &str, n: usize) -> String {
+    if text.chars().count() <= n {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(n.saturating_sub(1)).collect();
+    format!("{}…", head.trim_end())
 }
 
 /// Закреплённый текст в строке списка: первая непустая строка.
@@ -420,6 +518,23 @@ fn paint_label(ui: &Ui, mut job: egui::text::LayoutJob, at: Pos2, room: f32, col
     ui.painter().galley(at - Vec2::new(0.0, galley.size().y / 2.0), galley, color);
 }
 
+/// Имя строки для диктора и подсказка к ней — они несут полное: первые знаки текста, адрес, «Картинка · 1280 × 720». В самой
+/// строке у картинки только размер: миниатюра и так говорит, что это картинка.
+fn row_texts(look: &Look, t: &Tr, lang: anvil_ui::Lang) -> (String, String) {
+    match look {
+        Look::Text(s) => (s.clone(), format!("{}\n{}", t.clipboard_put, cut(s, TIP_LEN))),
+        Look::Link { site, rest } => {
+            let address = format!("{site}{rest}");
+            (address.clone(), format!("{}\n{}", t.clipboard_put, cut(&address, TIP_LEN)))
+        }
+        Look::Color { code, .. } => (code.clone(), t.clipboard_put.to_string()),
+        Look::Image { width, height, .. } => {
+            let label = texts::clip_image(lang, *width, *height);
+            (label.clone(), format!("{}\n{label}", t.clipboard_put))
+        }
+    }
+}
+
 /// Что сделал пользователь с одной строкой недавнего.
 #[derive(Default)]
 struct RowOut {
@@ -437,15 +552,7 @@ fn history_row(ui: &mut Ui, n: usize, row: &Row, t: &Tr, lang: anvil_ui::Lang) -
     let p = Palette::of(ui);
     let image = matches!(row.look, Look::Image { .. });
     let height = if image { 34.0 } else { 28.0 };
-    let (name, tip) = match &row.look {
-        Look::Text(s) => (s.clone(), t.clipboard_put.to_string()),
-        Look::Link { site, rest } => (format!("{site}{rest}"), format!("{}\n{site}{rest}", t.clipboard_put)),
-        Look::Color { code, .. } => (code.clone(), t.clipboard_put.to_string()),
-        Look::Image { width, height, .. } => {
-            let label = texts::clip_image(lang, *width, *height);
-            (label.clone(), format!("{}\n{label}", t.clipboard_put))
-        }
-    };
+    let (name, tip) = row_texts(&row.look, t, lang);
     let id = ui.id().with(("clip", n));
     let r = w::list_row(ui, id, row.current, height, &name);
     let rect = r.rect;
@@ -466,10 +573,15 @@ fn history_row(ui: &mut Ui, n: usize, row: &Row, t: &Tr, lang: anvil_ui::Lang) -
     } else {
         12.0
     };
-    let chip_label = t.clip_fix;
+    // Надпись на кнопке короткая (по-русски «Исправить»), полное «Исправить раскладку» — в подсказке и для диктора.
+    let chip_label = t.clip_fix_chip;
     let chip_full = text_width(ui, chip_label, anvil_ui::semibold(12.0)) + 16.0;
-    // Полная «Исправить раскладку» — пока подписи остаётся место; иначе — значок на той же кнопке.
-    let right_of_label = |chip: f32| tools.max(age_room) + if chip > 0.0 { chip + 6.0 } else { 0.0 } + 8.0;
+    // Надпись — пока подписи остаётся место; иначе — значок на той же кнопке. Справа от подписи место под кнопку со знаками
+    // (булавка, «Открыть») или под время — что шире; пока кнопка «Исправить» на виду, времени нет, поэтому оно её не теснит.
+    let right_of_label = |chip: f32| {
+        let right = if chip > 0.0 { (tools + chip + 6.0).max(age_room) } else { tools.max(age_room) };
+        right + 8.0
+    };
     let compact = row.fix.is_some() && rect.width() - left - right_of_label(chip_full) < MIN_LABEL;
     let chip_w = match (&row.fix, compact) {
         (None, _) => 0.0,
@@ -516,8 +628,7 @@ fn history_row(ui: &mut Ui, n: usize, row: &Row, t: &Tr, lang: anvil_ui::Lang) -
     match &row.look {
         Look::Text(s) => paint_label(ui, plain(s.clone(), FontId::proportional(13.5), ink), at, room, ink),
         Look::Image { width, height, .. } => {
-            let label = texts::clip_image(lang, *width, *height);
-            paint_label(ui, plain(label, FontId::proportional(13.5), ink), at, room, ink)
+            paint_label(ui, plain(texts::clip_size(*width, *height), FontId::proportional(13.5), ink), at, room, ink)
         }
         Look::Color { code, .. } => {
             paint_label(ui, plain(code.clone(), FontId::monospace(13.0), p.text), at, room, p.text)
@@ -582,7 +693,7 @@ fn history_row(ui: &mut Ui, n: usize, row: &Row, t: &Tr, lang: anvil_ui::Lang) -
             }
         }
         w::focus_ring(ui, chip, &r, 6);
-        r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, chip_label));
+        r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, t.clip_fix));
         anchor(ui, chip, &format!("clip-fix-{n}"));
         let tip = texts::clip_fix_tip(lang, fix.to == layout::To::Russian, &short(&fix.text, 60));
         focused |= r.has_focus();
@@ -590,8 +701,9 @@ fn history_row(ui: &mut Ui, n: usize, row: &Row, t: &Tr, lang: anvil_ui::Lang) -
     }
 
     // Время — на месте кнопок, пока их нет (ни под мышью, ни с клавиатуры); у строки с «Исправить раскладку» на виду его нет
-    // (место занято).
-    if !over && !focused && !chip_visible {
+    // (место занято). У картинки кнопок нет вовсе — время на месте и под мышью.
+    let has_buttons = pinnable || openable || row.fix.is_some();
+    if !(has_buttons && over) && !focused && !chip_visible {
         ui.painter().text(
             Pos2::new(rect.right() - 10.0, cy),
             egui::Align2::RIGHT_CENTER,
@@ -619,6 +731,19 @@ struct Picked {
 }
 
 impl Clipboard {
+    /// С чужим чтением буфера: тесты подставляют своё, настоящий буфер владельца они не трогают.
+    fn with_reader(read: ReadFn) -> Clipboard {
+        Clipboard { history: VecDeque::new(), seen: 0, filter: Filter::default(), demo_image: None, reader: None, read }
+    }
+
+    /// Запоминание выключили: недавнее стирается (картинки с ним, текстуры освобождаются), закреплённое остаётся — оно в
+    /// настройках. Чтение, что ещё идёт, ни к чему: его ответ не нужен.
+    fn forget(&mut self) {
+        self.history.clear();
+        self.filter = Filter::All;
+        self.reader = None;
+    }
+
     /// Положить текст в буфер обмена. Удалось — запоминаем номер копирования (своя запись — не новое копирование) и
     /// говорим «В буфере — вставляйте».
     fn put_text(&mut self, text: &str, cx: &mut Ctx) -> bool {
@@ -717,14 +842,35 @@ impl Clipboard {
         }
     }
 
-    /// Новое из буфера — в историю; закреплённый текст не идёт: он и так наверху карточки.
-    fn take(&mut self, copied: Option<clip::Copied>, settings: &Settings) {
+    /// Новое из буфера — в историю; закреплённый текст не идёт: он и так наверху карточки. `thumb` — миниатюра картинки, что уже
+    /// посчитал поток чтения.
+    fn take(&mut self, copied: Option<clip::Copied>, thumb: Option<egui::ColorImage>, settings: &Settings) {
         match copied {
-            Some(clip::Copied::Text(text)) if !settings.pinned.contains(&text) => {
-                remember(&mut self.history, Clip::from_text(text));
+            // Слишком длинный текст не разбираем вовсе (цвет, ссылка, раскладка): его всё равно не запомнят.
+            Some(clip::Copied::Text(text)) => {
+                if text.chars().count() <= MAX_LEN && !settings.pinned.contains(&text) {
+                    remember(&mut self.history, Clip::from_text(text));
+                }
             }
-            Some(clip::Copied::Image(image)) => remember(&mut self.history, Clip::image(image)),
-            _ => {}
+            Some(clip::Copied::Image(image)) => remember(&mut self.history, Clip::image_with(image, thumb)),
+            None => {}
+        }
+    }
+
+    /// Ответы потока чтения: что готово — в историю. Занят буфер (`Err`) — номер не запоминаем, прочитаем в следующем кадре.
+    fn collect(&mut self, settings: &Settings) {
+        let Some(reader) = &mut self.reader else { return };
+        let answers: Vec<Read> = std::iter::from_fn(|| reader.done.try_recv().ok()).collect();
+        if !answers.is_empty() {
+            reader.pending = None;
+        }
+        for answer in answers {
+            if answer.copied.is_ok() {
+                self.seen = answer.seq;
+            }
+            if let Ok(copied) = answer.copied {
+                self.take(copied, answer.thumb, settings);
+            }
         }
     }
 
@@ -741,7 +887,7 @@ impl Clipboard {
                     Some((_, site, rest)) => Look::Link { site, rest },
                     None => Look::Text(one_line(s)),
                 },
-                Clip::Color(c) => Look::Color { rgb: *c, code: hex(*c) },
+                Clip::Color { rgb, text } => Look::Color { rgb: *rgb, code: text.clone() },
                 Clip::Image(img) => {
                     if img.thumb.is_none()
                         && let Some(px) = img.thumb_px.take()
@@ -781,8 +927,10 @@ impl Clipboard {
                 None,
             ),
             (
-                parse_color(color)
-                    .map_or_else(|| Look::Text(color.to_string()), |rgb| Look::Color { rgb, code: hex(rgb) }),
+                parse_color(color).map_or_else(
+                    || Look::Text(color.to_string()),
+                    |rgb| Look::Color { rgb, code: color.trim().to_string() },
+                ),
                 480,
                 None,
             ),
@@ -882,17 +1030,22 @@ impl Module for Clipboard {
             return;
         }
         let seq = clip::sequence();
-        if seq == self.seen {
-            return;
-        }
         if !settings.clipboard {
+            // Выключено: недавнее стирается, новое не берётся и с включением не всплывёт.
+            self.forget();
             self.seen = seq;
             return;
         }
-        // Буфер занят (`Err`) — номер не запоминаем: прочитаем в следующем кадре.
-        if let Ok(copied) = clip::read() {
-            self.seen = seq;
-            self.take(copied, settings);
+        self.collect(settings);
+        if seq == self.seen || self.reader.as_ref().is_some_and(|r| r.pending.is_some()) {
+            return;
+        }
+        // Читать будет поток, кадр дальше не ждёт.
+        let reader = self.reader.get_or_insert_with(|| Reader::start(self.read.clone()));
+        if reader.jobs.send(seq).is_ok() {
+            reader.pending = Some(seq);
+        } else {
+            self.reader = None;
         }
     }
 
@@ -901,6 +1054,9 @@ impl Module for Clipboard {
         let demo = sys::demo();
         let pinned: Vec<String> = if demo { demo_pinned(cx.lang) } else { cx.settings.pinned.clone() };
         let history_on = cx.settings.clipboard;
+        if !history_on {
+            self.forget();
+        }
         // Фильтр — про историю: выключена — закреплённое показывается целиком.
         let filter = if history_on { self.filter } else { Filter::All };
         let rows = match (history_on, demo) {
@@ -1143,20 +1299,26 @@ mod tests {
         assert_eq!(parts(" https://example.org/a#b \n").1, "example.org", "по краям пробелы не в счёт");
     }
 
+    /// Цвет в буфер возвращается таким, каким его скопировали: `rgb(…)`, `#FFF`, слово-хештег из букв a–f.
     #[test]
-    fn a_color_goes_back_as_rrggbb() {
+    fn a_color_goes_back_as_it_was_copied() {
         let text = |t: &str| Clip::from_text(t.to_string()).text();
-        assert_eq!(text("#4F7A12").as_deref(), Some("#4f7a12"));
-        assert_eq!(text("#fff").as_deref(), Some("#ffffff"));
-        assert_eq!(text("rgb(79, 122, 18)").as_deref(), Some("#4f7a12"));
+        for same in ["#4F7A12", "#fff", "#FFF", "rgb(79, 122, 18)", "RGB(0,0,0)", "#add", "#facade", "#decade"] {
+            assert_eq!(text(same).as_deref(), Some(same), "{same}");
+            assert_eq!(Clip::from_text(same.to_string()).kind(), Filter::Colors, "{same}");
+        }
+        assert_eq!(text("  #4f7a12\n").as_deref(), Some("#4f7a12"), "пробелы по краям не в счёт");
         assert_eq!(text("https://example.com").as_deref(), Some("https://example.com"), "ссылка — как была");
         assert_eq!(Clip::image(picture(3, 2, 1)).text(), None, "у картинки текста нет");
-        // Один и тот же цвет — одна запись, как бы его ни записали.
+        // Один и тот же цвет — одна запись, как бы его ни записали; остаётся последняя запись.
         let mut h = VecDeque::new();
         for t in ["#FFF", "#ffffff", "rgb(255,255,255)"] {
             remember(&mut h, Clip::from_text(t.into()));
         }
-        assert_eq!(shown(&h), ["#ffffff"]);
+        assert_eq!(shown(&h), ["rgb(255,255,255)"]);
+        // Другой цвет — другая запись.
+        remember(&mut h, Clip::from_text("#fff000".into()));
+        assert_eq!(shown(&h), ["#fff000", "rgb(255,255,255)"]);
     }
 
     /// Цвет «Пипетки» попадает в историю через буфер: она кладёт в него код (`tools::hex`), а история узнаёт в нём цвет.
@@ -1164,9 +1326,9 @@ mod tests {
     fn a_color_taken_with_the_picker_lands_in_the_history_as_a_color() {
         let picked = Color32::from_rgb(0x2a, 0x5f, 0xd0);
         let code = super::super::tools::hex(picked);
-        assert_eq!(Clip::from_text(code.clone()), Clip::Color([0x2a, 0x5f, 0xd0]));
+        assert_eq!(Clip::from_text(code.clone()), Clip::Color { rgb: [0x2a, 0x5f, 0xd0], text: "#2a5fd0".into() });
         let mut clip = Clipboard::default();
-        clip.take(Some(clip::Copied::Text(code)), &Settings::default());
+        clip.take(Some(clip::Copied::Text(code)), None, &Settings::default());
         assert_eq!(kinds(&clip.history), [Filter::Colors]);
         assert_eq!(shown(&clip.history), ["#2a5fd0"]);
     }
@@ -1456,25 +1618,39 @@ mod tests {
     fn what_is_copied_goes_to_the_history_unless_it_is_pinned() {
         let mut clip = Clipboard::default();
         let settings = Settings { pinned: vec!["pinned text".into()], ..Default::default() };
-        clip.take(Some(clip::Copied::Text("pinned text".into())), &settings);
-        clip.take(Some(clip::Copied::Text("https://example.com/take-test".into())), &settings);
-        clip.take(Some(clip::Copied::Image(picture(5, 4, 9))), &settings);
-        clip.take(Some(clip::Copied::Text("   ".into())), &settings);
-        clip.take(None, &settings);
-        assert_eq!(kinds(&clip.history), [Filter::Images, Filter::Links], "закреплённое, пустое и «ничего» не берём");
+        clip.take(Some(clip::Copied::Text("pinned text".into())), None, &settings);
+        clip.take(Some(clip::Copied::Text("https://example.com/take-test".into())), None, &settings);
+        clip.take(Some(clip::Copied::Image(picture(5, 4, 9))), None, &settings);
+        clip.take(Some(clip::Copied::Text("   ".into())), None, &settings);
+        clip.take(Some(clip::Copied::Text("x".repeat(MAX_LEN + 1))), None, &settings);
+        clip.take(None, None, &settings);
+        assert_eq!(
+            kinds(&clip.history),
+            [Filter::Images, Filter::Links],
+            "закреплённое, пустое, слишком длинное и «ничего» не берём"
+        );
     }
 
+    /// Выключили запоминание — недавнее стирается (и картинки), закреплённое остаётся, новое не берётся и с включением не
+    /// всплывает: как журнал буфера Windows.
     #[test]
-    fn turning_remembering_off_takes_nothing_new_and_keeps_the_old_hidden() {
+    fn turning_remembering_off_erases_the_recent_and_keeps_the_pinned() {
         let mut clip = Clipboard::default();
-        remember(&mut clip.history, Clip::from_text("kept 7741".into()));
+        remember(&mut clip.history, Clip::from_text("forgotten 7741".into()));
         remember(&mut clip.history, Clip::image(picture(4, 3, 1)));
+        clip.filter = Filter::Images;
         // Номер копирования другой, чем запомнен: «выключено» отрабатывает, буфер при этом не читается.
         let other = clip::sequence().wrapping_add(1000);
         clip.seen = other;
-        clip.background(&Settings { clipboard: false, ..Default::default() });
+        let off = Settings { clipboard: false, pinned: vec!["pinned 7741".into()], ..Default::default() };
+        clip.background(&off);
         assert_ne!(clip.seen, other, "номер запомнен — «выключено» отработало");
-        assert_eq!(clip.history.len(), 2, "уже запомненное лежит в памяти — включили снова, оно на месте");
+        assert!(clip.history.is_empty(), "недавнее стёрто вместе с картинкой");
+        assert_eq!(clip.filter, Filter::All);
+        assert_eq!(off.pinned, ["pinned 7741"], "закреплённое — в настройках, остаётся");
+        // Включили снова — пусто; что скопировали, пока было выключено, не всплывает.
+        clip.background(&Settings::default());
+        assert!(clip.history.is_empty() && clip.reader.is_none());
     }
 
     // ─── Карточка в кадрах: ряды, фильтр, кнопки ────────────────────────────
@@ -1622,7 +1798,8 @@ mod tests {
             rig.has_text("Ghbdtn, rfr ltkf?") && rig.has_text("Fix layout"),
             "текст и «Исправить раскладку» у последнего:\n{shown}"
         );
-        assert!(rig.has_text("Image · 6 × 4") && rig.has_text("2 min"), "картинка с размером и временем:\n{shown}");
+        assert!(rig.has_text("6 × 4") && rig.has_text("2 min"), "картинка: только размер, и время:\n{shown}");
+        assert!(!rig.has_text("Image · 6 × 4"), "«Image · …» — в подсказке, а не в строке:\n{shown}");
         assert!(shown.contains("example.com/report") && rig.has_text("5 min"), "ссылка: сайт и остальное:\n{shown}");
         assert!(rig.has_text("#4f7a12") && rig.has_text("8 min"), "цвет с кодом:\n{shown}");
         assert!(!rig.has_text("now"), "у строки с «Исправить раскладку» времени нет — там кнопка:\n{shown}");
@@ -1642,7 +1819,7 @@ mod tests {
         // На русском — свои слова.
         let mut ru = Rig::new(RU, 440.0);
         filled(&mut ru);
-        for word in ["Все", "Текст", "Ссылки", "Картинки", "Цвета", "Исправить раскладку", "Картинка · 6 × 4", "2 мин"]
+        for word in ["Все", "Текст", "Ссылки", "Картинки", "Цвета", "Исправить", "6 × 4", "2 мин"]
         {
             assert!(ru.has_text(word), "«{word}»:\n{}", ru.text());
         }
@@ -1666,14 +1843,14 @@ mod tests {
         // Картинки: только картинка, закреплённого нет.
         rig.click(rig.at("Images"));
         let shown = rig.text();
-        assert!(rig.has_text("Image · 6 × 4"), "{shown}");
+        assert!(rig.has_text("6 × 4"), "{shown}");
         for gone in ["Ghbdtn, rfr ltkf?", "example.com", "#4f7a12", "Thanks, got it!"] {
             assert!(!shown.contains(gone), "«{gone}» при «Картинки»:\n{shown}");
         }
         // Ссылки и цвета — каждая своя; у ссылки нет картинки.
         rig.click(rig.at("Links"));
         assert!(
-            rig.text().contains("example.com") && !rig.has_text("Image · 6 × 4") && !rig.has_text("#4f7a12"),
+            rig.text().contains("example.com") && !rig.has_text("6 × 4") && !rig.has_text("#4f7a12"),
             "{}",
             rig.text()
         );
@@ -1683,7 +1860,7 @@ mod tests {
         rig.click(rig.at("Text"));
         assert!(rig.has_text("Ghbdtn, rfr ltkf?") && rig.has_text("Thanks, got it!"), "{}", rig.text());
         assert!(
-            !rig.text().contains("example.com") && !rig.has_text("#4f7a12") && !rig.has_text("Image · 6 × 4"),
+            !rig.text().contains("example.com") && !rig.has_text("#4f7a12") && !rig.has_text("6 × 4"),
             "{}",
             rig.text()
         );
@@ -1734,6 +1911,15 @@ mod tests {
         let shown = rig.text();
         assert!(rig.has_text("Thanks, got it!") && rig.has_text("Remembering is off in settings."), "{shown}");
         assert!(!rig.has_text("Links") && !rig.has_text("#4f7a12") && !rig.has_text("Fix layout"), "{shown}");
+        assert!(rig.card.history.is_empty(), "недавнее стёрто, а не спрятано");
+        // Включили снова — история пуста, закреплённое на месте.
+        rig.settings.clipboard = true;
+        rig.settle();
+        assert!(
+            rig.has_text("Thanks, got it!") && !rig.has_text("#4f7a12") && !rig.has_text("Links"),
+            "{}",
+            rig.text()
+        );
     }
 
     #[test]
@@ -1784,12 +1970,31 @@ mod tests {
         wide.remember(Clip::from_text(wrong.into()), 0);
         wide.settle();
         let full = wide.rect("clip-fix-0").expect("кнопка");
-        assert!(wide.has_text("Исправить раскладку") && full.width() > 100.0, "{}", wide.text());
-        let mut narrow = Rig::new(RU, 230.0);
+        assert!(
+            wide.has_text("Исправить") && !wide.has_text("Исправить раскладку") && full.width() > 60.0,
+            "{}",
+            wide.text()
+        );
+        // На карточке обычной ширины (строка около 213 точек) по-русски остаётся слово — «Исправить», а не значок.
+        let mut usual = Rig::new(RU, 213.0);
+        usual.remember(Clip::from_text(wrong.into()), 0);
+        usual.settle();
+        assert!(
+            usual.has_text("Исправить") && usual.rect("clip-fix-0").is_some_and(|r| r.width() > 60.0),
+            "{}",
+            usual.text()
+        );
+        assert!(
+            usual.text().contains("ghbdtn"),
+            "и от текста осталось начало:
+{}",
+            usual.text()
+        );
+        let mut narrow = Rig::new(RU, 190.0);
         narrow.remember(Clip::from_text(wrong.into()), 0);
         narrow.settle();
         let small = narrow.rect("clip-fix-0").expect("кнопка осталась");
-        assert!(!narrow.has_text("Исправить раскладку") && small.width() == 24.0, "{}", narrow.text());
+        assert!(!narrow.has_text("Исправить") && small.width() == 24.0, "{}", narrow.text());
         assert!(narrow.has_text(wrong), "и текст на месте — он не уступил кнопке:\n{}", narrow.text());
         // Щелчок по значку делает то же, что по надписи.
         narrow.click(small.center());
@@ -1895,5 +2100,280 @@ mod tests {
         assert!(matches!(&rows[3].look, Look::Color { rgb: [0x4f, 0x7a, 0x12], .. }));
         assert_eq!(card.demo_rows(&ctx, Filter::Links).len(), 1);
         assert!(card.demo_rows(&ctx, Filter::Text).iter().all(|r| r.kind() == Filter::Text));
+    }
+
+    // ─── Предел по памяти ───────────────────────────────────────────────────
+
+    const MB: usize = 1024 * 1024;
+
+    /// Картинка в `len` байт (заголовок DIB и нули): для пределов по памяти пиксели не нужны. `seed` — чем одна отличается от
+    /// другой (в записи он виден по `heavy_seeds`).
+    fn heavy(len: usize, seed: u8) -> Clip {
+        let mut bytes = vec![0u8; len];
+        bytes[0..4].copy_from_slice(&40u32.to_le_bytes());
+        bytes[4..8].copy_from_slice(&1024i32.to_le_bytes());
+        bytes[8..12].copy_from_slice(&1024i32.to_le_bytes());
+        bytes[20] = seed;
+        Clip::image_with(clip::image_of(bytes, false).expect("в пределах"), None)
+    }
+
+    fn heavy_seeds(history: &VecDeque<Entry>) -> Vec<u8> {
+        history
+            .iter()
+            .filter_map(|e| match &e.clip {
+                Clip::Image(img) => Some(img.image.bytes[20]),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn all_images_together_take_at_most_eighty_megabytes_and_the_oldest_leave_first() {
+        // Три по 30 МБ — 90: самая старая уходит.
+        let mut h = VecDeque::new();
+        for seed in 1..=3 {
+            remember(&mut h, heavy(30 * MB, seed));
+        }
+        assert_eq!(heavy_seeds(&h), [3, 2]);
+        // Две по 40 МБ — ровно 80, влезают…
+        let mut h = VecDeque::new();
+        remember(&mut h, heavy(40 * MB, 1));
+        remember(&mut h, heavy(40 * MB, 2));
+        assert_eq!(heavy_seeds(&h), [2, 1]);
+        // …лишние байты — нет: старая уходит.
+        remember(&mut h, heavy(60, 3));
+        assert_eq!(heavy_seeds(&h), [3, 2]);
+        // Не влезла — уходят и все старше неё, даже если сами поместились бы.
+        let mut h = VecDeque::new();
+        remember(&mut h, heavy(100, 1));
+        remember(&mut h, heavy(40 * MB, 2));
+        remember(&mut h, heavy(40 * MB, 3));
+        assert_eq!(heavy_seeds(&h), [3, 2]);
+        // Тексты в счёт не идут; а штук — не больше пяти, как и было.
+        let mut h = VecDeque::new();
+        for seed in 1..=7 {
+            remember(&mut h, heavy(1000, seed));
+            remember(&mut h, Clip::from_text(format!("text {seed}")));
+        }
+        assert_eq!(heavy_seeds(&h), [7, 6, 5, 4, 3]);
+        assert_eq!(MAX_IMAGES_BYTES, 2 * clip::MAX_IMAGE_BYTES, "две самые большие картинки — ровно в предел");
+    }
+
+    // ─── Поток чтения ───────────────────────────────────────────────────────
+
+    type Answer = Result<Option<clip::Copied>, ()>;
+
+    /// «Буфер» теста: ответы по очереди (кончились — «ничего»), перед каждым пауза; сколько раз читали — в счётчике.
+    fn scripted(answers: Vec<Answer>, pause: Duration) -> (ReadFn, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let queue = Arc::new(std::sync::Mutex::new(VecDeque::from(answers)));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+        let read: ReadFn = Arc::new(move || {
+            count.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(pause);
+            queue.lock().unwrap_or_else(|e| e.into_inner()).pop_front().unwrap_or(Ok(None))
+        });
+        (read, calls)
+    }
+
+    /// Номер копирования сменился (запомненный — другой): очередной кадр пошлёт чтение.
+    fn changed(clip: &mut Clipboard) {
+        clip.seen = clip::sequence().wrapping_add(1000);
+    }
+
+    /// Кадры, пока не выполнится условие (до пяти секунд).
+    fn frames_until(clip: &mut Clipboard, settings: &Settings, mut done: impl FnMut(&Clipboard) -> bool) -> bool {
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(5) {
+            clip.background(settings);
+            if done(clip) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        false
+    }
+
+    #[test]
+    fn the_frame_does_not_wait_for_the_clipboard_reader() {
+        use std::sync::atomic::Ordering;
+        let answer = Ok(Some(clip::Copied::Text("slow copy 7752".into())));
+        let (read, calls) = scripted(vec![answer], Duration::from_millis(500));
+        let mut clip = Clipboard::with_reader(read);
+        changed(&mut clip);
+        let settings = Settings::default();
+        let started = Instant::now();
+        clip.background(&settings);
+        clip.background(&settings);
+        assert!(started.elapsed() < Duration::from_millis(250), "кадры не ждут чтения: {:?}", started.elapsed());
+        assert!(clip.history.is_empty(), "чтение ещё идёт");
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "пока чтение идёт, второе не посылается");
+        assert!(frames_until(&mut clip, &settings, |c| !c.history.is_empty()), "ответ потока дошёл");
+        assert_eq!(shown(&clip.history), ["slow copy 7752"]);
+    }
+
+    #[test]
+    fn the_reader_gives_the_picture_with_its_thumbnail() {
+        let (read, _) = scripted(vec![Ok(Some(clip::Copied::Image(picture(6, 4, 7))))], Duration::ZERO);
+        let mut clip = Clipboard::with_reader(read);
+        changed(&mut clip);
+        assert!(frames_until(&mut clip, &Settings::default(), |c| !c.history.is_empty()));
+        let Clip::Image(img) = &clip.history[0].clip else {
+            panic!("не картинка: {:?}", clip.history[0].clip)
+        };
+        let px = img.thumb_px.as_ref().expect("миниатюру посчитал поток");
+        assert_eq!((px.size, img.image.width, img.image.height), ([72, 48], 6, 4));
+    }
+
+    #[test]
+    fn a_busy_clipboard_is_read_again_in_a_later_frame() {
+        use std::sync::atomic::Ordering;
+        let (read, calls) =
+            scripted(vec![Err(()), Ok(Some(clip::Copied::Text("second try 3381".into())))], Duration::ZERO);
+        let mut clip = Clipboard::with_reader(read);
+        changed(&mut clip);
+        let before = clip.seen;
+        assert!(frames_until(&mut clip, &Settings::default(), |c| !c.history.is_empty()));
+        assert_eq!(shown(&clip.history), ["second try 3381"]);
+        assert!(calls.load(Ordering::SeqCst) >= 2, "первый раз буфер был занят");
+        assert_ne!(clip.seen, before);
+    }
+
+    #[test]
+    fn a_failure_while_reading_does_not_stop_the_reader() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+        let read: ReadFn = Arc::new(move || {
+            if count.fetch_add(1, Ordering::SeqCst) == 0 {
+                panic!("чужие данные в буфере (так задумано в тесте)");
+            }
+            Ok(Some(clip::Copied::Text("after the failure 5592".into())))
+        });
+        let mut clip = Clipboard::with_reader(read);
+        let settings = Settings::default();
+        changed(&mut clip);
+        // Первое чтение падает: запись не берётся, номер запомнен.
+        assert!(frames_until(&mut clip, &settings, |c| c.seen == clip::sequence()));
+        assert!(clip.history.is_empty());
+        // Следующее копирование поток читает как обычно.
+        changed(&mut clip);
+        assert!(frames_until(&mut clip, &settings, |c| !c.history.is_empty()));
+        assert_eq!(shown(&clip.history), ["after the failure 5592"]);
+    }
+
+    #[test]
+    fn an_answer_that_comes_after_remembering_was_turned_off_is_dropped() {
+        let answer = Ok(Some(clip::Copied::Text("late copy 6643".into())));
+        let (read, _) = scripted(vec![answer], Duration::from_millis(200));
+        let mut clip = Clipboard::with_reader(read);
+        changed(&mut clip);
+        clip.background(&Settings::default());
+        assert!(clip.reader.as_ref().is_some_and(|r| r.pending.is_some()), "чтение пошло");
+        let off = Settings { clipboard: false, ..Default::default() };
+        clip.background(&off);
+        std::thread::sleep(Duration::from_millis(450));
+        clip.background(&off);
+        assert!(clip.history.is_empty() && clip.reader.is_none());
+        // Включили: номер уже запомнен, старое чтение не всплывает и нового нет.
+        clip.background(&Settings::default());
+        assert!(clip.history.is_empty() && clip.reader.is_none());
+    }
+
+    /// Настоящее чтение в тестах и демо молчит: из буфера владельца не берётся ничего.
+    #[test]
+    fn the_default_reader_never_touches_the_real_clipboard_in_tests() {
+        let mut clip = Clipboard::default();
+        changed(&mut clip);
+        assert!(frames_until(&mut clip, &Settings::default(), |c| c.seen == clip::sequence()));
+        assert!(clip.history.is_empty());
+    }
+
+    // ─── Миниатюра: маски, таблица цветов ───────────────────────────────────
+
+    /// Порядок каналов — по маскам: у RGBA красный в первом байте, у BGRA — в третьем; миниатюра цвета не путает.
+    #[test]
+    fn thumbnails_follow_the_masks_for_either_channel_order() {
+        // 3 × 2: слева красный, красный, справа синий — всё окно 3 : 2 в миниатюре.
+        let rows = [[255u8, 0, 0], [255, 0, 0], [0, 0, 255]];
+        for (masks, red_first) in
+            [([0x0000_00ffu32, 0x0000_ff00, 0x00ff_0000], true), ([0x00ff_0000, 0x0000_ff00, 0xff], false)]
+        {
+            let mut b = vec![0u8; 40];
+            b[0..4].copy_from_slice(&40u32.to_le_bytes());
+            b[4..8].copy_from_slice(&3i32.to_le_bytes());
+            b[8..12].copy_from_slice(&(-2i32).to_le_bytes());
+            b[12..14].copy_from_slice(&1u16.to_le_bytes());
+            b[14..16].copy_from_slice(&32u16.to_le_bytes());
+            b[16..20].copy_from_slice(&3u32.to_le_bytes());
+            masks.iter().for_each(|m| b.extend_from_slice(&m.to_le_bytes()));
+            for _ in 0..2 {
+                for [r, g, bl] in rows {
+                    b.extend_from_slice(&if red_first { [r, g, bl, 0] } else { [bl, g, r, 0] });
+                }
+            }
+            let thumb = make_thumb(&b).unwrap_or_else(|| panic!("маски {masks:x?}"));
+            assert_eq!((thumb.pixels[0], thumb.pixels[71]), (Color32::RED, Color32::BLUE), "маски {masks:x?}");
+        }
+    }
+
+    #[test]
+    fn thumbnails_skip_the_color_table_in_front_of_the_pixels() {
+        let mut dib = dib24(3, 2, |x, _| if x < 2 { [255, 0, 0] } else { [0, 0, 255] });
+        dib[32..36].copy_from_slice(&2u32.to_le_bytes());
+        dib.splice(40..40, [0xee; 8]);
+        let thumb = make_thumb(&dib).expect("24 бита с таблицей цветов");
+        assert_eq!((thumb.pixels[0], thumb.pixels[71]), (Color32::RED, Color32::BLUE));
+        // Таблица больше, чем байтов, — не DIB.
+        dib[32..36].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(make_thumb(&dib).is_none());
+    }
+
+    // ─── Строка: подсказка, имя, время ──────────────────────────────────────
+
+    #[test]
+    fn a_row_tells_everything_in_its_tip_and_name() {
+        let (en, ru) = (texts::tr(EN), texts::tr(RU));
+        let image = Look::Image { width: 1280, height: 720, thumb: None };
+        let (name, tip) = row_texts(&image, ru, RU);
+        assert_eq!(
+            (name.as_str(), tip.as_str()),
+            ("Картинка · 1280 × 720", "Положить в буфер обмена\nКартинка · 1280 × 720")
+        );
+        assert_eq!(row_texts(&image, en, EN).0, "Image · 1280 × 720");
+        // Текст: в подсказке его начало — строка могла не поместиться.
+        let long = "слово ".repeat(100);
+        let (name, tip) = row_texts(&Look::Text(long.trim().into()), ru, RU);
+        assert_eq!(name, long.trim());
+        let body = tip.strip_prefix("Положить в буфер обмена\n").expect("начало подсказки");
+        assert!((TIP_LEN - 1..=TIP_LEN).contains(&body.chars().count()) && body.ends_with('…'), "{body}");
+        assert!(body.starts_with("слово слово слово"));
+        assert_eq!(row_texts(&Look::Text("Hello".into()), en, EN).1, "Put on the clipboard\nHello");
+        let link = Look::Link { site: "example.com".into(), rest: "/report".into() };
+        assert_eq!(row_texts(&link, en, EN).1, "Put on the clipboard\nexample.com/report");
+        assert_eq!(cut("abc", 3), "abc");
+        assert_eq!(cut("abcd", 3), "ab…");
+    }
+
+    #[test]
+    fn a_picture_row_keeps_its_time_under_the_mouse() {
+        let mut rig = Rig::new(EN, 440.0);
+        rig.remember(Clip::image(picture(6, 4, 7)), 120);
+        rig.remember(Clip::from_text("Plain text 8821".into()), 90);
+        rig.settle();
+        rig.away();
+        assert!(rig.has_text("2 min") && rig.has_text("1 min"), "{}", rig.text());
+        let picture_row = rig.rect("clip-row-1").expect("строка картинки");
+        rig.move_to(picture_row.center());
+        assert!(rig.has_text("2 min"), "у картинки кнопок нет — время под мышью на месте:\n{}", rig.text());
+        let text_row = rig.rect("clip-row-0").expect("строка текста");
+        rig.move_to(text_row.center());
+        assert!(
+            !rig.has_text("1 min") && rig.rect("clip-pin-0").is_some(),
+            "у текста под мышью вместо времени кнопки:\n{}",
+            rig.text()
+        );
     }
 }
