@@ -6,7 +6,9 @@
 # `scene` — её номер, `ANTRESOL_SCENE`; `scene-ask` — с вопросом «Удалить сцену?», `scene-name` — с негодным именем),
 # поиск действий (`view = "search"`, `query` — запрос, `ANTRESOL_QUERY`), настройки (`settings-ask` — с тем же вопросом у
 # сцены), «Свой цвет…», полоска у края, живые плашки (`view = "strip-plaque-<вид>"`: bluetooth, battery, usb, ejecting, eject, busy, gone,
-# github, downloads, downloads-many, downloads-danger, timer — выдуманные данные на языке кадра, панель спрятана, снимается только окно плашки). Тёмная RU и светлая EN.
+# github, downloads, downloads-many, downloads-danger, timer, meeting — выдуманные данные на языке кадра, панель спрятана, снимается только окно плашки). Тёмная RU и светлая EN.
+# Полка «День» (`shelf = "3"`): с календарём (`calendar=` — выдуманная ссылка; встречи — выдуманные, из самой программы), список календарей
+# (`view = "meetings-manage"`, два календаря) и без календаря.
 # У кадра может быть своя высота панели (`height`, по умолчанию 340): «Под рукой» снимается на 400 — буферу с чипами нужны
 # строки, настройки — на 480: «Живые плашки» в карточке «Панель» иначе ниже края.
 param([string]$Exe = "E:\dev_personal\antresol-scratch\target-shot\debug\antresol.exe",
@@ -33,13 +35,22 @@ function Get-Buttons($lang) {
   }
   return @("Загрузки | %USERPROFILE%\Downloads", "Блокнот | notepad.exe", "Терминал | powershell.exe | -NoExit | terminal")
 }
+# Календари для «Дня»: выдуманные ссылки (сети в демо нет — встречи выдуманные, из самой программы).
+$calendar = "calendar=https://calendar.example.com/work/demo.ics"
+$calendar2 = "calendar=webcal://calendar.example.com/home/home.ics"
 $scenes = @(
   @{ n = "panel-dark-ru";    lang = "ru"; theme = "dark";  view = "" },
   @{ n = "panel-light-en";   lang = "en"; theme = "light"; view = "" },
   @{ n = "shelf-system-dark-ru";  lang = "ru"; theme = "dark";  view = ""; shelf = "2" },
   @{ n = "shelf-system-light-en"; lang = "en"; theme = "light"; view = ""; shelf = "2" },
-  @{ n = "shelf-hand-dark-ru";    lang = "ru"; theme = "dark";  view = ""; shelf = "3"; height = 400 },
-  @{ n = "shelf-hand-light-en";   lang = "en"; theme = "light"; view = ""; shelf = "3"; height = 400 },
+  @{ n = "shelf-day-dark-ru";     lang = "ru"; theme = "dark";  view = ""; shelf = "3"; extra = @($calendar) },
+  @{ n = "shelf-day-light-en";    lang = "en"; theme = "light"; view = ""; shelf = "3"; extra = @($calendar) },
+  @{ n = "shelf-day-manage-dark-ru";  lang = "ru"; theme = "dark";  view = "meetings-manage"; shelf = "3"; extra = @($calendar, $calendar2) },
+  @{ n = "shelf-day-manage-light-en"; lang = "en"; theme = "light"; view = "meetings-manage"; shelf = "3"; extra = @($calendar, $calendar2) },
+  @{ n = "shelf-day-empty-dark-ru";   lang = "ru"; theme = "dark";  view = ""; shelf = "3" },
+  @{ n = "shelf-day-empty-light-en";  lang = "en"; theme = "light"; view = ""; shelf = "3" },
+  @{ n = "shelf-hand-dark-ru";    lang = "ru"; theme = "dark";  view = ""; shelf = "4"; height = 400 },
+  @{ n = "shelf-hand-light-en";   lang = "en"; theme = "light"; view = ""; shelf = "4"; height = 400 },
   @{ n = "edit-dark-ru";     lang = "ru"; theme = "dark";  view = "edit"; extra = @("hidden=media") },
   @{ n = "edit-light-en";    lang = "en"; theme = "light"; view = "edit"; extra = @("hidden=media") },
   @{ n = "scene-dark-ru";    lang = "ru"; theme = "dark";  view = "scene"; scene = "3" },
@@ -80,7 +91,9 @@ $scenes = @(
   @{ n = "plaque-downloads-danger-dark-ru";  lang = "ru"; theme = "dark";  view = "strip-plaque-downloads-danger" },
   @{ n = "plaque-downloads-danger-light-en"; lang = "en"; theme = "light"; view = "strip-plaque-downloads-danger" },
   @{ n = "plaque-timer-dark-ru";       lang = "ru"; theme = "dark";  view = "strip-plaque-timer" },
-  @{ n = "plaque-timer-light-en";      lang = "en"; theme = "light"; view = "strip-plaque-timer" }
+  @{ n = "plaque-timer-light-en";      lang = "en"; theme = "light"; view = "strip-plaque-timer" },
+  @{ n = "plaque-meeting-dark-ru";     lang = "ru"; theme = "dark";  view = "strip-plaque-meeting" },
+  @{ n = "plaque-meeting-light-en";    lang = "en"; theme = "light"; view = "strip-plaque-meeting" }
 )
 foreach ($s in $scenes) {
   if ($Only -and $s.n -ne $Only) { continue }
