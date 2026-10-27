@@ -5,8 +5,8 @@
 # Кадры: полки (`shelf` — номер полки, `ANTRESOL_SHELF`), правка полок (`view = "edit"`), правка сцены (`view = "scene"`,
 # `scene` — её номер, `ANTRESOL_SCENE`; `scene-ask` — с вопросом «Удалить сцену?», `scene-name` — с негодным именем),
 # поиск действий (`view = "search"`, `query` — запрос, `ANTRESOL_QUERY`), настройки (`settings-ask` — с тем же вопросом у
-# сцены), «Свой цвет…», полоска у края, живые плашки (`view = "strip-plaque-<вид>"`: bluetooth, battery, usb, eject, busy, github,
-# downloads, timer — выдуманные данные на языке кадра, панель спрятана, снимается только окно плашки). Тёмная RU и светлая EN.
+# сцены), «Свой цвет…», полоска у края, живые плашки (`view = "strip-plaque-<вид>"`: bluetooth, battery, usb, ejecting, eject, busy, gone,
+# github, downloads, downloads-many, downloads-danger, timer — выдуманные данные на языке кадра, панель спрятана, снимается только окно плашки). Тёмная RU и светлая EN.
 # У кадра может быть своя высота панели (`height`, по умолчанию 340): «Под рукой» снимается на 400 — буферу с чипами нужны
 # строки, настройки — на 480: «Живые плашки» в карточке «Панель» иначе ниже края.
 param([string]$Exe = "E:\dev_personal\antresol-scratch\target-shot\debug\antresol.exe",
@@ -63,14 +63,22 @@ $scenes = @(
   @{ n = "plaque-battery-light-en";    lang = "en"; theme = "light"; view = "strip-plaque-battery" },
   @{ n = "plaque-usb-dark-ru";         lang = "ru"; theme = "dark";  view = "strip-plaque-usb" },
   @{ n = "plaque-usb-light-en";        lang = "en"; theme = "light"; view = "strip-plaque-usb" },
+  @{ n = "plaque-ejecting-dark-ru";    lang = "ru"; theme = "dark";  view = "strip-plaque-ejecting" },
+  @{ n = "plaque-ejecting-light-en";   lang = "en"; theme = "light"; view = "strip-plaque-ejecting" },
   @{ n = "plaque-eject-dark-ru";       lang = "ru"; theme = "dark";  view = "strip-plaque-eject" },
   @{ n = "plaque-eject-light-en";      lang = "en"; theme = "light"; view = "strip-plaque-eject" },
   @{ n = "plaque-busy-dark-ru";        lang = "ru"; theme = "dark";  view = "strip-plaque-busy" },
   @{ n = "plaque-busy-light-en";       lang = "en"; theme = "light"; view = "strip-plaque-busy" },
+  @{ n = "plaque-gone-dark-ru";        lang = "ru"; theme = "dark";  view = "strip-plaque-gone" },
+  @{ n = "plaque-gone-light-en";       lang = "en"; theme = "light"; view = "strip-plaque-gone" },
   @{ n = "plaque-github-dark-ru";      lang = "ru"; theme = "dark";  view = "strip-plaque-github" },
   @{ n = "plaque-github-light-en";     lang = "en"; theme = "light"; view = "strip-plaque-github" },
   @{ n = "plaque-downloads-dark-ru";   lang = "ru"; theme = "dark";  view = "strip-plaque-downloads" },
   @{ n = "plaque-downloads-light-en";  lang = "en"; theme = "light"; view = "strip-plaque-downloads" },
+  @{ n = "plaque-downloads-many-dark-ru";    lang = "ru"; theme = "dark";  view = "strip-plaque-downloads-many" },
+  @{ n = "plaque-downloads-many-light-en";   lang = "en"; theme = "light"; view = "strip-plaque-downloads-many" },
+  @{ n = "plaque-downloads-danger-dark-ru";  lang = "ru"; theme = "dark";  view = "strip-plaque-downloads-danger" },
+  @{ n = "plaque-downloads-danger-light-en"; lang = "en"; theme = "light"; view = "strip-plaque-downloads-danger" },
   @{ n = "plaque-timer-dark-ru";       lang = "ru"; theme = "dark";  view = "strip-plaque-timer" },
   @{ n = "plaque-timer-light-en";      lang = "en"; theme = "light"; view = "strip-plaque-timer" }
 )
