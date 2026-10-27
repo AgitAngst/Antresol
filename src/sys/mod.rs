@@ -122,6 +122,17 @@ pub fn wide_os(s: &std::ffi::OsStr) -> Vec<u16> {
     s.encode_wide().chain(std::iter::once(0)).collect()
 }
 
+/// Подождать, пока процесс `pid` выйдет, не дольше `ms`. Нет такого (уже вышел) — сразу. Только ждёт, ничего не меняет.
+pub fn wait_process_exit(pid: u32, ms: u32) {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject};
+    unsafe {
+        let Ok(h) = OpenProcess(PROCESS_SYNCHRONIZE, false, pid) else { return };
+        WaitForSingleObject(h, ms);
+        let _ = CloseHandle(h);
+    }
+}
+
 /// Открыть как двойным щелчком: программу, папку, файл или адрес. `args` — только для программ.
 pub fn launch(target: &str, args: &str) -> Result<(), String> {
     launch_os(std::ffi::OsStr::new(target), std::ffi::OsStr::new(args))

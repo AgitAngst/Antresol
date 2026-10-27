@@ -329,6 +329,8 @@ pub struct App {
     no_activate: Option<bool>,
     /// `ANTRESOL_SHOT`: снять своё окно в файл и закрыться.
     shot: Option<crate::shot::Shot>,
+    /// Обновления (`anvil-update`); в демо и тестах — нет.
+    updater: Option<anvil_update::Updater>,
 }
 
 /// Сочетание в виде, который ждёт поток клавиш: модификаторы и клавиша.
@@ -341,6 +343,7 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let settings = config::load();
         let height = settings.height;
+        let updater = crate::update::new(&cc.egui_ctx);
         anvil_ui::install(&cc.egui_ctx, look::accent_of(&settings.accent), settings.common.theme);
         settings.common.apply(&cc.egui_ctx);
         let ctx = cc.egui_ctx.clone();
@@ -431,6 +434,7 @@ impl App {
             pointer_over: false,
             no_activate: None,
             shot: crate::shot::Shot::from_env(),
+            updater,
         };
         // Для снимков: `ANTRESOL_VIEW=search` — сразу вид поиска, `ANTRESOL_QUERY=1080` — с этим запросом.
         if app.view == View::Search {
@@ -956,6 +960,10 @@ impl App {
 
     fn tick(&mut self, ctx: &egui::Context) {
         motion::tick(ctx);
+        // Обновления: при запуске и раз в сутки, если включено.
+        if let Some(u) = &self.updater {
+            u.auto(&self.settings.common);
+        }
         if let Some(shot) = &mut self.shot {
             shot.tick(ctx);
         }
@@ -2484,6 +2492,8 @@ impl App {
                         self.settings.panel_hotkey = None;
                     }
                 }
+                ui.add_space(8.0);
+                self.updates_ui(ui);
             });
         });
 
@@ -2492,6 +2502,68 @@ impl App {
                 self.settings.common.apply(&ctx);
             }
             self.save();
+        }
+    }
+
+    /// Баннер обновления над карточками (`anvil_update::ui::banner`): вышла версия, качается, ждёт перезапуска, не вышло.
+    /// Сам меряется вместе с полкой: карточкам под ним меньше места, и высота по полке растёт на его высоту.
+    fn update_banner(&mut self, ui: &mut Ui) {
+        let Some(u) = self.updater.clone() else { return };
+        if anvil_update::ui::banner(ui, &u, &mut self.settings.common) {
+            self.save();
+        }
+    }
+
+    /// «Обновления» в настройках: проверять ли, предлагать ли пред-выпуски, что сейчас и одна кнопка по состоянию.
+    fn updates_ui(&mut self, ui: &mut Ui) {
+        use crate::update::Button;
+        let t = texts::tr(self.lang());
+        let ctx = ui.ctx().clone();
+        w::section_label(ui, t.updates);
+        w::switch(ui, &mut self.settings.common.check_updates, t.check_updates);
+        w::switch(ui, &mut self.settings.common.prerelease, t.prerelease);
+        let state = self.updater.as_ref().map(|u| u.state());
+        let status = self.updater.as_ref().and_then(|u| anvil_update::ui::about_status(&ctx, u));
+        let button = state.as_ref().map_or(Button::Check, crate::update::button);
+        ui.horizontal_wrapped(|ui| {
+            let (label, icon) = match button {
+                Button::Check => (t.update_check, Icon::Refresh),
+                Button::Install => (t.update_install, Icon::Download),
+                Button::Restart => (t.update_restart, Icon::Refresh),
+                Button::Retry => (t.update_retry, Icon::Refresh),
+                Button::None => ("", Icon::Refresh),
+            };
+            if button != Button::None {
+                // Главная — только «Обновить» и «Перезапустить»: там решение уже за пользователем.
+                let kind =
+                    if matches!(button, Button::Install | Button::Restart) { Kind::Primary } else { Kind::Secondary };
+                let r = ui.add_enabled_ui(self.updater.is_some(), |ui| w::button(ui, kind, Some(icon), label)).inner;
+                if r.clicked()
+                    && let Some(u) = &self.updater
+                {
+                    match button {
+                        Button::Check => u.check(self.settings.common.prerelease, None, true),
+                        Button::Install | Button::Retry => u.install(),
+                        Button::Restart => match u.restart() {
+                            Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                            Err(e) => self.toasts.push(format!("{}: {e}", t.failed), Tone::Danger),
+                        },
+                        Button::None => {}
+                    }
+                }
+            }
+            if let Some(anvil_update::State::Downloading { done, total, .. }) = &state {
+                w::progress(ui, (*total > 0).then(|| *done as f32 / *total as f32), 150.0);
+            }
+        });
+        match status {
+            Some(s) => {
+                w::note(ui, s);
+            }
+            None if self.updater.is_none() => {
+                w::note(ui, t.updates_demo);
+            }
+            None => {}
         }
     }
 
@@ -3253,7 +3325,10 @@ impl App {
         let mut body_ui = content.new_child(UiBuilder::new().max_rect(body));
         let device = self.monitor().map(|m| m.device.clone()).unwrap_or_default();
         match self.view {
-            View::Cards => self.cards(&mut body_ui, &device, &mut ops),
+            View::Cards => {
+                self.update_banner(&mut body_ui);
+                self.cards(&mut body_ui, &device, &mut ops)
+            }
             View::Settings => self.settings_view(&mut body_ui),
             View::Color => self.color_view(&mut body_ui),
             View::Scene => self.scene_view(&mut body_ui),
@@ -3965,6 +4040,7 @@ mod tests {
             let mut edge = Edge::default();
             edge.take_keyboard();
             let height = settings.height;
+            let updater = None;
             App {
                 settings,
                 edge,
@@ -4020,6 +4096,7 @@ mod tests {
                 pointer_over: false,
                 no_activate: None,
                 shot: None,
+                updater,
             }
         }
     }

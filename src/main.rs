@@ -13,9 +13,12 @@ mod search;
 mod shot;
 mod sys;
 mod texts;
+mod update;
 mod watch;
 
 fn main() -> eframe::Result<()> {
+    // После «Перезапустить» — дождаться, пока прежняя версия закроется (она ещё держит сочетания клавиш).
+    update::wait_for_previous();
     let s = config::load();
     // Окно без рамки, поверх всех и без кнопки на панели задач. Место и размер
     // App ставит сам у верхнего края монитора.

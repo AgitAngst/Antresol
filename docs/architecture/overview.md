@@ -180,6 +180,18 @@
 - Автозапуск — строка `Antresol` в `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
 - Цвет Windows — `AccentColor` (0xAABBGGRR) в `HKCU\Software\Microsoft\Windows\DWM`.
 
+## Обновления (2.9)
+
+`src/update.rs` — обёртка над `anvil-update` (тег набора тот же, что у `anvil-ui`): `update::new` заводит `Updater`
+(`Config::new("antresol", версия, "AgitAngst/Antresol")`), кроме демо и тестов (`sys::isolated` — сети там нет), и
+зовёт `anvil_update::cleanup` (остатки прошлой подмены exe). `App::tick` зовёт `Updater::auto` (при запуске и раз в
+сутки, если `common.check_updates`); баннер — `anvil_update::ui::banner` в начале тела вида карточек (`update_banner`),
+раздел в настройках — `updates_ui` (кнопка по состоянию — `update::button`). Выпуск кладёт общий workflow семьи
+(`release.yml` → `rust-release.yml`): `antresol-X.Y.Z-windows-x64.zip` и `SHA256SUMS`, без которого крейт не ставит.
+Перезапуск: `Updater::restart` запускает новый exe, панель закрывается; новый процесс в начале `main`
+(`update::wait_for_previous`) ждёт прежний по номеру из `ANTRESOL_RESTARTED` (`sys::wait_process_exit`, до 10 с) и пишет
+туда свой. Только в debug-сборке `ANTRESOL_UPDATE_AS=2.7.0` выдаёт себя за старую версию — проверить путь на копии.
+
 ## Демо-режим и тесты: выдуманный мир
 
 Демо (`ANTRESOL_DEMO=1`, снимки в открытый репозиторий) и тесты работают не с настоящей Windows, а с выдуманной

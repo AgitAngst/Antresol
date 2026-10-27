@@ -889,6 +889,10 @@ pub fn parse(text: &str) -> Settings {
         let (key, value) = (key.trim(), value.trim());
         match key {
             "lang" => s.common.language = if value == "en" { Lang::En } else { Lang::Ru },
+            // Обновления — те же ключи, что у Kamerton: `updates=0` — не проверять, `prerelease=1`, `skip_version=1.2.3`.
+            "updates" => s.common.check_updates = value != "0",
+            "prerelease" => s.common.prerelease = value == "1",
+            "skip_version" => s.common.skip_version = Some(value.to_string()).filter(|v| !v.is_empty()),
             "theme" => {
                 s.common.theme = match value {
                     "light" => ThemeChoice::Light,
@@ -1021,6 +1025,11 @@ pub fn format(s: &Settings) -> String {
     out.push_str(&format!("strip={}\nexclude={}\nclipboard={}\n", s.strip, s.exclude.join(","), s.clipboard));
     out.push_str(&format!("edge_zone={}\nedge_depth={}\nstrip_scale={}\n", s.edge_zone, s.edge_depth, s.strip_scale));
     out.push_str(&format!("accent={}\nmedia_strip={}\nplaques_off={}\n", s.accent, s.media_strip, s.plaques));
+    let on = |b: bool| if b { 1 } else { 0 };
+    out.push_str(&format!("updates={}\nprerelease={}\n", on(s.common.check_updates), on(s.common.prerelease)));
+    if let Some(v) = &s.common.skip_version {
+        out.push_str(&format!("skip_version={v}\n"));
+    }
     if !s.kamerton.is_empty() {
         out.push_str(&format!("kamerton={}\n", s.kamerton));
     }
@@ -1936,5 +1945,17 @@ mod tests {
         assert_eq!(got[1], ("@sys", None), "у пустой полки было 999 — оно ушло с ней; NaN — по полке");
         assert_eq!(got[2], ("@hand", Some(MAX_HEIGHT as u16)));
         assert!(got[3..].iter().all(|(_, h)| h.is_none()), "добавленные программой — по полке: {got:?}");
+    }
+
+    /// Обновления: `updates=`, `prerelease=`, `skip_version=` (как у Kamerton) — туда и обратно; по умолчанию проверять.
+    #[test]
+    fn update_settings_survive_the_file() {
+        assert!(parse("").common.check_updates, "по умолчанию — проверять");
+        let s = parse("updates=0\nprerelease=1\nskip_version=2.9.0\n");
+        assert!(!s.common.check_updates && s.common.prerelease);
+        assert_eq!(s.common.skip_version.as_deref(), Some("2.9.0"));
+        let back = parse(&format(&s));
+        assert_eq!(back.common, s.common);
+        assert!(parse("skip_version=\n").common.skip_version.is_none());
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "antresol"
-version = "2.8.0"
+version = "2.9.0"
 edition = "2024"
 description = "Quick-access panel at the top edge of the monitor"
 license = "MIT"
@@ -13,6 +13,8 @@ path = "src/main.rs"
 [dependencies]
 # Общий вид семьи Anvil. Правка набора на живую — `[patch]` в .cargo/config.toml (не в git).
 anvil-ui = { git = "https://github.com/AgitAngst/Anvil", tag = "kit-v0.6.1" }
+# Обновления изнутри программы (GitHub Releases, SHA-256, перезапуск) — общий крейт набора, тот же тег.
+anvil-update = { git = "https://github.com/AgitAngst/Anvil", tag = "kit-v0.6.1" }
 eframe = "0.36.2"
 
 # Win32: мониторы, режимы экрана и масштаб, DDC/CI, запуск, горячая клавиша, автозапуск; съёмные диски и безопасное
