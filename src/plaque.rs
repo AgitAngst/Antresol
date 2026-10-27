@@ -142,9 +142,10 @@ pub fn middle(name: &str, keep: usize) -> String {
     if keep <= 1 {
         return format!("{}…", chars.iter().take(keep).collect::<String>());
     }
-    // Хвост: расширение с точкой и пара знаков перед ним, но не меньше половины и не всё (голова остаётся).
+    // Хвост: расширение с точкой и пара знаков перед ним, но не меньше половины и не всё (голова остаётся). Места мало
+    // (меньше расширения с точкой и ещё знака) — только конец: расширение важнее начала имени.
     let ext = name.rfind('.').filter(|&at| at > 0).map_or(0, |at| name[at..].chars().count());
-    let tail = (ext + 2).max(keep / 2).min(keep - 1);
+    let tail = if keep > ext { (ext + 2).max(keep / 2).min(keep - 1) } else { keep };
     let head = keep - tail;
     format!("{}…{}", chars[..head].iter().collect::<String>(), chars[chars.len() - tail..].iter().collect::<String>())
 }
@@ -954,6 +955,10 @@ mod tests {
         // Без расширения — поровну; точка в начале — не расширение.
         assert_eq!(middle("abcdefghij", 6), "abc…hij");
         assert_eq!(middle(".gitignore_of_a_long_name", 8), ".git…name");
+        // Места мало — расширение важнее начала имени: «….exe», а не «a…xe».
+        assert_eq!(middle("setup_installer_2026.exe", 4), "….exe");
+        assert_eq!(middle("setup_installer_2026.exe", 5), "s….exe");
+        assert_eq!(middle("setup_installer_2026.exe", 3), "…exe");
         // Совсем мало места.
         assert_eq!(middle("abcdef", 0), "…");
         assert_eq!(middle("abcdef", 1), "a…");

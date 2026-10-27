@@ -242,7 +242,11 @@ mod tests {
         for name in ["a.pdf", "a.txt", "a.png"] {
             assert!(!is_dangerous(OsStr::new(name)), "{name}");
         }
-        eprintln!("уведомления можно показывать: {}", accepts_notifications());
+        eprintln!(
+            "уведомления можно показывать: {} (ответ Windows: {:?})",
+            accepts_notifications(),
+            unsafe { SHQueryUserNotificationState() }
+        );
     }
 
     /// Готовый файл открывается пробой и отдаёт свежие размер и время; файл, что пишут (открыт на запись), — занят; нет

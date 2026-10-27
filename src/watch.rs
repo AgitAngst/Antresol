@@ -390,8 +390,9 @@ impl Folder {
 
 /// Плашка «отчёт.pdf: скачано»: «Открыть», «В лоток», файл тянется с плашки в чат или папку; щелчок — на «Лоток». Файл, что при
 /// открытии запускается (программа, скрипт, установщик, ярлык, образ — `shell::is_dangerous`), вместо «Открыть» получает
-/// «Показать в папке»: он только что пришёл из сети, и случайный щелчок у края не должен его запускать. «В лоток» есть, если
-/// путь записывается текстом без потерь (лоток хранит текст).
+/// «Показать в папке»: он только что пришёл из сети, и случайный щелчок у края не должен его запускать. «В лоток» у такого
+/// файла нет: рядом с «Показать в папке» на название оставалось бы около 100 точек, и «setup.exe» не поместился бы; тянуть
+/// файл с плашки по-прежнему можно. «В лоток» есть, если путь записывается текстом без потерь (лоток хранит текст).
 pub fn download_plaque(dir: &Path, e: &Entry) -> Plaque {
     let path = dir.join(&e.name);
     let plaque = Plaque::new(
@@ -402,14 +403,15 @@ pub fn download_plaque(dir: &Path, e: &Entry) -> Plaque {
         Say::Downloaded(e.name.to_string_lossy().into_owned()),
     )
     .sub(Say::InDownloads(e.len));
-    let plaque = if shell::is_dangerous(&e.name) {
+    let dangerous = shell::is_dangerous(&e.name);
+    let plaque = if dangerous {
         plaque.button(Say::Reveal, Look::Secondary, Do::Reveal(path.clone())).external()
     } else {
         plaque.button(Say::Open, Look::Secondary, Do::Open(path.clone().into_os_string())).external()
     };
     let plaque = match path.to_str() {
-        Some(text) => plaque.button(Say::ToTray, Look::Ghost, Do::ToTray(text.to_string())),
-        None => plaque,
+        Some(text) if !dangerous => plaque.button(Say::ToTray, Look::Ghost, Do::ToTray(text.to_string())),
+        _ => plaque,
     };
     plaque.file(path).shelf("tray")
 }
@@ -1171,7 +1173,8 @@ mod tests {
                 "{name}"
             );
             assert!(p.buttons.iter().all(|b| !matches!(b.does, Do::Open(_))), "{name}: «Открыть» нет вовсе");
-            assert_eq!(p.buttons[1].label, Say::ToTray, "{name}: «В лоток» остаётся");
+            assert_eq!(p.buttons.len(), 1, "{name}: «В лоток» нет — на название не осталось бы места");
+            assert!(p.file.is_some(), "{name}: тянуть файл можно");
         }
         for name in ["report.pdf", "photo.jpg", "notes.txt", "pack.zip"] {
             let p = download_plaque(Path::new(r"C:\Demo\Downloads"), &entry(name, 1000));
