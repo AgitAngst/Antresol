@@ -11,6 +11,7 @@ use anvil_ui::widgets::{self as w, Kind};
 use anvil_ui::{Icon, Palette, Tone};
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 
+use super::ShowNoted;
 use super::{Ctx, Module};
 use crate::sys::kamerton::{self, Command, Error, State};
 use crate::texts::Tr;
@@ -243,7 +244,7 @@ impl Module for Sound {
             .id_salt("sound")
             .auto_shrink([false, false])
             .max_height(ui.available_height() - 34.0)
-            .show(ui, |ui| {
+            .show_noted(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 4.0;
                 match &state.device {
                     Some(d) => {

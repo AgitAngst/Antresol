@@ -14,6 +14,7 @@ use anvil_ui::widgets::{self as w, Kind};
 use anvil_ui::{Icon, Palette, Tone};
 use eframe::egui::{self, Ui};
 
+use super::ShowNoted;
 use super::{Action, Command, Ctx, Module, mine};
 use crate::config::Settings;
 use crate::plaque::{self, Do, Glyph, Look, Plaque, Say};
@@ -369,7 +370,7 @@ impl Module for Github {
             .id_salt("gh")
             .auto_shrink([false, false])
             .max_height(ui.available_height() - 40.0)
-            .show(ui, |ui| {
+            .show_noted(ui, |ui| {
                 if repos.is_empty() && cx.settings.github.is_empty() && !sys::demo() {
                     w::note(ui, t.github_none);
                 }

@@ -17,6 +17,7 @@ use anvil_ui::widgets::{self as w, Kind};
 use anvil_ui::{Icon, Lang, Palette, Tone};
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 
+use super::ShowNoted;
 use super::{Action, Command, Ctx, Module, chip_grid, mine, row};
 use crate::config::{Profile, ProfileMonitor, SceneRow, Settings};
 use crate::sys::display::{self, Mode, Scale};
@@ -1144,7 +1145,7 @@ impl Display {
     /// Полный список разрешений со звёздочками — за ссылкой «Все разрешения».
     fn resolutions_ui(&mut self, ui: &mut Ui, cx: &mut Ctx, device: &str, cur: Mode) {
         let t = cx.t;
-        egui::ScrollArea::vertical().id_salt("res").auto_shrink([false, false]).show(ui, |ui| {
+        egui::ScrollArea::vertical().id_salt("res").auto_shrink([false, false]).show_noted(ui, |ui| {
             for (i, (rw, rh)) in resolutions(&self.modes).into_iter().enumerate() {
                 let id = ui.id().with(("res", rw, rh));
                 let on = rw == cur.width && rh == cur.height;

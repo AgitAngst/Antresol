@@ -242,6 +242,39 @@ pub fn anchor(ui: &Ui, rect: egui::Rect, key: &str) {
     ui.interact(rect, egui::Id::new(("anchor", key)), egui::Sense::hover());
 }
 
+/// Куда карточка пишет, сколько её тела не влезло в прокрутку (`take_overflow` читает и стирает).
+fn overflow_id() -> egui::Id {
+    egui::Id::new("card-overflow")
+}
+
+/// Сколько содержимого вертикальной прокрутки тела карточки не влезло (меньше нуля — осталось лишнее место): по этому панель
+/// подбирает высоту полки. Зовётся после каждой такой прокрутки; из нескольких в одной карточке берётся наибольшее.
+pub fn note_overflow<R>(ui: &Ui, out: &egui::scroll_area::ScrollAreaOutput<R>) {
+    let over = out.content_size.y - out.inner_rect.height();
+    ui.ctx().data_mut(|d| {
+        let v = d.get_temp_mut_or(overflow_id(), f32::NEG_INFINITY);
+        *v = v.max(over);
+    });
+}
+
+/// Прокрутка тела карточки, что сама говорит панели, сколько не влезло (`note_overflow`).
+pub trait ShowNoted {
+    fn show_noted<R>(self, ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> egui::scroll_area::ScrollAreaOutput<R>;
+}
+
+impl ShowNoted for egui::ScrollArea {
+    fn show_noted<R>(self, ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> egui::scroll_area::ScrollAreaOutput<R> {
+        let out = self.show(ui, add);
+        note_overflow(ui, &out);
+        out
+    }
+}
+
+/// Что записали `note_overflow` с прошлого вызова; не было прокрутки — `None`.
+pub fn take_overflow(ctx: &egui::Context) -> Option<f32> {
+    ctx.data_mut(|d| d.remove_temp::<f32>(overflow_id())).filter(|v| v.is_finite())
+}
+
 /// Значок «наружу» (стрелка из квадрата) 12 × 12 — кнопка открывает сайт или другую программу. В kit-v0.6.1 его нет (появился в
 /// kit-v0.8.0 как `Icon::External`): при переходе на новый набор заменить этот рисунок на значок набора.
 pub fn paint_external(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32) {

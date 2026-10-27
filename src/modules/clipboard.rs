@@ -17,6 +17,7 @@ use anvil_ui::widgets::{self as w, Kind};
 use anvil_ui::{Icon, Palette, Tone};
 use eframe::egui::{self, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2};
 
+use super::ShowNoted;
 use super::{Action, Command, Ctx, Module, anchor, chips, mine, row, stable_key};
 use crate::config::{MAX_PINNED, Settings};
 use crate::layout;
@@ -1143,7 +1144,7 @@ impl Module for Clipboard {
                     }
                     return;
                 }
-                egui::ScrollArea::vertical().id_salt("clip").auto_shrink([false, false]).show(ui, |ui| {
+                egui::ScrollArea::vertical().id_salt("clip").auto_shrink([false, false]).show_noted(ui, |ui| {
                     if shown_pinned.is_empty() && rows.is_empty() {
                         w::note(ui, t.clip_nothing);
                     } else {

@@ -13,7 +13,9 @@ use eframe::egui::{
     self, Color32, CornerRadius, CursorIcon, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, UiBuilder, Vec2,
 };
 
-use crate::config::{self, ALL_MONITORS, Hotkey, MAX_HEIGHT, MIN_HEIGHT, MIN_WIDTH, Profile, SceneRow, Settings};
+use crate::config::{
+    self, ALL_MONITORS, AUTO_MAX_HEIGHT, Hotkey, MAX_HEIGHT, MIN_HEIGHT, MIN_WIDTH, Profile, SceneRow, Settings,
+};
 use crate::modules::{self, Command, Ctx, Module, anchor};
 use crate::panel::{self, Edge, Input};
 use crate::plaque::{self, Plaque};
@@ -57,6 +59,8 @@ const NUM_KEYS: [egui::Key; 9] = [
 ];
 /// Зазор между карточками.
 const GAP: f32 = 10.0;
+/// Сколько точек плавного колеса над вкладками — как один щелчок колеса: соседняя полка.
+const TAB_WHEEL: f32 = 40.0;
 /// Задержка выезда в настройках — чипами, мс.
 const DELAYS: [u32; 4] = [0, 150, 300, 600];
 /// Полоска у края, пока панель спрятана: ширина и высота в точках при размере 100 % (`Settings::strip_scale`).
@@ -293,6 +297,14 @@ pub struct App {
     ask_scroll: bool,
     /// «Ещё N»: куда пролистать ряд карточек в следующем кадре.
     scroll_to: Option<f32>,
+    /// Высота панели в этом кадре, в точках: идёт к нужной (`target_height`) за `motion::LAYOUT`.
+    height: f32,
+    /// Сколько нужно каждой полке по замеру её карточек (номер — как в `settings.shelves`); только в памяти.
+    fit: Vec<Option<f32>>,
+    /// Вид без полки (настройки, поиск, сцена) или правка полок: высота, что держится, пока они открыты.
+    held: Option<f32>,
+    /// Колесо над вкладками: сколько накрутили, пока не набралось на соседнюю полку.
+    tab_wheel: f32,
     /// Что показывает шапка над карточками на этой ширине (`header_plan`): для проверки в тестах.
     header_plan: header_plan::Plan,
     /// Где кончается место левой части шапки (дальше она обрезана) и где начинается правая (для проверки, что не наезжают).
@@ -326,6 +338,7 @@ fn parts(h: &Hotkey) -> (Vec<&str>, &str) {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let settings = config::load();
+        let height = settings.height;
         anvil_ui::install(&cc.egui_ctx, look::accent_of(&settings.accent), settings.common.theme);
         settings.common.apply(&cc.egui_ctx);
         let ctx = cc.egui_ctx.clone();
@@ -401,6 +414,10 @@ impl App {
             ask_delete: None,
             ask_scroll: false,
             scroll_to: None,
+            height,
+            fit: Vec::new(),
+            held: None,
+            tab_wheel: 0.0,
             header_plan: header_plan::Plan::default(),
             header_edges: (0.0, f32::MAX),
             shelf,
@@ -490,13 +507,56 @@ impl App {
         self.settings.common.language
     }
 
+    /// Какой высоты панели быть: в виде без полки и в правке полок — той, что была на входе; на полке — своей высоты полки, а
+    /// нет её — сколько нужно карточкам по замеру (`fit`); пока замера нет — `height=` из файла.
+    fn target_height(&self) -> f32 {
+        if let Some(h) = self.held {
+            return h;
+        }
+        let own = self.settings.shelves.get(self.shelf).and_then(|s| s.height).map(f32::from);
+        let fit = self.fit.get(self.shelf).copied().flatten();
+        own.or(fit).unwrap_or(self.settings.height).clamp(MIN_HEIGHT, MAX_HEIGHT)
+    }
+
+    /// Высота этого кадра: к нужной за `motion::LAYOUT`; спрятанная панель и панель, которую тянут за край, — сразу.
+    fn step_height(&mut self, ctx: &egui::Context) {
+        let free = self.view == View::Cards && self.editing.is_none();
+        if free {
+            self.held = None;
+        } else if self.held.is_none() {
+            self.held = Some(self.height);
+        }
+        let target = self.target_height();
+        let secs = if self.drawn <= 0.0 || self.grip.is_some() { 0.0 } else { motion::LAYOUT };
+        self.height = Motion::of(ctx).value(ctx, egui::Id::new("panel-height"), target, secs);
+    }
+
+    /// Ряд открытой полки нарисован: `extra` — сколько не хватило самой высокой карточке (меньше нуля — сколько лишнего).
+    /// Нужная полке высота — нынешняя плюс это; она не зависит от нынешней (выросла панель — лишнего столько же меньше),
+    /// поэтому не качается. В правке и в видах без полки не меряем: там карточки не те или их нет.
+    fn note_fit(&mut self, extra: Option<f32>) {
+        let Some(extra) = extra else { return };
+        if self.editing.is_some() || self.view != View::Cards {
+            return;
+        }
+        let need = (self.height + extra).round().clamp(MIN_HEIGHT, AUTO_MAX_HEIGHT);
+        if self.fit.len() < self.settings.shelves.len() {
+            self.fit.resize(self.settings.shelves.len(), None);
+        }
+        if let Some(slot) = self.fit.get_mut(self.shelf)
+            && slot.is_none_or(|h| (h - need).abs() >= 1.0)
+        {
+            *slot = Some(need);
+        }
+    }
+
     /// Поставить окно у края монитора: `t` — доля выезда (0 — целиком выше края: полоска у края или
     /// увести прочь).
     /// Шлёт команды, только если что-то поменялось.
     fn place(&mut self, ctx: &egui::Context, ppp: f32, t: f32) {
         let Some(m) = self.monitor() else { return };
         let r = m.rect;
-        let mut size = Vec2::new(self.settings.width, self.settings.height);
+        let mut size = Vec2::new(self.settings.width, self.height);
         let left = |w: f32| (r.left as f32 / ppp + (r.width() as f32 / ppp - w) / 2.0).round();
         let mut pos = Pos2::new(left(size.x), (r.top as f32 / ppp - (1.0 - t) * size.y).round());
         if t <= 0.0 && self.strip_kind != StripKind::Off {
@@ -866,7 +926,18 @@ impl App {
             self.settings.width = (2.0 * (cx as f32 - center).abs() / ppp).clamp(MIN_WIDTH, max_w.max(MIN_WIDTH));
         }
         if matches!(grip, Grip::Bottom | Grip::BottomLeft | Grip::BottomRight) {
-            self.settings.height = ((cy - m.rect.top) as f32 / ppp).clamp(MIN_HEIGHT, MAX_HEIGHT);
+            let h = ((cy - m.rect.top) as f32 / ppp).clamp(MIN_HEIGHT, MAX_HEIGHT);
+            self.set_height(h);
+        }
+    }
+
+    /// Своя высота: на полке — этой полки, в виде без полки — та, что держится, и `height=`.
+    fn set_height(&mut self, h: f32) {
+        if self.held.is_some() {
+            self.held = Some(h);
+            self.settings.height = h;
+        } else if let Some(sh) = self.settings.shelves.get_mut(self.shelf) {
+            sh.height = Some(h.round() as u16);
         }
     }
 
@@ -925,7 +996,7 @@ impl App {
         let center = m.rect.left + m.rect.width() / 2;
         let half = (self.settings.width * ppp / 2.0) as i32;
         let (left, right) = (center - half, center + half);
-        let bottom = m.rect.top + (self.settings.height * ppp) as i32;
+        let bottom = m.rect.top + (self.height * ppp) as i32;
         // Мышь над плашкой — не у края панели: бросок мыши вверх через плашку не должен выдвигать панель и превращать её в
         // уведомление.
         let over_plaque = self.plaque_drawn.is_some() && plaque::over(cursor, &m.rect, ppp);
@@ -1026,6 +1097,7 @@ impl App {
 
         let t = Motion::of(ctx).toggle(ctx, egui::Id::new("panel-shown"), self.edge.shown, motion::ENTER);
         self.drawn = t;
+        self.step_height(ctx);
         self.set_no_activate(self.wants_no_activate());
         self.place(ctx, ppp, t);
 
@@ -1917,19 +1989,28 @@ impl App {
             }
         }
         ui.spacing_mut().item_spacing.x = spacing;
-        // Колесо мыши над вкладками: вверх — предыдущая полка, вниз — следующая.
+        // Колесо мыши над вкладками: вверх — предыдущая полка, вниз — следующая. Щелчок колеса — сразу полка; плавное
+        // (тачпад, точное колесо) копится, пока не наберётся на щелчок (`TAB_WHEEL`).
         if let Some(strip) = strip
             && ui.rect_contains_pointer(strip)
         {
-            let wheel: f32 = ui.input(|inp| {
-                inp.events
-                    .iter()
-                    .map(|e| match e {
-                        egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Line, delta, .. } => delta.y,
-                        _ => 0.0,
-                    })
-                    .sum()
+            let (lines, points): (f32, f32) = ui.input(|inp| {
+                inp.events.iter().fold((0.0, 0.0), |(l, p), e| match e {
+                    egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Line, delta, .. } => (l + delta.y, p),
+                    egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta, .. } => (l, p + delta.y),
+                    _ => (l, p),
+                })
             });
+            let mut wheel = lines;
+            if lines == 0.0 {
+                self.tab_wheel += points;
+                if self.tab_wheel.abs() >= TAB_WHEEL {
+                    wheel = self.tab_wheel;
+                }
+            }
+            if wheel != 0.0 {
+                self.tab_wheel = 0.0;
+            }
             if wheel > 0.0 && open > 0 {
                 pick = Some(open - 1);
             } else if wheel < 0.0 && open + 1 < count {
@@ -2012,32 +2093,37 @@ impl App {
         let content = widths.iter().sum::<f32>() + gap * (widths.len().saturating_sub(1)) as f32;
         if content <= area.width() + 0.5 {
             let row = Row { area, origin: area.min, height: area.height() };
-            self.card_row(ui, row, &slots, &widths, device, ops);
+            let extra = self.card_row(ui, row, &slots, &widths, device, ops);
+            self.note_fit(extra);
             return;
         }
         let mut child = ui.new_child(UiBuilder::new().max_rect(area));
+        wheel_sideways(&mut child);
         // У каждой полки своя прокрутка.
         let mut scroll = egui::ScrollArea::horizontal().id_salt(("cards", shelf)).auto_shrink([false, false]);
         if let Some(x) = self.scroll_to.take() {
             scroll = scroll.horizontal_scroll_offset(x);
         }
         let out = scroll.show(&mut child, |ui| {
+            wheel_inside(ui);
             // Под полосу прокрутки — 12 снизу.
             let (rect, _) = ui.allocate_exact_size(Vec2::new(content, area.height() - 12.0), Sense::hover());
             let row = Row { area, origin: rect.min, height: rect.height() };
-            self.card_row(ui, row, &slots, &widths, device, ops);
+            self.card_row(ui, row, &slots, &widths, device, ops)
         });
+        self.note_fit(out.inner);
         let offset = out.state.offset.x;
         let max_offset = (content - area.width()).max(0.0);
-        // В правке над карточкой лежит её слой, а полоса прокрутки ряда — ниже: колесо с Shift до неё не доходит.
-        // Что она не забрала, передаём ей сами (на следующем кадре).
+        // В правке над карточкой лежит её слой, а полоса прокрутки ряда — ниже: колесо до неё не доходит. Что она не
+        // забрала, передаём ей сами (на следующем кадре): и Shift + колесо, и простое колесо — карточкам под вуалью
+        // листать нечего.
         if editing {
             let ctx = ui.ctx().clone();
             let over = ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| area.contains(p));
-            let dx = ctx.input(|i| i.smooth_scroll_delta().x);
+            let dx = ctx.input(|i| i.smooth_scroll_delta().x + i.smooth_scroll_delta().y);
             if over && dx != 0.0 {
                 self.scroll_to = Some((offset - dx).clamp(0.0, max_offset));
-                ctx.input_mut(|i| i.smooth_scroll_delta.x = 0.0);
+                ctx.input_mut(|i| i.smooth_scroll_delta = Vec2::ZERO);
                 ctx.request_repaint();
             }
         }
@@ -2118,8 +2204,18 @@ impl App {
         }
     }
 
-    fn card_row(&mut self, ui: &mut Ui, row: Row, slots: &[Slot], widths: &[f32], device: &str, ops: &mut Vec<Op>) {
+    /// Ответ — сколько не хватило самой высокой карточке ряда (`note_fit`); карточек нет — `None`.
+    fn card_row(
+        &mut self,
+        ui: &mut Ui,
+        row: Row,
+        slots: &[Slot],
+        widths: &[f32],
+        device: &str,
+        ops: &mut Vec<Op>,
+    ) -> Option<f32> {
         let t = texts::tr(self.lang());
+        let mut extra: Option<f32> = None;
         let lang = self.lang();
         let editing = self.editing.is_some();
         // Ключи карточек ряда по порядку — для черты «куда встанет» и сдвига с клавиатуры.
@@ -2152,7 +2248,8 @@ impl App {
             let shifted = rect.translate(Vec2::new(0.0, dy));
             let mut child = ui.new_child(UiBuilder::new().id(ui.id().with(("card-ui", key))).max_rect(shifted));
             child.set_opacity(alpha);
-            w::card_frame(&child).show(&mut child, |ui| {
+            modules::anchor(&child, shifted, &format!("card-{key}"));
+            let frame = w::card_frame(&child).show(&mut child, |ui| {
                 ui.set_min_size(ui.available_size());
                 ui.set_clip_rect(ui.max_rect().intersect(rect.expand(1.0)));
                 if editing {
@@ -2164,8 +2261,13 @@ impl App {
                 modules::card_header(ui, key, title, &module.meta(t), &module.meta_hint());
                 ui.add_space(8.0);
                 let mut cx = Ctx { t, lang, monitor: device, toasts: &mut toasts, settings: &mut self.settings };
-                module.ui(ui, &mut cx);
+                // Сколько карточке не хватило: низ занятого плюс то, что не влезло в её прокрутку, минус низ карточки.
+                let bottom = ui.max_rect().bottom();
+                modules::take_overflow(ui.ctx());
+                let used = ui.scope(|ui| module.ui(ui, &mut cx)).response.rect.bottom();
+                used + modules::take_overflow(ui.ctx()).unwrap_or(0.0) - bottom
             });
+            extra = Some(extra.map_or(frame.inner, |e: f32| e.max(frame.inner)));
             if editing {
                 let card = EditCard { lang, key, title, pos, order: &order, shelves, open };
                 edit_overlay(ui.ctx(), &card, shifted, row.area, alpha, ops);
@@ -2178,6 +2280,7 @@ impl App {
         if self.settings != before {
             self.save();
         }
+        extra
     }
 
     /// «Убранные карточки»: в конце ряда, только в правке. Чип возвращает карточку на открытую полку; сюда же можно
@@ -2227,7 +2330,9 @@ impl App {
             return;
         }
         let mut child = ui.new_child(UiBuilder::new().max_rect(area));
+        wheel_sideways(&mut child);
         egui::ScrollArea::horizontal().id_salt("settings").auto_shrink([false, false]).show(&mut child, |ui| {
+            wheel_inside(ui);
             let (rect, _) = ui.allocate_exact_size(Vec2::new(MIN, area.height() - 12.0), Sense::hover());
             self.settings_columns(ui, rect);
         });
@@ -2660,7 +2765,9 @@ impl App {
             return;
         }
         let mut child = ui.new_child(UiBuilder::new().max_rect(area));
+        wheel_sideways(&mut child);
         egui::ScrollArea::horizontal().id_salt("scene").auto_shrink([false, false]).show(&mut child, |ui| {
+            wheel_inside(ui);
             let (rect, _) = ui.allocate_exact_size(Vec2::new(MIN, area.height() - 12.0), Sense::hover());
             self.scene_columns(ui, rect);
         });
@@ -2954,7 +3061,17 @@ impl App {
             ),
         ];
         for (grip, rect, cursor) in zones {
-            let r = ui.interact(rect, ui.id().with(("grip", grip as u8)), Sense::drag()).on_hover_cursor(cursor);
+            let sense = if grip == Grip::Bottom { Sense::click_and_drag() } else { Sense::drag() };
+            let r = ui.interact(rect, ui.id().with(("grip", grip as u8)), sense).on_hover_cursor(cursor);
+            // Двойной щелчок по нижнему краю — снова «по полке».
+            if grip == Grip::Bottom
+                && r.double_clicked()
+                && self.held.is_none()
+                && let Some(sh) = self.settings.shelves.get_mut(self.shelf)
+                && sh.height.take().is_some()
+            {
+                self.save();
+            }
             if r.drag_started() {
                 self.grip = Some(grip);
             }
@@ -2978,6 +3095,18 @@ impl App {
         );
         let c = Pos2::new(panel.center().x, b - 4.0);
         ui.painter().line_segment([c - Vec2::new(18.0, 0.0), c + Vec2::new(18.0, 0.0)], Stroke::new(3.0, color));
+        // Под мышью нижний край говорит, чья высота: подсказка у края окна обрезалась бы, поэтому подпись рядом с чёрточкой.
+        if hot && self.held.is_none() {
+            let t = texts::tr(self.lang());
+            let own = self.settings.shelves.get(self.shelf).is_some_and(|s| s.height.is_some());
+            ui.painter().text(
+                Pos2::new(c.x + 30.0, b - 8.0),
+                egui::Align2::LEFT_CENTER,
+                if own { t.height_own } else { t.height_fit },
+                egui::FontId::proportional(11.5),
+                p.weak,
+            );
+        }
     }
 
     /// Полоска у края. Мышь у края — шире и наполняется акцентом за время задержки выезда.
@@ -3075,7 +3204,7 @@ impl App {
         }
         self.take_keyboard_on_press(&ctx);
         let p = Palette::of(ui);
-        let panel = Rect::from_min_size(Pos2::ZERO, Vec2::new(self.settings.width, self.settings.height));
+        let panel = Rect::from_min_size(Pos2::ZERO, Vec2::new(self.settings.width, self.height));
         let corner = CornerRadius { nw: 0, ne: 0, sw: CORNER, se: CORNER };
         ui.painter().rect(panel, corner, p.surface, Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
 
@@ -3363,6 +3492,18 @@ fn vline(ui: &mut Ui, color: egui::Color32) {
 }
 
 /// Затухание к правому краю: от прозрачного к `color`.
+/// Ряд, что листается только вбок: простое колесо листает его тоже (egui `always_scroll_the_only_direction`). Прокрутки
+/// внутри (карточки, колонки) обрабатывают колесо раньше ряда и забирают его, только если им есть куда листать, — остаток
+/// достаётся ряду. Внутри флаг снимает `wheel_inside`.
+fn wheel_sideways(ui: &mut Ui) {
+    ui.style_mut().always_scroll_the_only_direction = true;
+}
+
+/// Содержимое ряда: обычное колесо. Иначе вертикальные прокрутки карточек забирали бы и Shift + колесо.
+fn wheel_inside(ui: &mut Ui) {
+    ui.style_mut().always_scroll_the_only_direction = false;
+}
+
 fn fade_right(painter: &egui::Painter, rect: Rect, color: egui::Color32) {
     let mut mesh = egui::Mesh::default();
     let clear = egui::Color32::TRANSPARENT;
@@ -3802,6 +3943,7 @@ mod tests {
             // В тестах у панели есть клавиатура (как у вызванной клавишей): печать и Ctrl+K открывают поиск.
             let mut edge = Edge::default();
             edge.take_keyboard();
+            let height = settings.height;
             App {
                 settings,
                 edge,
@@ -3842,6 +3984,10 @@ mod tests {
                 ask_delete: None,
                 ask_scroll: false,
                 scroll_to: None,
+                height,
+                fit: Vec::new(),
+                held: None,
+                tab_wheel: 0.0,
                 header_plan: header_plan::Plan::default(),
                 header_edges: (0.0, f32::MAX),
                 shelf: 0,
@@ -3878,7 +4024,11 @@ mod tests {
 
         /// Панель другой ширины (высота та же).
         fn sized(width: f32) -> Rig {
-            let settings = Settings { width, height: SIZE.y, ..Settings::default() };
+            let mut settings = Settings { width, height: SIZE.y, ..Settings::default() };
+            // Прежние тесты рисуют панель 340 высотой: у полок своя высота. Тесты высоты по полке снимают её (`fitted`).
+            for sh in &mut settings.shelves {
+                sh.height = Some(SIZE.y as u16);
+            }
             let ctx = egui::Context::default();
             anvil_ui::install(&ctx, look::accent_of(&settings.accent), settings.common.theme);
             let size = Vec2::new(width, SIZE.y);
@@ -3905,6 +4055,9 @@ mod tests {
         }
 
         fn frame(&mut self, events: Vec<Event>) {
+            // Как `tick` перед кадром: высота панели, и окно (`screen_rect`) — её высоты.
+            self.app.step_height(&self.ctx);
+            self.size.y = self.app.height;
             let input = egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, self.size)),
                 time: Some(self.time),
@@ -3933,6 +4086,12 @@ mod tests {
             let mut out = Vec::new();
             self.shapes.iter().for_each(|s| walk(&s.shape, color, &mut out));
             out
+        }
+
+        fn frames(&mut self, n: usize) {
+            for _ in 0..n {
+                self.frame(Vec::new());
+            }
         }
 
         /// Несколько кадров без ввода: слои и раскладка успокаиваются (у нового слоя первый кадр — на замер).
@@ -4242,12 +4401,11 @@ mod tests {
         let mut rig = Rig::sized(560.0);
         for i in 0..9 {
             if rig.app.settings.shelves.len() <= i {
-                rig.app
-                    .settings
-                    .shelves
-                    .push(config::Shelf {
-                        name: format!("Полка с длинным именем {i}"), cards: Vec::new()
-                    });
+                rig.app.settings.shelves.push(config::Shelf {
+                    name: format!("Полка с длинным именем {i}"),
+                    cards: Vec::new(),
+                    height: None,
+                });
             }
         }
         rig.settle();
@@ -4349,16 +4507,161 @@ mod tests {
                     after.is_none_or(|x| x < before - 20.0),
                     "{width}/{shelf}: колесо с Shift не листает: {before} → {after:?}"
                 );
-                // Без Shift колесо ряд не двигает.
+                // И простое колесо: карточкам под вуалью листать нечего — листается ряд.
                 let mut rig = Rig::sized(width);
                 rig.app.set_shelf(shelf);
                 rig.app.start_edit();
                 rig.settle();
                 let over = rig.drop_zone(&cards[0]).center();
                 rig.wheel(over, -3.0, Modifiers::NONE);
-                assert_eq!(rig.first_left(), Some(before), "{width}/{shelf}: колесо без Shift ряд не листает");
+                let after = rig.first_left();
+                assert!(
+                    after.is_none_or(|x| x < before - 20.0),
+                    "{width}/{shelf}: колесо без Shift не листает: {before} → {after:?}"
+                );
             }
         }
+    }
+
+    /// Панель «по полке»: своей высоты у полок нет, кадры идут, пока высота не встанет.
+    fn fitted(width: f32) -> Rig {
+        let mut rig = Rig::sized(width);
+        for sh in &mut rig.app.settings.shelves {
+            sh.height = None;
+        }
+        rig.app.fit.clear();
+        rig.frames(30);
+        rig
+    }
+
+    fn day(rig: &Rig) -> usize {
+        rig.app.settings.shelves.iter().position(|s| s.name == "@day").expect("полка «День»")
+    }
+
+    /// Высота по полке встаёт и больше не качается: панель выросла — лишнего у карточек столько же меньше.
+    #[test]
+    fn the_panel_fits_the_shelf_and_stays_put() {
+        for shelf in 0..4 {
+            let mut rig = fitted(1300.0);
+            rig.app.set_shelf(shelf);
+            rig.frames(30);
+            let h = rig.app.height;
+            assert!((MIN_HEIGHT..=AUTO_MAX_HEIGHT).contains(&h), "{shelf}: {h}");
+            assert_eq!(rig.app.fit[shelf], Some(h), "{shelf}: высота — замер полки");
+            for _ in 0..20 {
+                rig.frame(Vec::new());
+                assert!((rig.app.height - h).abs() < 0.5, "{shelf}: качается {h} → {}", rig.app.height);
+            }
+        }
+    }
+
+    /// Больше строк в карточке — выше полка (до `AUTO_MAX_HEIGHT`); строк меньше — снова ниже.
+    #[test]
+    fn more_rows_make_the_shelf_taller() {
+        let zones = ["Tokyo Standard Time", "Eastern Standard Time", "GMT Standard Time", "Russian Standard Time"];
+        let mut rig = fitted(1300.0);
+        let day = day(&rig);
+        rig.app.settings.clocks = vec![config::Clock { name: "A".into(), zone: zones[0].into() }];
+        rig.app.set_shelf(day);
+        rig.frames(30);
+        let few = rig.app.height;
+        rig.app.settings.clocks =
+            (0..8).map(|i| config::Clock { name: format!("C{i}"), zone: zones[i % 4].into() }).collect();
+        rig.frames(30);
+        let many = rig.app.height;
+        assert!(many > few + 40.0 || many == AUTO_MAX_HEIGHT, "{few} → {many}");
+        assert!(many <= AUTO_MAX_HEIGHT);
+        rig.app.settings.clocks.truncate(1);
+        rig.frames(30);
+        assert!((rig.app.height - few).abs() < 1.0, "назад к {few}: {}", rig.app.height);
+    }
+
+    /// Смена полки: высота идёт к нужной плавно (`LAYOUT`), без анимации Windows — сразу.
+    #[test]
+    fn switching_shelves_animates_the_height() {
+        let mut rig = fitted(1300.0);
+        rig.app.settings.shelves[1].height = Some(500);
+        let from = rig.app.height;
+        rig.app.set_shelf(1);
+        rig.frames(2);
+        let mid = rig.app.height;
+        assert!(mid > from + 1.0 && mid < 499.0, "{from} → {mid} → 500");
+        rig.frames(20);
+        assert_eq!(rig.app.height, 500.0);
+        anvil_ui::motion::set_reduced(&rig.ctx, true);
+        rig.app.set_shelf(0);
+        rig.frames(2);
+        assert_eq!(Some(rig.app.height), rig.app.fit[0], "без анимации — сразу");
+    }
+
+    /// Потянули нижний край — своя высота этой полки; двойной щелчок по краю — снова «по полке».
+    #[test]
+    fn dragged_height_belongs_to_the_shelf_and_double_click_fits_again() {
+        let mut rig = fitted(1300.0);
+        rig.app.settings.common.language = Lang::Ru;
+        rig.app.set_height(470.0);
+        assert_eq!(rig.app.settings.shelves[0].height, Some(470));
+        assert_eq!(rig.app.settings.shelves[1].height, None, "другая полка — по полке");
+        rig.frames(20);
+        assert_eq!(rig.app.height, 470.0);
+        let edge = Pos2::new(rig.size.x / 2.0 + 100.0, rig.size.y - 3.0);
+        rig.move_to(edge);
+        assert!(painted(&rig).contains("Своя высота"), "подпись у края");
+        rig.double_click(edge);
+        assert_eq!(rig.app.settings.shelves[0].height, None);
+        rig.frames(20);
+        assert_eq!(Some(rig.app.height), rig.app.fit[0]);
+        rig.move_to(Pos2::new(rig.size.x / 2.0 + 100.0, rig.size.y - 3.0));
+        assert!(painted(&rig).contains("Высота по полке"));
+    }
+
+    /// Настройки, поиск и правка полок держат высоту, что была: панель не прыгает под их содержимое.
+    #[test]
+    fn views_without_a_shelf_keep_the_height() {
+        for open in [View::Settings, View::Search] {
+            let mut rig = fitted(1300.0);
+            rig.app.settings.shelves[0].height = Some(480);
+            rig.frames(20);
+            rig.app.view = open;
+            rig.app.settings.shelves[0].height = Some(200);
+            rig.frames(20);
+            assert_eq!(rig.app.height, 480.0, "{}", open as u8);
+            rig.app.view = View::Cards;
+            rig.frames(20);
+            assert_eq!(rig.app.height, 200.0, "{}: назад на полку — её высота", open as u8);
+        }
+        let mut rig = fitted(1300.0);
+        let h = rig.app.height;
+        rig.app.start_edit();
+        rig.frames(20);
+        assert_eq!(rig.app.height, h, "правка полок");
+    }
+
+    /// Своя высота полок — в `config.txt` строкой `shelf_heights=` по порядку полок; «по полке» — пусто.
+    #[test]
+    fn shelf_heights_survive_the_file() {
+        let mut s = Settings::default();
+        s.shelves[1].height = Some(470);
+        let text = config::format(&s);
+        assert!(text.contains("shelf_heights=,470,,\n"), "{text}");
+        let back = config::parse(&text);
+        let heights: Vec<Option<u16>> = back.shelves.iter().map(|s| s.height).collect();
+        assert_eq!(heights, [None, Some(470), None, None]);
+        assert!(!config::format(&Settings::default()).contains("shelf_heights"), "все по полке — строки нет");
+    }
+
+    /// Колесо без Shift над рядом, что не помещается: над карточкой без прокрутки листает ряд.
+    #[test]
+    fn the_wheel_scrolls_the_row_without_shift() {
+        let mut rig = Rig::sized(700.0);
+        let first = rig.app.settings.shelves[0].cards[0].clone();
+        let anchor = format!("card-{first}");
+        let left = |rig: &Rig| rig.rect(egui::Id::new(("anchor", anchor.as_str()))).left();
+        let before = left(&rig);
+        // «Экран» без монитора — одна строка, листать ему нечего.
+        let over = rig.rect(egui::Id::new(("anchor", anchor.as_str()))).center();
+        rig.wheel(over, -3.0, Modifiers::NONE);
+        assert!(left(&rig) < before - 20.0, "ряд не листается: {before} → {}", left(&rig));
     }
 
     #[test]
@@ -4612,7 +4915,7 @@ mod tests {
     #[test]
     fn empty_shelf_offers_editing() {
         let mut rig = Rig::new();
-        rig.app.settings.shelves.push(config::Shelf { name: "Пусто".into(), cards: Vec::new() });
+        rig.app.settings.shelves.push(config::Shelf { name: "Пусто".into(), cards: Vec::new(), height: None });
         rig.app.set_shelf(4);
         rig.settle();
         assert!(rig.app.editing.is_none());
@@ -7449,8 +7752,7 @@ mod tests {
         ] {
             let mut rig = Rig::new();
             // Высокое окно — весь столбец «Панель» на виду, без прокрутки.
-            rig.app.settings.height = 900.0;
-            rig.size.y = 900.0;
+            rig.app.held = Some(900.0);
             rig.app.settings.common.language = lang;
             rig.app.view = View::Settings;
             rig.settle();
@@ -7466,8 +7768,7 @@ mod tests {
     fn the_settings_card_has_a_chip_for_every_kind_of_plaque() {
         let mut rig = Rig::new();
         // Выше панель — все чипы на виду (при 340 «Живые плашки» листают колесом).
-        rig.app.settings.height = MAX_HEIGHT;
-        rig.size.y = MAX_HEIGHT;
+        rig.app.held = Some(MAX_HEIGHT);
         rig.app.settings.common.language = Lang::En;
         rig.app.view = View::Settings;
         rig.settle();
@@ -7504,8 +7805,7 @@ mod tests {
     #[test]
     fn the_plaque_chips_wrap_in_a_narrow_card() {
         let mut rig = Rig::sized(930.0);
-        rig.app.settings.height = MAX_HEIGHT;
-        rig.size.y = MAX_HEIGHT;
+        rig.app.held = Some(MAX_HEIGHT);
         rig.app.settings.common.language = Lang::Ru;
         rig.app.view = View::Settings;
         rig.settle();

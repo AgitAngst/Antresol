@@ -8,6 +8,9 @@ use anvil_ui::{CommonSettings, Icon, Lang, ThemeChoice};
 pub const MIN_WIDTH: f32 = 560.0;
 pub const MIN_HEIGHT: f32 = 150.0;
 pub const MAX_HEIGHT: f32 = 520.0;
+/// Выше «по полке» панель сама не растёт: длинные списки листаются, а панель не закрывает пол-экрана. Своя высота — до
+/// `MAX_HEIGHT`.
+pub const AUTO_MAX_HEIGHT: f32 = 440.0;
 /// Зона выезда вдоль края, % ширины панели (`edge_zone=`): от `MIN_EDGE_ZONE` до `MAX_EDGE_ZONE`; 0 — весь край монитора.
 pub const MIN_EDGE_ZONE: u32 = 50;
 pub const MAX_EDGE_ZONE: u32 = 400;
@@ -69,6 +72,8 @@ pub struct Shelf {
     /// иначе — своё имя как есть.
     pub name: String,
     pub cards: Vec<String>,
+    /// Своя высота панели на этой полке (потянули нижний край), в точках; `None` — по полке: сколько нужно карточкам.
+    pub height: Option<u16>,
 }
 
 impl Shelf {
@@ -86,6 +91,7 @@ pub fn default_shelves() -> Vec<Shelf> {
         .map(|(name, cards)| Shelf {
             name: (*name).to_string(),
             cards: cards.iter().map(|c| (*c).to_string()).collect(),
+            height: None,
         })
         .collect()
 }
@@ -712,7 +718,7 @@ impl Settings {
         }
         let name =
             (1usize..).map(|n| crate::texts::shelf_n(lang, n)).find(|n| !self.shelves.iter().any(|s| s.name == *n))?;
-        self.shelves.push(Shelf { name, cards: Vec::new() });
+        self.shelves.push(Shelf { name, cards: Vec::new(), height: None });
         Some(self.shelves.len() - 1)
     }
 
@@ -813,9 +819,14 @@ fn list(value: &str) -> Vec<String> {
 /// умолчанию; такой полки нет — новую («День» у настроенных до 2.5) заводят в конце, если полок меньше девяти, а у
 /// полок из 1.9 или при девяти полках карточка встаёт в конец последней. Полок нет совсем (старый файл) — полки по
 /// умолчанию, порядок внутри них — по `legacy`: кто был раньше в ленте, тот раньше на полке.
-fn build_shelves(lines: Vec<(String, Vec<String>)>, hidden: &[String], legacy: &[String]) -> Vec<Shelf> {
+fn build_shelves(
+    lines: Vec<(String, Vec<String>)>,
+    heights: &[Option<u16>],
+    hidden: &[String],
+    legacy: &[String],
+) -> Vec<Shelf> {
     let mut shelves: Vec<Shelf> = Vec::new();
-    for (name, cards) in lines {
+    for (i, (name, cards)) in lines.into_iter().enumerate() {
         let name = Shelf::clean_name(&name);
         if name.is_empty() || shelves.len() >= MAX_SHELVES {
             continue;
@@ -827,7 +838,7 @@ fn build_shelves(lines: Vec<(String, Vec<String>)>, hidden: &[String], legacy: &
                 kept.push(c);
             }
         }
-        shelves.push(Shelf { name, cards: kept });
+        shelves.push(Shelf { name, cards: kept, height: heights.get(i).copied().flatten() });
     }
     if shelves.is_empty() {
         shelves = default_shelves();
@@ -850,7 +861,7 @@ fn build_shelves(lines: Vec<(String, Vec<String>)>, hidden: &[String], legacy: &
                 // заводит её в конце, а не встаёт в чужую (остальные карточки остаются где стояли). Полок уже девять —
                 // в последнюю.
                 None if !OLD_DEFAULT_SHELVES.contains(&home) && shelves.len() < MAX_SHELVES => {
-                    shelves.push(Shelf { name: home.to_string(), cards: Vec::new() });
+                    shelves.push(Shelf { name: home.to_string(), cards: Vec::new(), height: None });
                     shelves.len() - 1
                 }
                 None => last,
@@ -869,6 +880,7 @@ pub fn parse(text: &str) -> Settings {
     let mut s = Settings::default();
     // Полки и порядок старого `modules=` собираем на выходе: от порядка строк в файле раскладка не зависит.
     let mut shelf_lines: Vec<(String, Vec<String>)> = Vec::new();
+    let mut shelf_heights: Vec<Option<u16>> = Vec::new();
     let mut legacy: Vec<String> = Vec::new();
     // Старый файл: убрана ли была карточка «Заготовки» (`snippets`) — теперь это закреплённое в «Буфере обмена».
     let mut snippets_hidden = false;
@@ -925,6 +937,13 @@ pub fn parse(text: &str) -> Settings {
                 let (name, cards) = value.split_once('|').unwrap_or((value, ""));
                 shelf_lines.push((name.to_string(), list(cards)));
             }
+            // Своя высота полок по порядку `shelf=`: `400,,` — у первой 400, у остальных «по полке»; кривое — «по полке».
+            "shelf_heights" => {
+                shelf_heights = value
+                    .split(',')
+                    .map(|h| h.trim().parse::<f32>().ok().map(|h| h.clamp(MIN_HEIGHT, MAX_HEIGHT).round() as u16))
+                    .collect();
+            }
             // Порядок из версий до 1.9: нужен только для перехода на полки, обратно не пишется.
             "modules" => legacy = list(value),
             "hidden" => {
@@ -977,7 +996,7 @@ pub fn parse(text: &str) -> Settings {
     if shelf_lines.is_empty() && !snippets_hidden {
         s.hidden.retain(|k| k != "clipboard");
     }
-    s.shelves = build_shelves(shelf_lines, &s.hidden, &legacy);
+    s.shelves = build_shelves(shelf_lines, &shelf_heights, &s.hidden, &legacy);
     s.width = s.width.max(MIN_WIDTH);
     s.height = s.height.clamp(MIN_HEIGHT, MAX_HEIGHT);
     s
@@ -1013,6 +1032,11 @@ pub fn format(s: &Settings) -> String {
     }
     for sh in &s.shelves {
         out.push_str(&format!("shelf={}|{}\n", Shelf::clean_name(&sh.name), sh.cards.join(",")));
+    }
+    if s.shelves.iter().any(|sh| sh.height.is_some()) {
+        let heights: Vec<String> =
+            s.shelves.iter().map(|sh| sh.height.map(|h| h.to_string()).unwrap_or_default()).collect();
+        out.push_str(&format!("shelf_heights={}\n", heights.join(",")));
     }
     out.push_str(&format!("hidden={}\ngithub={}\n", s.hidden.join(","), s.github.join(",")));
     if let Some(t) = &s.github_token {
@@ -1651,7 +1675,7 @@ mod tests {
         assert!(s.hide_card("tools"));
         assert_eq!(s.add_shelf(Lang::Ru), Some(4));
         assert!(s.rename_shelf(4, "Дом|Работа"));
-        assert_eq!(s.shelves[4], Shelf { name: "Дом Работа".into(), cards: Vec::new() });
+        assert_eq!(s.shelves[4], Shelf { name: "Дом Работа".into(), cards: Vec::new(), height: None });
         let text = format(&s);
         assert!(text.contains("shelf=Дом Работа|\n"), "пустая полка остаётся");
         assert!(text.contains("hidden=tools\n"));
@@ -1741,7 +1765,10 @@ mod tests {
         assert_eq!(s.shelves[0].cards, ["display", "brightness", "sound"]);
         assert_eq!(s.shelves[1].cards, ["quick", "resources", "bluetooth", "github"]);
         assert_eq!(s.shelves[2].cards, ["clipboard", "tray", "tools", "timers", "media", "buttons"]);
-        assert_eq!(s.shelves[3], Shelf { name: "@day".into(), cards: vec!["meetings".into(), "clocks".into()] });
+        assert_eq!(
+            s.shelves[3],
+            Shelf { name: "@day".into(), cards: vec!["meetings".into(), "clocks".into()], height: None }
+        );
         assert_whole(&s);
         // Убранная новой не считается и сама не возвращается.
         let s = parse("shelf=@sys|quick\nhidden=clocks\n");

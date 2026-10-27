@@ -14,6 +14,7 @@ use anvil_ui::widgets::{self as w, Kind};
 use anvil_ui::{Icon, Lang, Palette, Tone};
 use eframe::egui::{self, Align, Color32, FontId, Layout, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
 
+use super::ShowNoted;
 use super::{Action, Command, Ctx, Module, anchor, clipboard, mine, stable_key};
 use crate::config::{MAX_CALENDARS, Settings};
 use crate::ics::{self, Calendar, Link, Meeting};
@@ -744,7 +745,7 @@ impl Meetings {
     /// Календарей нет: как подключить — слова, поле ссылки и где её взять в Google и Outlook.
     fn empty_ui(&mut self, ui: &mut Ui, cx: &mut Ctx) {
         let t = cx.t;
-        egui::ScrollArea::vertical().id_salt("meetings-empty").auto_shrink([false, false]).show(ui, |ui| {
+        egui::ScrollArea::vertical().id_salt("meetings-empty").auto_shrink([false, false]).show_noted(ui, |ui| {
             w::note(ui, t.meetings_empty);
             ui.add_space(6.0);
             self.add_row(ui, cx);
@@ -760,7 +761,7 @@ impl Meetings {
         let p = Palette::of(ui);
         let urls = cx.settings.calendars.clone();
         let (mut remove, mut done) = (None, false);
-        egui::ScrollArea::vertical().id_salt("meetings-manage").auto_shrink([false, false]).show(ui, |ui| {
+        egui::ScrollArea::vertical().id_salt("meetings-manage").auto_shrink([false, false]).show_noted(ui, |ui| {
             ui.horizontal(|ui| {
                 w::section_label(ui, t.meetings_calendars);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -828,9 +829,9 @@ impl Meetings {
         let mut join: Option<Link> = None;
         egui::ScrollArea::vertical()
             .id_salt("meetings")
-            .auto_shrink([false, true])
+            .auto_shrink([false, false])
             .max_height((ui.available_height() - BAR_H - 6.0).max(60.0))
-            .show(ui, |ui| {
+            .show_noted(ui, |ui| {
                 if !known {
                     if busy {
                         w::note(ui, t.meetings_loading);

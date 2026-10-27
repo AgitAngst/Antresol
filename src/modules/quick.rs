@@ -12,6 +12,7 @@ use anvil_ui::widgets::{self as w, Kind};
 use anvil_ui::{Icon, Palette, Tone};
 use eframe::egui::{self, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 
+use super::ShowNoted;
 use super::{Action, Command, Ctx, Module, chips, mine};
 use crate::config::{Profile, SceneRow, Settings};
 use crate::sys::net::{self, Vpn, Wifi};
@@ -400,7 +401,7 @@ impl Module for Quick {
         let wifi_state = wifi.clone().flatten();
         // Название плитки одно — «Wi‑Fi»; сеть, через которую выход в интернет, — в строке состояния.
         let network = wifi_state.as_ref().filter(|wf| wf.on && !wf.network.is_empty()).map(|wf| wf.network.as_str());
-        egui::ScrollArea::vertical().id_salt("quick").auto_shrink([false, false]).show(ui, |ui| {
+        egui::ScrollArea::vertical().id_salt("quick").auto_shrink([false, false]).show_noted(ui, |ui| {
             // Четыре плитки по две в ряд.
             let tiles: [(Icon, &str, Option<bool>, Option<&str>); 4] = [
                 (Icon::Sun, t.keep_awake, Some(self.awake), None),

@@ -10,6 +10,7 @@ use anvil_ui::Icon;
 use anvil_ui::widgets as w;
 use eframe::egui::{self, Ui};
 
+use super::ShowNoted;
 use super::{Action, Command, Ctx, Module, mine, row};
 use crate::config::Settings;
 use crate::sys;
@@ -121,7 +122,7 @@ impl Module for Tray {
             return;
         }
         let (mut open, mut reveal, mut remove) = (None, None, None);
-        egui::ScrollArea::vertical().id_salt("tray").auto_shrink([false, false]).show(ui, |ui| {
+        egui::ScrollArea::vertical().id_salt("tray").auto_shrink([false, false]).show_noted(ui, |ui| {
             for (i, path) in list.iter().enumerate() {
                 let id = ui.id().with(("tray", i));
                 let missing = !sys::demo() && gone.contains(path);

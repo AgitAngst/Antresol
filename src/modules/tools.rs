@@ -9,6 +9,7 @@ use anvil_ui::widgets::{self as w, Kind};
 use anvil_ui::{Icon, Palette, Tone};
 use eframe::egui::{self, Color32, Sense, Stroke, Ui, Vec2};
 
+use super::ShowNoted;
 use super::{Action, Command, Ctx, Module, mine};
 use crate::config::Settings;
 use crate::sys::{self, clip, monitor, ocr};
@@ -310,7 +311,7 @@ impl Module for Tools {
 
     fn ui(&mut self, ui: &mut Ui, cx: &mut Ctx) {
         let t = cx.t;
-        egui::ScrollArea::vertical().id_salt("tools").auto_shrink([false, false]).show(ui, |ui| {
+        egui::ScrollArea::vertical().id_salt("tools").auto_shrink([false, false]).show_noted(ui, |ui| {
             self.picker(ui, cx);
             self.snip_ui(ui, t);
         });

@@ -5,6 +5,7 @@ use anvil_ui::widgets::{self as w, Kind};
 use anvil_ui::{Icon, Palette};
 use eframe::egui::{self, Ui};
 
+use super::ShowNoted;
 use super::{Action, Command, Ctx, Module, mine, row};
 use crate::config::{Clock, MAX_CLOCKS, Settings};
 use crate::sys::{self, tz};
@@ -187,7 +188,7 @@ impl Module for Clocks {
             Clock { name: texts::demo_city(cx.lang, 1).into(), zone: "Eastern Standard Time".into() },
         ];
         let list = if sys::demo() { demo } else { cx.settings.clocks.clone() };
-        egui::ScrollArea::vertical().id_salt("clocks").auto_shrink([false, false]).show(ui, |ui| {
+        egui::ScrollArea::vertical().id_salt("clocks").auto_shrink([false, false]).show_noted(ui, |ui| {
             if self.adding.is_some() {
                 self.add_ui(ui, cx);
                 return;

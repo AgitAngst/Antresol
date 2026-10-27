@@ -7,6 +7,7 @@ use anvil_ui::Palette;
 use anvil_ui::widgets as w;
 use eframe::egui::{self, Pos2, Sense, Stroke, Ui, Vec2};
 
+use super::ShowNoted;
 use super::{Ctx, Module};
 use crate::sys::res::{self, Sampler, Snapshot};
 use crate::texts::Tr;
@@ -103,7 +104,7 @@ impl Module for Resources {
             w::spinner(ui, 16.0);
             return;
         };
-        egui::ScrollArea::vertical().id_salt("res").auto_shrink([false, false]).show(ui, |ui| {
+        egui::ScrollArea::vertical().id_salt("res").auto_shrink([false, false]).show_noted(ui, |ui| {
             meter(ui, t.cpu, &s.cpu.map(pct).unwrap_or_else(|| "…".into()), None);
             sparkline(ui, &self.cpu);
             ui.add_space(4.0);

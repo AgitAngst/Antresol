@@ -8,6 +8,7 @@ use anvil_ui::widgets::{self as w, Kind};
 use anvil_ui::{Icon, Palette, Tone};
 use eframe::egui::{self, Ui};
 
+use super::ShowNoted;
 use super::{Action, Command, Ctx, Module, mine};
 use crate::config::Settings;
 use crate::plaque::{self, Do, Glyph, Look, Plaque, Say};
@@ -258,7 +259,7 @@ impl Module for Timers {
             return;
         }
         let mut remove = None;
-        egui::ScrollArea::vertical().id_salt("timers").auto_shrink([false, false]).show(ui, |ui| {
+        egui::ScrollArea::vertical().id_salt("timers").auto_shrink([false, false]).show_noted(ui, |ui| {
             for (i, timer) in self.list.iter_mut().enumerate() {
                 let left = timer.remaining(now);
                 ui.horizontal(|ui| {

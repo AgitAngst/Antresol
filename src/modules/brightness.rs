@@ -14,6 +14,7 @@ use anvil_ui::widgets::{self as w, Kind};
 use anvil_ui::{Icon, Palette, Tone};
 use eframe::egui::{self, Pos2, Rect, Sense, Stroke, Ui, UiBuilder, Vec2};
 
+use super::ShowNoted;
 use super::{Action, Command, Ctx, Module, chips, mine};
 use crate::config::{Profile, SceneRow, Settings};
 use crate::sys::ddc::{self, BRIGHTNESS, CONTRAST, Feature, INPUT, Physical};
@@ -483,7 +484,7 @@ impl Brightness {
             w::note(ui, t.ddc_none);
             return;
         }
-        egui::ScrollArea::vertical().id_salt("ddc").auto_shrink([false, false]).show(ui, |ui| {
+        egui::ScrollArea::vertical().id_salt("ddc").auto_shrink([false, false]).show_noted(ui, |ui| {
             let mut first = true;
             for (i, p) in list.iter().enumerate() {
                 let Some(b) = p.brightness else { continue };

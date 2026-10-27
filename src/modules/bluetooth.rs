@@ -23,6 +23,7 @@ use anvil_ui::widgets as w;
 use anvil_ui::{Icon, Palette, Tone};
 use eframe::egui::{self, Color32, FontId, Pos2, Rect, Sense, Stroke, Ui, UiBuilder, Vec2};
 
+use super::ShowNoted;
 use super::{Action, Command, Ctx, Module, anchor, mine};
 use crate::config::Settings;
 use crate::plaque::{self, Glyph, Plaque, Say};
@@ -748,7 +749,7 @@ impl Module for Bluetooth {
                 .id_salt("bt")
                 .auto_shrink([false, false])
                 .max_height(ui.available_height() - settings_h)
-                .show(ui, |ui| {
+                .show_noted(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = ROW_GAP;
                     for d in &list {
                         if row(ui, t, lang, d, doings.get(&d.address).copied(), off) {
