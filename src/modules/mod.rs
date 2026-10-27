@@ -242,6 +242,34 @@ pub fn anchor(ui: &Ui, rect: egui::Rect, key: &str) {
     ui.interact(rect, egui::Id::new(("anchor", key)), egui::Sense::hover());
 }
 
+/// Значок «наружу» (стрелка из квадрата) 12 × 12 — кнопка открывает сайт или другую программу. В kit-v0.6.1 его нет (появился в
+/// kit-v0.8.0 как `Icon::External`): при переходе на новый набор заменить этот рисунок на значок набора.
+pub fn paint_external(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
+    use std::f32::consts::{FRAC_PI_2, PI};
+    let scale = rect.width() / 24.0;
+    let origin = rect.center() - egui::Vec2::splat(12.0) * scale;
+    let at = |x: f32, y: f32| origin + egui::Vec2::new(x, y) * scale;
+    let stroke = egui::Stroke::new((1.7 * scale * 1.3).max(1.2), color);
+    let arc = |cx: f32, cy: f32, r: f32, from: f32, to: f32| -> Vec<egui::Pos2> {
+        (0..=4)
+            .map(|i| {
+                let a = from + (to - from) * i as f32 / 4.0;
+                at(cx + r * a.cos(), cy + r * a.sin())
+            })
+            .collect()
+    };
+    painter.add(egui::Shape::line(vec![at(15.0, 3.0), at(21.0, 3.0), at(21.0, 9.0)], stroke));
+    painter.add(egui::Shape::line(vec![at(10.0, 14.0), at(21.0, 3.0)], stroke));
+    let mut p = vec![at(18.0, 13.0), at(18.0, 19.0)];
+    p.extend(arc(16.0, 19.0, 2.0, 0.0, FRAC_PI_2));
+    p.push(at(5.0, 21.0));
+    p.extend(arc(5.0, 19.0, 2.0, FRAC_PI_2, PI));
+    p.push(at(3.0, 8.0));
+    p.extend(arc(5.0, 8.0, 2.0, PI, PI + FRAC_PI_2));
+    p.push(at(11.0, 6.0));
+    painter.add(egui::Shape::line(p, stroke));
+}
+
 /// Значок карточки в заголовке — по ключу модуля.
 pub fn icon_of(key: &str) -> Icon {
     match key {

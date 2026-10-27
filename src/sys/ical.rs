@@ -1,7 +1,7 @@
 // Календарь по https (этап 2.5 «Встречи»): GET файла .ics по WinHTTP, как `gh.rs`, но хост и путь — из ссылки владельца.
 // Ссылка — секрет: ни она, ни хост, ни путь не попадают в ошибки и в журнал; ошибка — короткий код («winhttp 0x…»,
 // «http 404»). Перенаправления — по правилам WinHTTP: на https можно, с https на http нельзя (правило по умолчанию не
-// ослаблено). Ответ — не больше 5 МБ (лишнее отрезается, об этом говорит `Got::truncated`), ждём не дольше полуминуты.
+// ослаблено). Ответ — не больше 32 МБ (лишнее отрезается, об этом говорит `Got::truncated`), ждём не дольше полуминуты.
 
 use std::time::{Duration, Instant};
 
@@ -12,8 +12,9 @@ use windows::Win32::Networking::WinHttp::{
 };
 use windows::core::{PCWSTR, w};
 
-/// Ответ больше не читаем: календарь тяжелее — только его начало.
-pub const MAX_BODY: usize = 5 << 20;
+/// Ответ больше не читаем: календарь тяжелее — только его начало. Рабочий календарь за годы, с участниками и вложениями,
+/// бывает в десятки мегабайт (секретный адрес Google отдаёт всю историю); разбор линейный — 32 МБ это доли секунды.
+pub const MAX_BODY: usize = 32 << 20;
 /// Всего на один запрос: медленная отдача по капле не держит поток вечно.
 const TOTAL: Duration = Duration::from_secs(30);
 
@@ -107,9 +108,10 @@ pub fn get(host: &str, port: u16, path: &str) -> Result<Got, Fail> {
                     if read == 0 {
                         break;
                     }
-                    body.extend_from_slice(&buf[..read as usize]);
-                    if body.len() > MAX_BODY {
-                        body.truncate(MAX_BODY);
+                    // Сверх предела не берём ни байта: память под лишнее не растёт.
+                    let take = (read as usize).min(MAX_BODY - body.len());
+                    body.extend_from_slice(&buf[..take]);
+                    if take < read as usize {
                         truncated = true;
                         break;
                     }
@@ -146,6 +148,6 @@ mod tests {
     fn failures_name_a_code_and_never_an_address() {
         assert_eq!(Fail::Status(404).to_string(), "http 404");
         assert_eq!(Fail::Network("timeout".into()).to_string(), "timeout");
-        assert_eq!(MAX_BODY, 5 * 1024 * 1024);
+        assert_eq!(MAX_BODY, 32 * 1024 * 1024);
     }
 }

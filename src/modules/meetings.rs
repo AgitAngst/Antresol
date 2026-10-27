@@ -14,7 +14,7 @@ use anvil_ui::widgets::{self as w, Kind};
 use anvil_ui::{Icon, Lang, Palette, Tone};
 use eframe::egui::{self, Align, Color32, FontId, Layout, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
 
-use super::{Action, Command, Ctx, Module, anchor, mine, stable_key};
+use super::{Action, Command, Ctx, Module, anchor, clipboard, mine, stable_key};
 use crate::config::{MAX_CALENDARS, Settings};
 use crate::ics::{self, Calendar, Link, Meeting};
 use crate::plaque::{self, Do, Glyph, Look, Plaque, Say};
@@ -31,8 +31,9 @@ const LATER: usize = 4;
 const SEARCH: usize = 3;
 const PLATE_H: f32 = 62.0;
 const ROW_H: f32 = 30.0;
-/// Тесно в плашке: места под текст меньше — «Подключиться» без слова, значком (имя — в подсказке и для диктора).
-const PLATE_ROOM: f32 = 190.0;
+/// Тесно в плашке: места под вторую строку (но не меньше этого) нет — «Подключиться» без слова, значком (имя — в подсказке и
+/// для диктора).
+const MIN_TEXT: f32 = 120.0;
 /// Службе в рамке рядом с названием нужно, чтобы названию осталось не меньше этого, иначе рамки нет (служба — в подсказке).
 const TITLE_ROOM: f32 = 90.0;
 /// Пояснение внизу карточки — от такой ширины: в две строки оно помещается в нижнюю строку, уже — нет совсем.
@@ -103,14 +104,73 @@ impl Fail {
     }
 }
 
+/// Окно, на которое посчитаны встречи: вчера, сегодня и три следующих дня по часам ПК. Оно шире нужного карточке (сегодня и
+/// завтра): на смене суток встречи пересчитываются в потоке, а карточка пока обходится прежним списком и не пустеет.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Window {
+    /// Местные сутки, на которые окно посчитано (номер дня от 1970-01-01 по часам ПК).
+    day: i64,
+    from: i64,
+    to: i64,
+}
+
+/// Номер местных суток момента `now`.
+fn local_day(now: i64) -> i64 {
+    (now + i64::from(local_offset(now))).div_euclid(DAY)
+}
+
+/// Окно вокруг момента `now`.
+fn window_at(now: i64) -> Window {
+    let local = |utc: i64| local_offset(utc);
+    let day = local_day(now);
+    let start = |d: i64| ics::wall_to_utc(d * DAY, &local);
+    Window { day, from: start(day - 1), to: start(day + 4) }
+}
+
+/// Встреч одного календаря в готовом списке не больше: чужой файл не заполняет память.
+const MAX_READY: usize = 2000;
+
+/// Встречи календаря в окне по порядку. Считает поток модуля, а не окно: чужой файл бывает тяжёлым.
+fn ready_for(calendar: &Calendar, window: Window) -> Vec<Meeting> {
+    let mut list = calendar.meetings(window.from, window.to, &|utc| local_offset(utc));
+    list.truncate(MAX_READY);
+    list
+}
+
+/// Чтение одного календаря: разобранный файл и его встречи окна — всё посчитано там же, где читали.
+struct Got {
+    calendar: Arc<Calendar>,
+    window: Window,
+    ready: Vec<Meeting>,
+    /// Прочитана только часть: ответ больше предела или событий в файле больше предела.
+    partial: bool,
+}
+
+impl Got {
+    fn new(calendar: Calendar, partial: bool, now: i64) -> Got {
+        let window = window_at(now);
+        let ready = ready_for(&calendar, window);
+        let partial = partial || calendar.overflow;
+        Got { calendar: Arc::new(calendar), window, ready, partial }
+    }
+}
+
 /// Один календарь: ссылка (секрет — только в памяти) и последнее удачное чтение.
 struct Loaded {
     url: String,
-    calendar: Option<Calendar>,
+    /// Разобранный файл: из него на смене суток считаются встречи нового окна (в потоке и не под замком).
+    calendar: Option<Arc<Calendar>>,
+    /// Встречи окна `window` — готовые.
+    ready: Vec<Meeting>,
+    window: Option<Window>,
     /// Последнее чтение не вышло: прежние встречи остаются, под календарём — слова.
     error: Option<Fail>,
     /// Ответ был больше предела: прочитано начало.
     partial: bool,
+    /// Идёт пересчёт на новые сутки: второй не начинается.
+    recomputing: bool,
+    /// Сколько раз принято новое чтение: пересчёт над прежним файлом на новый не ложится.
+    generation: u64,
 }
 
 #[derive(Default)]
@@ -123,20 +183,33 @@ struct Shared {
 
 impl Shared {
     /// Принять чтение по ссылке `url`. Не вышло — прежние встречи остаются, к ним добавляется причина.
-    fn apply(&mut self, url: &str, result: Result<(Calendar, bool), Fail>) {
+    fn apply(&mut self, url: &str, result: Result<Got, Fail>) {
         let at = match self.loaded.iter().position(|l| l.url == url) {
             Some(at) => at,
             None => {
-                self.loaded.push(Loaded { url: url.to_string(), calendar: None, error: None, partial: false });
+                self.loaded.push(Loaded {
+                    url: url.to_string(),
+                    calendar: None,
+                    ready: Vec::new(),
+                    window: None,
+                    error: None,
+                    partial: false,
+                    recomputing: false,
+                    generation: 0,
+                });
                 self.loaded.len() - 1
             }
         };
         let entry = &mut self.loaded[at];
         match result {
-            Ok((calendar, partial)) => {
-                entry.calendar = Some(calendar);
+            Ok(got) => {
+                entry.calendar = Some(got.calendar);
+                entry.ready = got.ready;
+                entry.window = Some(got.window);
                 entry.error = None;
-                entry.partial = partial;
+                entry.partial = got.partial;
+                entry.recomputing = false;
+                entry.generation += 1;
             }
             Err(fail) => entry.error = Some(fail),
         }
@@ -145,6 +218,28 @@ impl Shared {
 
     fn get(&self, url: &str) -> Option<&Loaded> {
         self.loaded.iter().find(|l| l.url == url)
+    }
+
+    /// Принять пересчитанные встречи окна `window`. Если за это время календарь прочитали заново (`generation` ушёл вперёд),
+    /// пересчёт сделан над прежним файлом и не ложится. Сбой пересчёта — слова ошибки, как у сбоя чтения; прежние встречи остаются.
+    fn recounted(&mut self, url: &str, generation: u64, window: Window, result: std::thread::Result<Vec<Meeting>>) {
+        let Some(at) = self.loaded.iter().position(|l| l.url == url && l.generation == generation) else { return };
+        let entry = &mut self.loaded[at];
+        entry.recomputing = false;
+        match result {
+            Ok(ready) => {
+                entry.ready = ready;
+                entry.window = Some(window);
+            }
+            Err(_) => {
+                eprintln!("calendar {}: counting the meetings failed", at + 1);
+                entry.error = Some(Fail::NotCalendar);
+                // Окно на эти сутки считается сделанным (прежний список остаётся): иначе пересчёт, что падает всегда, запускался бы
+                // заново каждый кадр.
+                entry.window = Some(window);
+            }
+        }
+        self.version += 1;
     }
 }
 
@@ -214,9 +309,15 @@ fn note_zones(n: usize, calendar: &Calendar) {
     }
 }
 
-/// Прочитать календарь по ссылке: (разобранный, «взято только начало»). Демо и тесты — выдуманный, без сети. В журнал — только
+/// Текст из байтов ответа: годный UTF-8 берётся как есть, без копии (ответ бывает в десятки мегабайт), негодный — с заменой
+/// знаков.
+fn decode(body: Vec<u8>) -> String {
+    String::from_utf8(body).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
+}
+
+/// Прочитать календарь по ссылке и посчитать его встречи на окно. Демо и тесты — выдуманный, без сети. В журнал — только
 /// номер календаря и код ошибки, без адреса.
-fn load(url: &str, lang: Lang, n: usize) -> Result<(Calendar, bool), Fail> {
+fn load(url: &str, lang: Lang, n: usize) -> Result<Got, Fail> {
     let (text, partial) = if sys::isolated() {
         (demo_ics(lang, n), false)
     } else {
@@ -235,14 +336,24 @@ fn load(url: &str, lang: Lang, n: usize) -> Result<(Calendar, bool), Fail> {
         {
             body.truncate(at + 1);
         }
-        (String::from_utf8_lossy(&body).into_owned(), got.truncated)
+        (decode(body), got.truncated)
     };
     let calendar = Calendar::parse(&text, now()).ok_or_else(|| {
         eprintln!("calendar {n}: the answer is not a calendar");
         Fail::NotCalendar
     })?;
+    drop(text);
     note_zones(n, &calendar);
-    Ok((calendar, partial))
+    Ok(Got::new(calendar, partial, now()))
+}
+
+/// Прочитать так, чтобы сбой на чужом файле не прошёл молча: паника в потоке чтения — слова «Ссылка не на календарь» в
+/// карточке, а не пустая карточка без объяснения (и «занято» не остаётся навсегда).
+fn guarded(n: usize, read: impl FnOnce() -> Result<Got, Fail>) -> Result<Got, Fail> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(read)).unwrap_or_else(|_| {
+        eprintln!("calendar {n}: reading failed");
+        Err(Fail::NotCalendar)
+    })
 }
 
 // ─── Что показывать ─────────────────────────────────────────────────────────
@@ -256,16 +367,34 @@ pub struct Agenda {
     pub tomorrow: Option<Meeting>,
 }
 
+/// Идущая встреча без ссылки или длиннее этого не держит главное место, если до её конца начнётся встреча со ссылкой.
+const LONG: i64 = 2 * 3600;
+
 /// Из встреч по порядку (`upcoming`, сегодня и завтра) — то, что видно в `now`: законченные уже не в счёт; сегодня —
-/// до `today_end` (местной полуночи).
+/// до `today_end` (местной полуночи). Длинный блок без ссылки («Фокус» с 9 до 17, «Вне офиса») весь день занимал бы главное
+/// место, а встреча со ссылкой в 10:30 ушла бы в «Дальше сегодня»: идущая встреча без ссылки или длиннее двух часов уступает
+/// главное место первой встрече со ссылкой, что начнётся (или уже началась) до её конца, и становится первой строкой списка.
 pub fn agenda(upcoming: &[Meeting], now: i64, today_end: i64) -> Agenda {
     let live: Vec<&Meeting> = upcoming.iter().filter(|m| alive(m, now)).collect();
-    let (today, rest): (Vec<&Meeting>, Vec<&Meeting>) = live.into_iter().partition(|m| m.start < today_end);
+    let (mut today, rest): (Vec<&Meeting>, Vec<&Meeting>) = live.into_iter().partition(|m| m.start < today_end);
+    if let Some(first) = today.first().copied()
+        && first.start <= now
+        && (first.link.is_none() || first.end - first.start > LONG)
+        && let Some(at) = today.iter().skip(1).position(|m| m.link.is_some() && m.start < first.end)
+    {
+        let linked = today.remove(at + 1);
+        today.insert(0, linked);
+    }
     Agenda {
         next: today.first().map(|m| (*m).clone()),
         later: today.iter().skip(1).take(LATER).map(|m| (*m).clone()).collect(),
         tomorrow: if today.is_empty() { rest.first().map(|m| (*m).clone()) } else { None },
     }
+}
+
+/// Идёт ли встреча в `now`: началась и ещё не кончилась (встреча-момент не идёт никогда).
+fn ongoing(m: &Meeting, now: i64) -> bool {
+    m.start <= now && m.end > now
 }
 
 /// Встречи сегодня и завтра из всех календарей, посчитанные на минуту `minute`.
@@ -313,7 +442,7 @@ pub fn meeting_plaque(m: &Meeting, link: &Link, time: &str, expires: Instant) ->
 
 /// Плашка с выдуманной встречей для снимков (`strip-plaque-meeting`) и документации: через ~100 секунд, Zoom.
 pub fn sample_plaque(lang: Lang) -> Plaque {
-    let start = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0) + 100;
+    let start = texts::clock() + 100;
     let title = if lang == Lang::Ru { "Планёрка" } else { "Daily stand-up" };
     let m =
         Meeting { uid: "demo".into(), title: title.into(), place: String::new(), start, end: start + 900, link: None };
@@ -446,10 +575,9 @@ impl Meetings {
         let (urls, lang, shared) = (self.wanted.clone(), self.lang, self.shared.clone());
         std::thread::spawn(move || {
             for (i, url) in urls.iter().enumerate() {
-                // Сбой разбора не должен оставить «занято» навсегда.
-                if let Ok(result) = std::panic::catch_unwind(|| load(url, lang, i + 1)) {
-                    shared.lock().unwrap_or_else(|e| e.into_inner()).apply(url, result);
-                }
+                // Сбой разбора не оставляет «занято» навсегда и не проходит молча: в карточке — слова ошибки.
+                let result = guarded(i + 1, || load(url, lang, i + 1));
+                shared.lock().unwrap_or_else(|e| e.into_inner()).apply(url, result);
             }
             shared.lock().unwrap_or_else(|e| e.into_inner()).busy = false;
         });
@@ -461,17 +589,18 @@ impl Meetings {
             && (self.asked_for != self.wanted || self.asked.is_none_or(|at| now.saturating_duration_since(at) >= EVERY))
     }
 
-    /// Встречи сегодня и завтра из всех календарей по часам ПК: как у «Часов», раз в минуту.
+    /// Встречи сегодня и завтра из всех календарей — из готовых списков окна (их считает поток чтения, `Got`), здесь только
+    /// сложить, отсортировать и убрать повторы. По часам ПК: как у «Часов», раз в минуту.
     fn compute(&self, now: i64) -> Cache {
         let local = |utc: i64| local_offset(utc);
-        let day = (now + i64::from(local(now))).div_euclid(DAY) * DAY;
+        let day = local_day(now) * DAY;
         let today_end = ics::wall_to_utc(day + DAY, &local);
         let tomorrow_end = ics::wall_to_utc(day + 2 * DAY, &local);
         let s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
         let mut upcoming: Vec<Meeting> = Vec::new();
         for url in &self.wanted {
-            if let Some(calendar) = s.get(url).and_then(|l| l.calendar.as_ref()) {
-                upcoming.extend(calendar.meetings(now, tomorrow_end, &local));
+            if let Some(l) = s.get(url) {
+                upcoming.extend(l.ready.iter().filter(|m| alive(m, now) && m.start < tomorrow_end).cloned());
             }
         }
         upcoming.sort_by(|a, b| (a.start, a.end, &a.title).cmp(&(b.start, b.end, &b.title)));
@@ -480,8 +609,35 @@ impl Meetings {
         Cache { minute: now.div_euclid(60), version: s.version, wanted: self.wanted.clone(), today_end, upcoming }
     }
 
-    /// Пересчитать, если минута сменилась, пришло чтение или сменился список ссылок.
+    /// Сутки сменились по часам ПК: встречи нового окна считаются в потоке из прежде прочитанного файла, а не в потоке окна.
+    /// Окно «вчера … +3 дня» держит карточку на ближайшие сутки, пока пересчёт идёт: прежний список не пустеет.
+    fn rewindow(&self, now: i64) {
+        let day = local_day(now);
+        let stale: Vec<(String, Arc<Calendar>, u64)> = {
+            let mut s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+            s.loaded
+                .iter_mut()
+                .filter(|l| !l.recomputing && l.window.is_some_and(|w| w.day != day))
+                .filter_map(|l| {
+                    let calendar = l.calendar.clone()?;
+                    l.recomputing = true;
+                    Some((l.url.clone(), calendar, l.generation))
+                })
+                .collect()
+        };
+        for (url, calendar, generation) in stale {
+            let shared = self.shared.clone();
+            std::thread::spawn(move || {
+                let window = window_at(now);
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ready_for(&calendar, window)));
+                shared.lock().unwrap_or_else(|e| e.into_inner()).recounted(&url, generation, window, result);
+            });
+        }
+    }
+
+    /// Пересчитать, если минута сменилась, пришло чтение или сменился список ссылок; на смене суток — запустить пересчёт окна.
     fn refresh_cache(&mut self, now: i64) {
+        self.rewindow(now);
         let version = self.shared.lock().unwrap_or_else(|e| e.into_inner()).version;
         let fresh = self
             .cache
@@ -531,7 +687,9 @@ impl Meetings {
         let p = Palette::of(ui);
         let parsed = ics::calendar_url(&self.adding);
         let full = cx.settings.calendars.len() >= MAX_CALENDARS;
-        let ok = parsed.is_some() && !full && !sys::demo();
+        // Такой календарь уже есть: «Добавить» не горит, под полем сказано почему (а не молчаливое «ничего»).
+        let duplicate = parsed.as_ref().is_some_and(|url| cx.settings.calendars.contains(url));
+        let ok = parsed.is_some() && !full && !duplicate && !sys::demo();
         let was_typing = self.typing();
         ui.horizontal(|ui| {
             // Поле уступает кнопке: в узкой карточке «Добавить» не уходит за край.
@@ -562,9 +720,10 @@ impl Meetings {
             if (add.clicked() || (enter && ok))
                 && let Some(url) = &parsed
                 && ok
-                && !cx.settings.calendars.contains(url)
             {
                 cx.settings.calendars.push(url.clone());
+                // Ссылка — секрет: из истории «Буфера обмена» (в памяти) она, скопированная туда, уходит.
+                clipboard::forget_text(&self.adding);
                 self.adding.clear();
                 // Новый календарь читается сразу, а не через 10 минут.
                 self.asked = None;
@@ -573,6 +732,9 @@ impl Meetings {
         match (&parsed, self.adding.trim().is_empty()) {
             (Some(url), _) => {
                 ui.label(RichText::new(ics::short_url(url)).font(FontId::monospace(12.0)).color(p.weak));
+                if duplicate {
+                    warn_line(ui, t.meetings_dup);
+                }
             }
             (None, false) => warn_line(ui, t.meetings_link_bad),
             (None, true) => {}
@@ -691,8 +853,16 @@ impl Meetings {
                     w::section_label(ui, t.meetings_later);
                     ui.add_space(2.0);
                     ui.spacing_mut().item_spacing.y = 2.0;
-                    for (i, m) in agenda.later.iter().enumerate() {
-                        if Self::row(ui, cx, m, title_of(m, t), Some(hm(m.start)), &format!("meetings-row-{i}")) {
+                    // Идущая встреча — «до 17:00» вместо начала; столбец времени по самой длинной подписи, чтобы названия
+                    // стояли ровно.
+                    let labels: Vec<String> = agenda
+                        .later
+                        .iter()
+                        .map(|m| if ongoing(m, now) { texts::meeting_until(cx.lang, &hm(m.end)) } else { hm(m.start) })
+                        .collect();
+                    let column = labels.iter().map(|l| width_of(ui, l, FontId::monospace(13.0))).fold(44.0, f32::max);
+                    for (i, (m, label)) in agenda.later.iter().zip(labels).enumerate() {
+                        if Self::row(ui, cx, m, title_of(m, t), Some((label, column)), &format!("meetings-row-{i}")) {
                             join = m.link.clone();
                         }
                     }
@@ -723,7 +893,7 @@ impl Meetings {
                 });
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let more = w::icon_button(ui, Icon::More, t.meetings_calendars);
+                let more = w::icon_button(ui, Icon::More, t.meetings_calendars_hint);
                 anchor(ui, more.rect, "meetings-calendars");
                 if more.clicked() {
                     self.manage = true;
@@ -738,11 +908,11 @@ impl Meetings {
     }
 
     /// Ближайшая встреча: плашка `raised` с полоской акцента, название полужирным, служба в рамке, «10:30–10:45 · через
-    /// 12 мин» и справа «Подключиться». Ответ — нажали ли «Подключиться».
+    /// 12 мин» и справа «Подключиться». Подсказка — полное название, время и место. Ответ — нажали ли «Подключиться».
     fn plate(&self, ui: &mut Ui, cx: &Ctx, m: &Meeting, now: i64) -> bool {
         let (t, lang) = (cx.t, cx.lang);
         let p = Palette::of(ui);
-        let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), PLATE_H), Sense::hover());
+        let (rect, hover) = ui.allocate_exact_size(Vec2::new(ui.available_width(), PLATE_H), Sense::hover());
         paint_plate(ui.painter(), rect, &p);
         anchor(ui, rect, "meetings-plate");
         let mid = rect.center().y;
@@ -750,17 +920,24 @@ impl Meetings {
         let mut right = rect.right() - 12.0;
         let left = rect.left() + 14.0;
         let service = m.link.as_ref().map(|l| texts::service_name(lang, l.service));
+        let state = if m.start > now {
+            texts::meeting_in(lang, minutes_up(m.start - now))
+        } else {
+            texts::meeting_left(lang, minutes_up(m.end - now))
+        };
+        let sub_text = format!("{} · {state}", range(m));
         if m.link.is_some() {
-            // Тесно — «Подключиться» одним значком 34 × 34: название и время важнее слова на кнопке.
-            let full = 12.0 * 2.0 + 16.0 + 7.0 + width_of(ui, t.meetings_join, anvil_ui::semibold(14.0));
-            let compact = right - left - full - 12.0 < PLATE_ROOM;
-            let (width, label) = if compact { (34.0, "") } else { (full, t.meetings_join) };
+            // Тесно — «Подключиться» одним значком 34 × 34: время и название важнее слова на кнопке. Тесно — когда после
+            // кнопки со словом не помещается сама вторая строка («10:30–10:45 · через 12 мин»), а не когда места совсем мало.
+            let full = join_width(ui, t.meetings_join);
+            let sub_w = width_of(ui, &sub_text, FontId::proportional(12.5));
+            let compact = tight(right - left - 12.0, full, sub_w);
+            let width = if compact { 34.0 } else { full };
             let r = Rect::from_min_size(Pos2::new(right - width, mid - 17.0), Vec2::new(width, 34.0));
             let mut child =
                 ui.new_child(egui::UiBuilder::new().max_rect(r).layout(Layout::left_to_right(Align::Center)));
-            let button = w::button_sized(&mut child, Kind::Primary, Some(Icon::Play), label, r.size());
-            // Имя для диктора — всегда слово; в компактном виде оно же и подсказка, со службой.
-            button.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, t.meetings_join));
+            let button = join_button(&mut child, t.meetings_join, compact, r.size());
+            // В компактном виде слова на кнопке нет: подсказка — оно же и служба.
             let button = match (compact, service) {
                 (true, Some(service)) => button.on_hover_text(format!("{} · {service}", t.meetings_join)),
                 _ => button,
@@ -781,12 +958,7 @@ impl Meetings {
             p.text,
             room - if chip.is_some() { chip_w + 8.0 } else { 0.0 },
         );
-        let state = if m.start > now {
-            texts::meeting_in(lang, minutes_up(m.start - now))
-        } else {
-            texts::meeting_left(lang, minutes_up(m.end - now))
-        };
-        let sub = line(ui, &format!("{} · {state}", range(m)), FontId::proportional(12.5), p.weak, room);
+        let sub = line(ui, &sub_text, FontId::proportional(12.5), p.weak, room);
         let block = title.size().y + 3.0 + sub.size().y;
         let top = mid - block / 2.0;
         let title_h = title.size().y;
@@ -801,13 +973,15 @@ impl Meetings {
             ui.painter().rect(box_, 10, Color32::TRANSPARENT, Stroke::new(1.0, p.border_strong), StrokeKind::Inside);
             ui.painter().text(box_.center(), egui::Align2::CENTER_CENTER, chip, chip_font, p.weak);
         }
+        // Название и место режутся по ширине: полный текст — в подсказке.
+        hover.on_hover_text(tip_of(m, t));
         clicked
     }
 
-    /// Строка «Дальше сегодня»: время моноширинным (`time`; у завтрашней строки его нет — оно в `text`), название, справа
-    /// служба. Щелчок по строке со ссылкой — подключиться; подсказка — полное название, время и место. `key` — имя места для
-    /// тестов (`anchor`). Ответ — нажали ли.
-    fn row(ui: &mut Ui, cx: &Ctx, m: &Meeting, text: &str, time: Option<String>, key: &str) -> bool {
+    /// Строка «Дальше сегодня»: время моноширинным (`time` — подпись и ширина столбца под неё: «10:30» или у идущей «до
+    /// 17:00»; у завтрашней строки подписи нет — время в `text`), название, справа служба. Щелчок по строке со ссылкой —
+    /// подключиться; подсказка — полное название, время и место. `key` — имя места для тестов (`anchor`). Ответ — нажали ли.
+    fn row(ui: &mut Ui, cx: &Ctx, m: &Meeting, text: &str, time: Option<(String, f32)>, key: &str) -> bool {
         let (t, lang) = (cx.t, cx.lang);
         let p = Palette::of(ui);
         let joinable = m.link.is_some();
@@ -820,10 +994,10 @@ impl Meetings {
         let mid = rect.center().y;
         let mut x = rect.left() + 8.0;
         let mut right = rect.right() - 8.0;
-        if let Some(time) = &time {
+        if let Some((time, column)) = &time {
             let g = ui.painter().layout_no_wrap(time.clone(), FontId::monospace(13.0), p.weak);
             ui.painter().galley(Pos2::new(x, mid - g.size().y / 2.0), g, p.weak);
-            x += 44.0 + 12.0;
+            x += column + 12.0;
         }
         if let Some(l) = &m.link {
             let service = texts::service_name(lang, l.service);
@@ -835,17 +1009,74 @@ impl Meetings {
         let g = line(ui, text, FontId::proportional(13.5), p.text, right - x);
         ui.painter().galley(Pos2::new(x, mid - g.size().y / 2.0), g, p.text);
         w::focus_ring(ui, rect, &r, 6);
-        let place = place_of(m);
-        let tip = if place.is_empty() {
-            format!("{}\n{}", title_of(m, t), range(m))
-        } else {
-            format!("{}\n{}\n{place}", title_of(m, t), range(m))
-        };
         let label = format!("{}, {}", title_of(m, t), range(m));
         r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, joinable, &label));
         let r = if joinable { r.on_hover_cursor(egui::CursorIcon::PointingHand) } else { r };
-        r.on_hover_text(tip).clicked() && joinable
+        r.on_hover_text(tip_of(m, t)).clicked() && joinable
     }
+}
+
+/// Тесно ли для «Подключиться» со словом: `room` — вся ширина плашки под кнопку и текст, `full` — кнопка со словом, `sub_w` —
+/// вторая строка («10:30–10:45 · через 12 мин») целиком. Тесно, когда после кнопки эта строка не помещается (название при
+/// этом всё равно получает не меньше [`MIN_TEXT`]).
+fn tight(room: f32, full: f32, sub_w: f32) -> bool {
+    room - full < sub_w.max(MIN_TEXT)
+}
+
+/// Подсказка к встрече: полное название, время и место (место-ссылка не показывается — в ней бывает пароль).
+fn tip_of(m: &Meeting, t: &Tr) -> String {
+    let place = place_of(m);
+    if place.is_empty() {
+        format!("{}\n{}", title_of(m, t), range(m))
+    } else {
+        format!("{}\n{}\n{place}", title_of(m, t), range(m))
+    }
+}
+
+/// Ширина «Подключиться» со словом: поля 12, значок 16, 7, слово, 5 и значок «наружу» 12.
+fn join_width(ui: &Ui, label: &str) -> f32 {
+    12.0 * 2.0 + 16.0 + 7.0 + width_of(ui, label, anvil_ui::semibold(14.0)) + 5.0 + 12.0
+}
+
+/// «Подключиться» на ближайшей встрече: главная кнопка набора (значок «Play» и слово), но с мелким значком «наружу» за словом —
+/// она открывает браузер или программу службы (общий гайдлайн §4). `compact` — одним значком без слова и без «наружу»: имя
+/// кнопки для диктора и подсказка остаются. Ответ — как у кнопки набора.
+fn join_button(ui: &mut Ui, label: &str, compact: bool, size: Vec2) -> egui::Response {
+    let p = Palette::of(ui);
+    let galley = ui.painter().layout_no_wrap(label.to_owned(), anvil_ui::semibold(14.0), Color32::PLACEHOLDER);
+    let (rect, r) = ui.allocate_exact_size(size, Sense::click());
+    let fill = if r.is_pointer_button_down_on() {
+        p.accent.gamma_multiply(0.85)
+    } else if r.hovered() {
+        p.accent.lerp_to_gamma(if p.dark { Color32::WHITE } else { Color32::BLACK }, 0.08)
+    } else {
+        p.accent
+    };
+    ui.painter().rect(
+        rect,
+        anvil_ui::theme::radius::CONTROL,
+        fill,
+        Stroke::new(1.0, Color32::TRANSPARENT),
+        StrokeKind::Inside,
+    );
+    let content = if compact { 16.0 } else { 16.0 + 7.0 + galley.size().x + 5.0 + 12.0 };
+    let mut x = rect.center().x - content / 2.0;
+    let icon = Rect::from_min_size(Pos2::new(x, rect.center().y - 8.0), Vec2::splat(16.0));
+    anvil_ui::icons::paint(ui.painter(), icon, Icon::Play, p.on_accent);
+    if !compact {
+        x += 16.0 + 7.0;
+        let at = Pos2::new(x, rect.center().y - galley.size().y / 2.0);
+        let text_w = galley.size().x;
+        ui.painter().galley(at, galley, p.on_accent);
+        super::paint_external(
+            ui.painter(),
+            Rect::from_center_size(Pos2::new(x + text_w + 5.0 + 6.0, rect.center().y), Vec2::splat(12.0)),
+            p.on_accent,
+        );
+    }
+    w::focus_ring(ui, rect, &r, anvil_ui::theme::radius::CONTROL);
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    r.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 impl Module for Meetings {
@@ -1273,7 +1504,11 @@ mod tests {
         let titles: Vec<&str> = actions.iter().map(|a| a.title.as_str()).collect();
         assert_eq!(
             titles,
-            ["Подключиться к «Планёрка»", "Подключиться к «Обзор макетов»", "Подключиться к «Созвон по выпуску»"]
+            [
+                "Подключиться к встрече «Планёрка»",
+                "Подключиться к встрече «Обзор макетов»",
+                "Подключиться к встрече «Созвон по выпуску»"
+            ]
         );
         assert!(actions.iter().all(|a| a.enabled && a.place == t.meetings && a.id.starts_with("meetings:join:")));
         assert!(actions[0].words.contains("zoom") || actions[0].words.contains("Zoom"));
@@ -1373,5 +1608,228 @@ mod tests {
         assert_eq!(s.calendars.len(), MAX_CALENDARS);
         let back = crate::config::parse(&crate::config::format(&s));
         assert_eq!(back.calendars, s.calendars, "ссылки пишутся в config.txt и читаются обратно");
+    }
+
+    fn titles_of(list: &[Meeting]) -> Vec<&str> {
+        list.iter().map(|m| m.title.as_str()).collect()
+    }
+
+    #[test]
+    fn the_meetings_of_the_window_are_counted_with_the_reading_and_the_card_only_sorts_them() {
+        let (mut m, _) = loaded(Lang::Ru);
+        {
+            let s = m.shared.lock().unwrap();
+            let l = s.get(URL).unwrap();
+            assert!(l.calendar.is_some() && l.window.is_some());
+            assert!(l.ready.len() >= 5, "встречи окна лежат готовыми в прочитанном календаре");
+        }
+        // Карточка берёт именно их, а не считает файл заново: подложенная встреча появляется в списке.
+        {
+            let mut s = m.shared.lock().unwrap();
+            let l = s.loaded.iter_mut().find(|l| l.url == URL).unwrap();
+            l.ready.push(meeting("Planted", now() + 3600, 30, None));
+            s.version += 1;
+        }
+        m.refresh_cache(now());
+        assert!(m.cache.as_ref().unwrap().upcoming.iter().any(|x| x.title == "Planted"));
+    }
+
+    #[test]
+    fn the_window_is_yesterday_to_three_days_ahead_by_the_clock_of_the_pc() {
+        let day = ics::days_from_civil(2026, 10, 27);
+        let w = window_at(now());
+        assert_eq!((w.day, w.from, w.to), (day, (day - 1) * DAY, (day + 4) * DAY), "в выдуманном мире пояс — UTC");
+        assert_eq!(local_day(now() + 14 * 3600), day + 1, "в 00:18 уже следующие сутки");
+        // Идущая со вчера и завтрашняя в окне; позавчерашняя законченная и через четыре дня — нет.
+        let c = Calendar::parse(&demo_ics(Lang::Ru, 1), now()).unwrap();
+        let got = ready_for(&c, w);
+        assert!(got.iter().all(|m| m.end > w.from && m.start < w.to));
+        assert!(got.iter().any(|m| m.title == "Планёрка"));
+        // Чужой файл не заполняет память: готовых встреч не больше предела.
+        let mut body = String::from("BEGIN:VCALENDAR\r\n");
+        for i in 0..200 {
+            body += &format!(
+                "BEGIN:VEVENT\r\nUID:s{i}\r\nSUMMARY:S\r\nDTSTART:20261001T100000Z\r\nDURATION:P20D\r\nRRULE:FREQ=DAILY\r\nEND:VEVENT\r\n"
+            );
+        }
+        body += "END:VCALENDAR\r\n";
+        let c = Calendar::parse(&body, now()).unwrap();
+        assert_eq!(ready_for(&c, w).len(), MAX_READY);
+    }
+
+    #[test]
+    fn a_new_day_is_counted_in_a_thread_from_the_saved_file_and_the_old_list_serves_meanwhile() {
+        let (mut m, _) = loaded(Lang::Ru);
+        let day = local_day(now());
+        let before = m.cache.as_ref().unwrap().upcoming.len();
+        assert!(before > 0);
+        let version = m.shared.lock().unwrap().version;
+        // Окно посчитано на вчера: сутки «сменились».
+        {
+            let mut s = m.shared.lock().unwrap();
+            let l = s.loaded.iter_mut().find(|l| l.url == URL).unwrap();
+            l.window = l.window.map(|w| Window { day: day - 1, ..w });
+        }
+        m.refresh_cache(now() + 60);
+        assert_eq!(m.cache.as_ref().unwrap().upcoming.len(), before, "пока идёт пересчёт, карточка не пустеет");
+        let started = Instant::now();
+        loop {
+            {
+                let s = m.shared.lock().unwrap();
+                let l = s.get(URL).unwrap();
+                if !l.recomputing && l.window.is_some_and(|w| w.day == day) {
+                    break;
+                }
+            }
+            assert!(started.elapsed() < Duration::from_secs(5), "поток пересчёта не ответил");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(m.shared.lock().unwrap().version > version, "карточка узнаёт о новом списке по номеру");
+        m.refresh_cache(now() + 120);
+        assert_eq!(m.cache.as_ref().unwrap().upcoming.len(), before);
+    }
+
+    #[test]
+    fn a_recount_over_an_older_file_or_a_failed_one_is_handled() {
+        let (m, _) = loaded(Lang::Ru);
+        let mut s = m.shared.lock().unwrap();
+        let (generation, window) = {
+            let l = s.get(URL).unwrap();
+            (l.generation, l.window.unwrap())
+        };
+        // Календарь прочитали заново, пока считали: чужой пересчёт не ложится.
+        s.loaded[0].recomputing = true;
+        s.recounted(URL, generation + 1, window, Ok(vec![meeting("Stale", now() + 600, 10, None)]));
+        assert!(s.loaded[0].recomputing && !s.loaded[0].ready.iter().any(|m| m.title == "Stale"));
+        // Свой ложится и снимает «идёт пересчёт».
+        s.recounted(URL, generation, window, Ok(vec![meeting("Fresh", now() + 600, 10, None)]));
+        assert!(!s.loaded[0].recomputing);
+        assert_eq!(titles_of(&s.loaded[0].ready), ["Fresh"]);
+        // Сбой пересчёта — слова ошибки, а не молчание; прежние встречи остаются.
+        let next_day = Window { day: window.day + 1, ..window };
+        s.recounted(URL, generation, next_day, Err(Box::new("boom")));
+        assert_eq!(s.loaded[0].error, Some(Fail::NotCalendar));
+        assert_eq!(titles_of(&s.loaded[0].ready), ["Fresh"]);
+        assert_eq!(
+            s.loaded[0].window,
+            Some(next_day),
+            "сутки отмечены посчитанными: пересчёт не пойдёт заново каждый кадр"
+        );
+    }
+
+    #[test]
+    fn a_panic_while_reading_is_told_in_words_and_not_swallowed() {
+        let result = guarded(1, || -> Result<Got, Fail> { panic!("test: the reader fell over") });
+        assert!(matches!(result, Err(Fail::NotCalendar)));
+        let mut shared = Shared::default();
+        shared.apply(URL, result);
+        let entry = shared.get(URL).expect("запись есть, хоть чтение и упало");
+        assert_eq!(entry.error, Some(Fail::NotCalendar));
+        assert_eq!(Fail::NotCalendar.text(texts::tr(Lang::Ru)), "Ссылка не на календарь");
+        // Удачное чтение проходит как есть.
+        assert!(guarded(1, || load(URL, Lang::Ru, 1)).is_ok());
+    }
+
+    #[test]
+    fn a_valid_answer_is_not_copied_when_it_becomes_text_and_a_broken_one_is_repaired() {
+        let body = b"BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n".to_vec();
+        let ptr = body.as_ptr();
+        let text = decode(body);
+        assert_eq!(text.as_ptr(), ptr, "тот же буфер, без копии");
+        assert_eq!(decode(vec![b'a', 0xFF, b'b']), "a\u{FFFD}b");
+    }
+
+    #[test]
+    fn events_over_the_limit_make_the_reading_partial() {
+        let mut body = String::from("BEGIN:VCALENDAR\r\n");
+        for i in 0..(ics::MAX_EVENTS + 5) {
+            body += &format!("BEGIN:VEVENT\r\nUID:f{i}\r\nSUMMARY:F\r\nDTSTART:20271027T100000Z\r\nEND:VEVENT\r\n");
+        }
+        body += "END:VCALENDAR\r\n";
+        let calendar = Calendar::parse(&body, now()).unwrap();
+        assert!(calendar.overflow);
+        assert!(Got::new(calendar, false, now()).partial, "пропущенные события — тоже «прочитана только часть»");
+        let small = Calendar::parse(&demo_ics(Lang::Ru, 1), now()).unwrap();
+        assert!(!Got::new(small, false, now()).partial);
+    }
+
+    /// Встречи на 27.10.2026 по часам: `at(9, 30)` — 09:30 UTC.
+    fn at(h: i64, m: i64) -> i64 {
+        ics::days_from_civil(2026, 10, 27) * DAY + h * 3600 + m * 60
+    }
+
+    #[test]
+    fn a_long_block_without_a_link_gives_the_main_place_to_the_meeting_with_a_link() {
+        let zoom = Some("https://us02web.zoom.us/j/1");
+        let end = at(0, 0) + DAY;
+        let list = vec![
+            meeting("Focus time", at(9, 0), 8 * 60, None),
+            meeting("Review", at(10, 30), 30, zoom),
+            meeting("Lunch", at(12, 0), 60, None),
+        ];
+        // До начала «Review» и во время неё главная — она; «Focus time» идёт и уходит первой строкой списка.
+        for (h, m) in [(9, 30), (10, 29), (10, 45)] {
+            let a = agenda(&list, at(h, m), end);
+            assert_eq!(a.next.as_ref().map(|x| x.title.as_str()), Some("Review"), "{h}:{m}");
+            assert_eq!(titles_of(&a.later), ["Focus time", "Lunch"], "{h}:{m}");
+        }
+        // «Review» кончилась, и до конца «Focus time» встреч со ссылкой нет — блок снова главный.
+        let a = agenda(&list, at(11, 30), end);
+        assert_eq!(a.next.as_ref().map(|x| x.title.as_str()), Some("Focus time"));
+        assert_eq!(titles_of(&a.later), ["Lunch"]);
+        // Встреч со ссылкой нет совсем — ничего не меняется: идущая главная, как раньше.
+        let plain = vec![meeting("Focus time", at(9, 0), 8 * 60, None), meeting("Lunch", at(12, 0), 60, None)];
+        assert_eq!(agenda(&plain, at(9, 30), end).next.as_ref().map(|x| x.title.as_str()), Some("Focus time"));
+        // Встреча со ссылкой начнётся уже после конца идущей — идущая остаётся главной.
+        let after = vec![meeting("Focus time", at(9, 0), 4 * 60, None), meeting("Call", at(14, 0), 30, zoom)];
+        assert_eq!(agenda(&after, at(9, 30), end).next.as_ref().map(|x| x.title.as_str()), Some("Focus time"));
+        // Короткая идущая встреча без ссылки тоже уступает встрече со ссылкой, что начнётся до её конца…
+        let short = vec![meeting("Office", at(10, 0), 90, None), meeting("Call", at(11, 0), 30, zoom)];
+        let a = agenda(&short, at(10, 20), end);
+        assert_eq!(a.next.as_ref().map(|x| x.title.as_str()), Some("Call"));
+        assert_eq!(titles_of(&a.later), ["Office"]);
+        // …а идущая встреча со ссылкой и не длиннее двух часов остаётся главной, что бы ни началось следом.
+        let linked = vec![meeting("Workshop", at(10, 0), 90, zoom), meeting("Call", at(11, 0), 30, zoom)];
+        assert_eq!(agenda(&linked, at(10, 20), end).next.as_ref().map(|x| x.title.as_str()), Some("Workshop"));
+        // Длиннее двух часов уступает, даже со ссылкой.
+        let long_linked =
+            vec![meeting("All-day workshop", at(9, 0), 8 * 60, zoom), meeting("Call", at(11, 0), 30, zoom)];
+        assert_eq!(agenda(&long_linked, at(10, 20), end).next.as_ref().map(|x| x.title.as_str()), Some("Call"));
+        // Ещё не начавшиеся встречи порядок не меняют.
+        assert_eq!(agenda(&list, at(8, 0), end).next.as_ref().map(|x| x.title.as_str()), Some("Focus time"));
+        // Список «Дальше сегодня» по-прежнему не длиннее четырёх.
+        let many: Vec<Meeting> = std::iter::once(meeting("Focus time", at(9, 0), 8 * 60, None))
+            .chain(std::iter::once(meeting("Review", at(10, 30), 30, zoom)))
+            .chain((0..6).map(|i| meeting(&format!("M{i}"), at(12 + i, 0), 30, None)))
+            .collect();
+        assert_eq!(agenda(&many, at(10, 0), end).later.len(), LATER);
+    }
+
+    #[test]
+    fn a_running_meeting_in_the_list_is_marked_until_when_and_the_plate_goes_compact_by_its_second_line() {
+        let running = meeting("Focus time", at(9, 0), 8 * 60, None);
+        let ahead = meeting("Lunch", at(12, 0), 60, None);
+        assert!(ongoing(&running, at(10, 0)) && !ongoing(&ahead, at(10, 0)) && !ongoing(&running, at(17, 0)));
+        assert!(!ongoing(&meeting("Moment", at(10, 0), 0, None), at(10, 0)), "встреча-момент не идёт");
+        assert_eq!(texts::meeting_until(Lang::Ru, &hm(running.end)), "до 17:00");
+        assert_eq!(texts::meeting_until(Lang::En, &hm(running.end)), "until 17:00");
+        // Слово на кнопке остаётся, пока рядом помещается вторая строка целиком; не помещается — значок.
+        assert!(!tight(400.0, 130.0, 170.0));
+        assert!(tight(290.0, 130.0, 170.0));
+        assert!(tight(240.0, 130.0, 20.0), "названию остаётся не меньше {MIN_TEXT}");
+    }
+
+    #[test]
+    fn the_hint_of_a_meeting_is_its_full_title_time_and_place_without_a_link() {
+        let t = texts::tr(Lang::Ru);
+        let mut x = meeting("A very long title of the meeting", at(10, 30), 15, None);
+        x.place = "Переговорная 2".into();
+        assert_eq!(tip_of(&x, t), "A very long title of the meeting\n10:30–10:45\nПереговорная 2");
+        x.place = "https://us02web.zoom.us/j/1?pwd=SECRET".into();
+        assert_eq!(
+            tip_of(&x, t),
+            "A very long title of the meeting\n10:30–10:45",
+            "ссылка с паролем в подсказку не идёт"
+        );
     }
 }

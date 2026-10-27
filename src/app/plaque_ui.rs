@@ -10,6 +10,7 @@ use eframe::egui::text::{LayoutJob, TextWrapping};
 use eframe::egui::{Painter, Shape};
 
 use super::*;
+use crate::ics;
 use crate::plaque::{self, Do, Gate, Glyph, Look, Plaque, Say};
 
 /// Что нажали на плашке за кадр.
@@ -132,7 +133,17 @@ impl App {
         match &button.does {
             Do::Done => self.plaques.dismiss(),
             Do::Open(target) => {
-                let opened = sys::launch_os(target, std::ffi::OsStr::new(""));
+                // Плашка встречи: ссылка перед запуском проверяется ещё раз, как у кнопки в карточке «Встречи»; не прошла —
+                // не открывается.
+                let launch = if plaque.kind == plaque::Kind::Meeting {
+                    match target.to_str().and_then(ics::check_link) {
+                        Some(link) => std::ffi::OsString::from(link.url),
+                        None => return,
+                    }
+                } else {
+                    target.clone()
+                };
+                let opened = sys::launch_os(&launch, std::ffi::OsStr::new(""));
                 self.finish_open(plaque, opened, std::path::Path::new(target));
             }
             Do::Reveal(path) => {
@@ -162,7 +173,7 @@ impl App {
                     format!("failed:{}", plaque.key),
                     plaque.glyph,
                     Tone::Warning,
-                    Say::Failed(short_name(target)),
+                    Say::Failed(short_name(self.lang(), target)),
                 );
                 self.plaques.dismiss();
                 self.plaques.push(failed, Instant::now());
@@ -364,10 +375,14 @@ impl App {
     }
 }
 
-/// Как назвать то, что не открылось, словами: файл — его имя, диск — «E:», адрес — сайт.
-fn short_name(target: &std::path::Path) -> String {
+/// Как назвать то, что не открылось, словами: файл — его имя, диск — «E:», адрес — сайт, а адрес службы встреч — её имя
+/// («Zoom»), как в карточке «Встречи».
+fn short_name(lang: Lang, target: &std::path::Path) -> String {
     let target = target.to_string_lossy();
     if let Some(rest) = target.strip_prefix("https://").or_else(|| target.strip_prefix("http://")) {
+        if let Some(link) = ics::check_link(&target) {
+            return texts::service_name(lang, link.service).to_string();
+        }
         return rest.split('/').next().unwrap_or(rest).to_string();
     }
     let name = target.trim_end_matches(['\\', '/']).rsplit(['\\', '/']).next().unwrap_or(&target);
@@ -476,7 +491,7 @@ fn plaque_button(
     let text_w = galley.size().x;
     ui.painter().galley(Pos2::new(x, rect.center().y - galley.size().y / 2.0), galley, ink);
     if external {
-        paint_external(
+        modules::paint_external(
             ui.painter(),
             Rect::from_center_size(Pos2::new(x + text_w + 5.0 + 6.0, rect.center().y), Vec2::splat(12.0)),
             ink,
@@ -587,34 +602,6 @@ fn paint_glyph(painter: &Painter, rect: Rect, glyph: Glyph, color: Color32) {
     }
 }
 
-/// Значок «наружу» (стрелка из квадрата) 12 × 12 — кнопка открывает сайт или другую программу. В kit-v0.6.1 его нет (появился в
-/// kit-v0.8.0 как `Icon::External`): при переходе на новый набор заменить этот рисунок на значок набора.
-fn paint_external(painter: &Painter, rect: Rect, color: Color32) {
-    use std::f32::consts::{FRAC_PI_2, PI};
-    let scale = rect.width() / 24.0;
-    let origin = rect.center() - Vec2::splat(12.0) * scale;
-    let at = |x: f32, y: f32| origin + Vec2::new(x, y) * scale;
-    let stroke = Stroke::new((1.7 * scale * 1.3).max(1.2), color);
-    let arc = |cx: f32, cy: f32, r: f32, from: f32, to: f32| -> Vec<Pos2> {
-        (0..=4)
-            .map(|i| {
-                let a = from + (to - from) * i as f32 / 4.0;
-                at(cx + r * a.cos(), cy + r * a.sin())
-            })
-            .collect()
-    };
-    painter.add(Shape::line(vec![at(15.0, 3.0), at(21.0, 3.0), at(21.0, 9.0)], stroke));
-    painter.add(Shape::line(vec![at(10.0, 14.0), at(21.0, 3.0)], stroke));
-    let mut p = vec![at(18.0, 13.0), at(18.0, 19.0)];
-    p.extend(arc(16.0, 19.0, 2.0, 0.0, FRAC_PI_2));
-    p.push(at(5.0, 21.0));
-    p.extend(arc(5.0, 19.0, 2.0, FRAC_PI_2, PI));
-    p.push(at(3.0, 8.0));
-    p.extend(arc(5.0, 8.0, 2.0, PI, PI + FRAC_PI_2));
-    p.push(at(11.0, 6.0));
-    painter.add(Shape::line(p, stroke));
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -622,9 +609,14 @@ mod tests {
     #[test]
     fn what_did_not_open_is_named_by_a_word() {
         use std::path::Path;
-        assert_eq!(short_name(Path::new(r"C:\Demo\Downloads\report.pdf")), "report.pdf");
-        assert_eq!(short_name(Path::new(r"E:\")), "E:");
-        assert_eq!(short_name(Path::new("https://github.com/demo/site/actions")), "github.com");
-        assert_eq!(short_name(Path::new("plain")), "plain");
+        let ru = Lang::Ru;
+        assert_eq!(short_name(ru, Path::new(r"C:\Demo\Downloads\report.pdf")), "report.pdf");
+        assert_eq!(short_name(ru, Path::new(r"E:\")), "E:");
+        assert_eq!(short_name(ru, Path::new("https://github.com/demo/site/actions")), "github.com");
+        assert_eq!(short_name(ru, Path::new("plain")), "plain");
+        // Ссылка встречи называется службой, как в карточке: «Не получилось: Zoom».
+        assert_eq!(short_name(ru, Path::new("https://us02web.zoom.us/j/123456789?pwd=abc")), "Zoom");
+        assert_eq!(short_name(Lang::En, Path::new("https://teams.microsoft.com/l/meetup-join/x")), "Teams");
+        assert_eq!(short_name(ru, Path::new("https://evil.example/j/1")), "evil.example");
     }
 }

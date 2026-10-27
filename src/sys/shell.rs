@@ -12,7 +12,8 @@ use windows::Win32::System::Com::{CoTaskMemFree, IBindCtx, IDataObject};
 use windows::Win32::System::Ole::{DROPEFFECT_COPY, DROPEFFECT_LINK, IDropSource};
 use windows::Win32::UI::Shell::{
     AssocIsDangerous, BHID_DataObject, FOLDERID_Downloads, IShellItem, KF_FLAG_DEFAULT, QUNS_ACCEPTS_NOTIFICATIONS,
-    SHCreateItemFromParsingName, SHDoDragDrop, SHGetKnownFolderPath, SHQueryUserNotificationState,
+    QUNS_APP, QUNS_QUIET_TIME, SHCreateItemFromParsingName, SHDoDragDrop, SHGetKnownFolderPath,
+    SHQueryUserNotificationState,
 };
 use windows::core::PCWSTR;
 
@@ -123,13 +124,19 @@ pub fn probe_file(path: &Path) -> Probe {
     }
 }
 
-/// Можно ли сейчас показывать уведомления: пользователь за обычной работой (`QUNS_ACCEPTS_NOTIFICATIONS`). Показ экрана, игра
-/// во весь экран, «не беспокоить» и отлучка — нет; не удалось спросить — можно. В выдуманном мире всегда можно.
+/// Можно ли сейчас показывать уведомления: пользователь за обычной работой (`QUNS_ACCEPTS_NOTIFICATIONS`); первый час нового
+/// пользователя Windows («тихое время», `QUNS_QUIET_TIME`) и приложение из магазина на экране (`QUNS_APP`) плашкам не помеха.
+/// Показ экрана, игра во весь экран, «не беспокоить» и отлучка — нет; не удалось спросить — можно. В выдуманном мире всегда
+/// можно.
 pub fn accepts_notifications() -> bool {
     if super::fake_reads() {
         return true;
     }
-    unsafe { SHQueryUserNotificationState().map(|state| state == QUNS_ACCEPTS_NOTIFICATIONS).unwrap_or(true) }
+    unsafe {
+        SHQueryUserNotificationState()
+            .map(|state| state == QUNS_ACCEPTS_NOTIFICATIONS || state == QUNS_QUIET_TIME || state == QUNS_APP)
+            .unwrap_or(true)
+    }
 }
 
 /// Данные файла для перетаскивания — те же, что у файла в проводнике (список файлов `CF_HDROP` и список объектов оболочки).

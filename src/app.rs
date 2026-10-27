@@ -7567,8 +7567,36 @@ mod tests {
             "webcal:// читается как https://"
         );
         assert!(!painted(&rig).contains("Нужна ссылка"), "поле очищено");
+        assert_eq!(
+            modules::clipboard::forgotten(),
+            ["webcal://calendar.example.com/ical/me%40example.com/private-SECRET0123/basic.ics"],
+            "добавленная ссылка уходит из истории «Буфера обмена» (как её скопировали)"
+        );
         let saved = config::format(&rig.app.settings);
         assert!(saved.contains("\ncalendar=https://calendar.example.com/ical/"), "ссылка уходит в config.txt");
+    }
+
+    #[test]
+    fn the_same_calendar_is_not_added_twice_and_a_added_link_leaves_the_clipboard_history() {
+        let mut rig = day_rig(Lang::Ru);
+        rig.click_anchor("meetings-calendars");
+        rig.click_anchor("meetings-field");
+        rig.type_text(CALENDAR);
+        let text = painted(&rig);
+        assert!(text.contains("Этот календарь уже есть"), "{text:?}");
+        rig.click_anchor("meetings-add");
+        assert_eq!(rig.app.settings.calendars, [CALENDAR], "второй раз та же ссылка не добавляется");
+        assert!(modules::clipboard::forgotten().is_empty(), "ничего не добавлено — из истории ничего не убрано");
+        // Другая ссылка: слов про повтор нет, «Добавить» работает, а скопированная ссылка уходит из истории буфера.
+        rig.click_anchor("meetings-field");
+        rig.key(Key::Escape, NO_KEYS);
+        rig.click_anchor("meetings-field");
+        let other = "https://calendar.example.com/home/other.ics";
+        rig.type_text(other);
+        assert!(!painted(&rig).contains("Этот календарь уже есть"));
+        rig.click_anchor("meetings-add");
+        assert_eq!(rig.app.settings.calendars.len(), 2);
+        assert_eq!(modules::clipboard::forgotten(), [other]);
     }
 
     #[test]
@@ -7598,6 +7626,8 @@ mod tests {
 
     #[test]
     fn the_plaque_of_a_meeting_has_words_a_join_button_and_a_cross_in_both_languages() {
+        // Часы слов плашки стоят: «через 2 мин» не зависит от того, как быстро нарисован кадр.
+        texts::set_clock(Some(1_800_000_000));
         for (lang, words) in [
             (Lang::Ru, ["Планёрка через 2 мин", "10:30 · Zoom", "Подключиться"]),
             (Lang::En, ["Daily stand-up in 2 min", "10:30 · Zoom", "Join"]),
@@ -7629,7 +7659,26 @@ mod tests {
     }
 
     #[test]
+    fn a_meeting_plaque_opens_only_a_link_that_passes_the_check_again() {
+        texts::set_clock(Some(1_800_000_000));
+        // Подмена в памяти: не служба — не открывается, плашка остаётся.
+        let evil = "https://evil.example/j/1";
+        let mut p = plaque::sample("meeting", Lang::En).unwrap();
+        p.buttons[0].does = plaque::Do::Open(evil.into());
+        let mut rig = plaque_rig(p);
+        rig.click_anchor("plaque-button-0");
+        assert!(!launched(evil));
+        assert!(rig.app.plaques.current().is_some(), "плашка ничего не открыла и не ушла");
+        // Служба — открывается, и плашка уходит.
+        let mut rig = plaque_rig(plaque::sample("meeting", Lang::En).unwrap());
+        rig.click_anchor("plaque-button-0");
+        assert!(launched(ZOOM));
+        assert!(rig.app.plaques.current().is_none());
+    }
+
+    #[test]
     fn with_the_panel_open_a_meeting_is_told_by_a_notice_not_a_plaque() {
+        texts::set_clock(Some(1_800_000_000));
         let mut rig = Rig::new();
         rig.app.settings.common.language = Lang::En;
         rig.app.edge.shown = true;
@@ -7654,7 +7703,7 @@ mod tests {
         }
         rig.key(Key::K, CTRL);
         rig.type_text("планёрка");
-        assert_eq!(titles(&rig)[0], "Подключиться к «Планёрка»");
+        assert_eq!(titles(&rig)[0], "Подключиться к встрече «Планёрка»");
         assert_eq!(rig.app.found().hits[0].sub, "Встречи · День");
         rig.key(Key::Enter, NO_KEYS);
         assert!(launched(ZOOM));

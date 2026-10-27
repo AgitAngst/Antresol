@@ -14,11 +14,37 @@ pub const MAX_LINK: usize = 2000;
 const MAX_TITLE: usize = 200;
 const MAX_PLACE: usize = 160;
 const MAX_NAME: usize = 60;
-/// Сколько периодов правила перебирать за один разбор: правило из чужого файла не должно считаться вечно.
-const MAX_PERIODS: u32 = 100_000;
-/// Сколько шагов (периодов правил) тратит один вызов `Calendar::meetings` на все серии вместе: чужой календарь не должен занять
-/// окно надолго (обычный — сотни шагов). Вышло — остальные серии не разворачиваются.
-const WORK: u32 = 1_000_000;
+/// Название пояса не длиннее (в знаках): оно идёт в журнал.
+const MAX_ZONE_NAME: usize = 64;
+
+// Пределы чужого файла: календарь по ссылке — чужие данные, и всё, что в нём можно растянуть, ограничено. Ни один предел не
+// режет настоящий календарь (Google, Outlook, iCloud, Apple), и каждый держит время или память.
+/// Значение свойства (и его параметры), кроме `DESCRIPTION`, не длиннее: длинное (вложение, мусор) пропускается целиком.
+const MAX_VALUE: usize = 8 * 1024;
+/// Ссылку в описании ищем только в его начале.
+const MAX_DESCRIPTION: usize = 64 * 1024;
+/// Списки правила повторения: `BYDAY` (без повторов), `BYMONTHDAY`, `BYSETPOS` — длиннее правило негодное.
+const MAX_BY_DAY: usize = 64;
+const MAX_BY_MONTH_DAY: usize = 62;
+const MAX_BY_SET_POS: usize = 32;
+/// Пояс: наблюдений (`STANDARD`, `DAYLIGHT`) и дат `RDATE` в каждом — лишние пропускаются; поясов в файле — сверх предела
+/// время читается как местное.
+const MAX_OBSERVANCES: usize = 64;
+const MAX_RDATES: usize = 256;
+const MAX_ZONES: usize = 64;
+/// Исключений (`EXDATE`) у события — лишние пропускаются; из них у окна смотрится не больше такого числа.
+const MAX_EXDATES: usize = 1000;
+const MAX_NEAR_EXDATES: usize = 64;
+/// Отказавших участников у события запоминается не больше.
+const MAX_DECLINED: usize = 32;
+/// Шагов на одну серию за один разворот. Шаг — примерно одно сравнение дня с правилом: период стоит от шести шагов, а с
+/// длинными списками правила дороже (`Rule::period_cost`). Серия со счётом, что за это не дошла до окна, считается
+/// кончившейся; у остальных (и у серии, чей счёт до окна не кончится) перебор идёт от самого окна и тратит единицы шагов.
+const SERIES_STEPS: u32 = 50_000;
+/// Событие длиннее — не встреча (отпуск, поездка) и не показывается; заодно серии с огромной длительностью не заполняют окно.
+const MAX_LENGTH: i64 = 31 * DAY;
+/// Вхождений одной серии в окне не больше (в настоящем календаре — по числу дней окна).
+const MAX_PER_SERIES: usize = 24;
 /// Самый большой шаг правила (`INTERVAL`): больше — правило негодное.
 const MAX_INTERVAL: i64 = 10_000;
 const DAY: i64 = 86_400;
@@ -75,6 +101,10 @@ fn weekday(days: i64) -> i64 {
 pub fn wall_to_utc(wall: i64, offset_at: &dyn Fn(i64) -> i32) -> i64 {
     let before = i64::from(offset_at(wall - DAY));
     let after = i64::from(offset_at(wall + DAY));
+    // Смещение за сутки до и за сутки после одно — перевода часов рядом нет, и вторая проверка дала бы тот же ответ.
+    if before == after {
+        return wall - before;
+    }
     let (a, b) = (wall - before, wall - after);
     let good_a = i64::from(offset_at(a)) == before;
     let good_b = i64::from(offset_at(b)) == after;
@@ -163,6 +193,12 @@ struct Rule {
     by_set_pos: Vec<i64>,
     /// С какого дня начинается неделя (для `WEEKLY` с шагом больше 1).
     wkst: i64,
+    /// Те же списки битами, чтобы проверка дня не зависела от длины списка (`Rule::seal`): дни недели из `BYDAY` (бит 0 —
+    /// понедельник), месяцы (бит `m`), дни месяца с начала (бит `d`) и с конца (бит `d` — день `-d`).
+    weekdays: u8,
+    months: u16,
+    days_from_start: u32,
+    days_from_end: u32,
 }
 
 /// Событие из файла (то, что нужно для показа; описание и участники не хранятся).
@@ -181,12 +217,29 @@ struct Event {
     /// Замена одного повтора серии: какого именно.
     recurrence_id: Option<Time>,
     cancelled: bool,
+    /// Адреса участников с `PARTSTAT=DECLINED` (маленькими буквами): по ним, когда файл разобран и имя календаря известно,
+    /// решается, отклонил ли приглашение сам владелец (`Calendar::parse`).
+    declined: Vec<String>,
 }
 
 /// Правила одного пояса из `VTIMEZONE`.
 #[derive(Clone, Debug, PartialEq)]
 struct TzRules {
     obs: Vec<Observance>,
+    /// Переходы на годы вокруг «сейчас» файла (`TzRules::tabulate`): смещение рядом с окном берётся из готового списка, а не
+    /// считается заново по всем наблюдениям пояса — иначе чужой пояс из десятков наблюдений тормозил бы каждый перевод времени.
+    table: Option<Table>,
+}
+
+/// Переходы пояса на отрезке `lo..hi` (моменты UTC).
+#[derive(Clone, Debug, PartialEq)]
+struct Table {
+    lo: i64,
+    hi: i64,
+    /// Смещение на `lo`.
+    base: i32,
+    /// Переходы внутри отрезка по возрастанию: (момент, смещение после него).
+    steps: Vec<(i64, i32)>,
 }
 
 /// `STANDARD` или `DAYLIGHT`: с какого момента и по какому правилу пояс переходит на смещение `to`.
@@ -295,6 +348,23 @@ fn tidy(s: &str, max: usize) -> String {
     one.trim().chars().take(max).collect::<String>().trim_end().to_string()
 }
 
+/// Начало текста не длиннее `max` байт (по границе знака).
+fn head(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// Есть ли `needle` в `hay` без учёта регистра ASCII.
+fn has_ci(hay: &str, needle: &str) -> bool {
+    find_ci(hay.as_bytes(), needle.as_bytes()).is_some()
+}
+
 // ─── Время и правила из файла ───────────────────────────────────────────────
 
 /// `20261027T103000`, `20261027T073000Z` или `20261027`: стенные секунды, «целый день», «в UTC».
@@ -327,38 +397,44 @@ fn parse_stamp(v: &str) -> Option<(i64, bool, bool)> {
     Some((days * DAY + h * 3600 + mi * 60 + s.min(59), false, utc))
 }
 
-/// Пояса из `TZID` этого файла: имя → номер; правила появятся, когда встретится `VTIMEZONE` с таким именем.
+/// Пояса из `TZID` этого файла: имя → номер; правила появятся, когда встретится `VTIMEZONE` с таким именем. Поясов не больше
+/// [`MAX_ZONES`]: сверх них время читается как местное.
 #[derive(Default)]
 struct ZoneTable {
     list: Vec<ZoneDef>,
 }
 
 impl ZoneTable {
-    fn intern(&mut self, name: &str) -> usize {
-        if let Some(i) = self.list.iter().position(|z| z.name.eq_ignore_ascii_case(name)) {
-            return i;
+    fn intern(&mut self, name: &str) -> Option<usize> {
+        let name = tidy(name, MAX_ZONE_NAME);
+        if let Some(i) = self.list.iter().position(|z| z.name.eq_ignore_ascii_case(&name)) {
+            return Some(i);
         }
-        self.list.push(ZoneDef { name: name.to_string(), rules: None });
-        self.list.len() - 1
+        if self.list.len() >= MAX_ZONES {
+            return None;
+        }
+        self.list.push(ZoneDef { name, rules: None });
+        Some(self.list.len() - 1)
     }
 }
 
-/// Время свойства: целый день (`VALUE=DATE` или 8 цифр), UTC (`Z`), пояс из `TZID` или плавающее.
-fn parse_time(params: &str, value: &str, zones: &mut ZoneTable) -> Option<Time> {
+/// Пояс времени из параметров свойства: `TZID` (имя из файла) или местное — пояса нет, имя пустое, поясов в файле уже слишком много.
+fn zone_of(params: &str, zones: &mut ZoneTable) -> Zone {
+    param(params, "TZID").filter(|id| !id.is_empty()).and_then(|id| zones.intern(&id)).map_or(Zone::Local, Zone::Named)
+}
+
+/// Время значения в поясе `zone`: целый день (8 цифр), UTC (`Z`) или стенное время этого пояса.
+fn time_in(zone: impl FnOnce() -> Zone, value: &str) -> Option<Time> {
     let (secs, date, utc) = parse_stamp(value)?;
     if date {
         return Some(Time::Date(secs.div_euclid(DAY)));
     }
-    Some(Time::At(
-        secs,
-        if utc {
-            Zone::Utc
-        } else if let Some(id) = param(params, "TZID").filter(|id| !id.is_empty()) {
-            Zone::Named(zones.intern(&id))
-        } else {
-            Zone::Local
-        },
-    ))
+    Some(Time::At(secs, if utc { Zone::Utc } else { zone() }))
+}
+
+/// Время свойства: целый день (`VALUE=DATE` или 8 цифр), UTC (`Z`), пояс из `TZID` или плавающее.
+fn parse_time(params: &str, value: &str, zones: &mut ZoneTable) -> Option<Time> {
+    time_in(|| zone_of(params, zones), value)
 }
 
 /// `PT1H30M`, `P1D`, `P1W`, `-PT15M` → секунды.
@@ -414,7 +490,19 @@ fn parse_weekday(s: &str) -> Option<i64> {
     ["MO", "TU", "WE", "TH", "FR", "SA", "SU"].iter().position(|d| d.eq_ignore_ascii_case(s)).map(|i| i as i64)
 }
 
-/// `FREQ=WEEKLY;BYDAY=MO,WE;COUNT=10` → правило. Частота, которой панель не знает (каждый час), — `None`: повторов нет.
+/// Добавить в список без повторов; список полон — `None` (правило негодное).
+fn push_unique<T: PartialEq>(list: &mut Vec<T>, item: T, max: usize) -> Option<()> {
+    if !list.contains(&item) {
+        if list.len() >= max {
+            return None;
+        }
+        list.push(item);
+    }
+    Some(())
+}
+
+/// `FREQ=WEEKLY;BYDAY=MO,WE;COUNT=10` → правило. Частота, которой панель не знает (каждый час), — `None`: повторов нет. Списки
+/// длиннее пределов (`BYDAY` — 64 разных, `BYMONTHDAY` — 62, `BYSETPOS` — 32) и числа вне допустимого — тоже `None`.
 fn parse_rule(value: &str) -> Option<Rule> {
     let mut rule = Rule {
         freq: Freq::Daily,
@@ -426,6 +514,10 @@ fn parse_rule(value: &str) -> Option<Rule> {
         by_month: Vec::new(),
         by_set_pos: Vec::new(),
         wkst: 0,
+        weekdays: 0,
+        months: 0,
+        days_from_start: 0,
+        days_from_end: 0,
     };
     let mut freq = None;
     for part in value.split(';') {
@@ -457,26 +549,28 @@ fn parse_rule(value: &str) -> Option<Rule> {
                     let at = item.len().saturating_sub(2);
                     let (num, day) = (item.get(..at)?, parse_weekday(item.get(at..)?)?);
                     let n = if num.is_empty() { 0 } else { num.trim_start_matches('+').parse::<i64>().ok()? };
-                    if n.abs() > 53 {
+                    if !(-53..=53).contains(&n) {
                         return None;
                     }
-                    rule.by_day.push((n, day));
+                    push_unique(&mut rule.by_day, (n, day), MAX_BY_DAY)?;
                 }
             }
             "BYMONTHDAY" => {
                 for item in val.split(',') {
-                    let d = item.trim().parse::<i64>().ok().filter(|d| *d != 0 && d.abs() <= 31)?;
-                    rule.by_month_day.push(d);
+                    let d = item.trim().parse::<i64>().ok().filter(|d| *d != 0 && (-31..=31).contains(d))?;
+                    push_unique(&mut rule.by_month_day, d, MAX_BY_MONTH_DAY)?;
                 }
             }
             "BYMONTH" => {
                 for item in val.split(',') {
-                    rule.by_month.push(item.trim().parse::<i64>().ok().filter(|m| (1..=12).contains(m))?);
+                    let m = item.trim().parse::<i64>().ok().filter(|m| (1..=12).contains(m))?;
+                    push_unique(&mut rule.by_month, m, 12)?;
                 }
             }
             "BYSETPOS" => {
                 for item in val.split(',') {
-                    rule.by_set_pos.push(item.trim().parse::<i64>().ok().filter(|p| *p != 0 && p.abs() <= 366)?);
+                    let p = item.trim().parse::<i64>().ok().filter(|p| *p != 0 && (-366..=366).contains(p))?;
+                    push_unique(&mut rule.by_set_pos, p, MAX_BY_SET_POS)?;
                 }
             }
             "WKST" => rule.wkst = parse_weekday(val)?,
@@ -484,7 +578,78 @@ fn parse_rule(value: &str) -> Option<Rule> {
         }
     }
     rule.freq = freq?;
+    rule.seal();
     Some(rule)
+}
+
+impl Rule {
+    /// После разбора: месяцы по порядку и те же списки битами, чтобы проверка дня не зависела от длины списка.
+    fn seal(&mut self) {
+        self.by_month.sort_unstable();
+        for (_, wd) in &self.by_day {
+            self.weekdays |= 1u8 << *wd;
+        }
+        for m in &self.by_month {
+            self.months |= 1u16 << *m;
+        }
+        for d in &self.by_month_day {
+            if *d > 0 {
+                self.days_from_start |= 1u32 << *d;
+            } else {
+                self.days_from_end |= 1u32 << -*d;
+            }
+        }
+    }
+
+    /// Подходит ли день `d` по дням недели из `BYDAY` (списка нет — любой).
+    fn weekday_ok(&self, d: i64) -> bool {
+        self.weekdays == 0 || self.weekdays >> weekday(d) & 1 == 1
+    }
+
+    /// Подходит ли месяц `m` по `BYMONTH` (списка нет — любой).
+    fn month_ok(&self, m: i64) -> bool {
+        self.months == 0 || self.months >> m & 1 == 1
+    }
+
+    /// Сколько вхождений в одном периоде не бывает больше (верхняя оценка): по ней видно, что счёт `COUNT` до окна не кончится.
+    fn max_per_period(&self) -> i64 {
+        let by_days: i64 = self.by_day.iter().map(|(ord, _)| if *ord == 0 { 5 } else { 1 }).sum();
+        let month = if !self.by_month_day.is_empty() {
+            self.by_month_day.len() as i64
+        } else if !self.by_day.is_empty() {
+            by_days
+        } else {
+            1
+        };
+        let most = match self.freq {
+            Freq::Daily => 1,
+            Freq::Weekly => {
+                if self.weekdays == 0 {
+                    1
+                } else {
+                    i64::from(self.weekdays.count_ones())
+                }
+            }
+            Freq::Monthly => month,
+            Freq::Yearly => self.by_month.len().max(1) as i64 * month,
+        };
+        let most = if self.by_set_pos.is_empty() { most } else { most.min(self.by_set_pos.len() as i64) };
+        most.clamp(1, 366)
+    }
+
+    /// Во сколько шагов обходится один период: чем длиннее списки правила, тем дороже. По этой цене серии тратят свой запас
+    /// шагов ([`SERIES_STEPS`]).
+    fn period_cost(&self) -> u32 {
+        let by_days: u32 = self.by_day.iter().map(|(ord, _)| if *ord == 0 { 5 } else { 1 }).sum();
+        let month = 2 + if self.by_month_day.is_empty() { by_days.max(1) } else { self.by_month_day.len() as u32 };
+        let per = match self.freq {
+            Freq::Daily => 2,
+            Freq::Weekly => 8,
+            Freq::Monthly => month,
+            Freq::Yearly => 2 + self.by_month.len().max(1) as u32 * month,
+        };
+        4 + per + self.by_set_pos.len() as u32
+    }
 }
 
 // ─── Повторы ────────────────────────────────────────────────────────────────
@@ -498,20 +663,21 @@ fn month_days(rule: &Rule, y: i64, m: i64, dom0: i64) -> Vec<i64> {
     if !rule.by_month_day.is_empty() {
         for md in &rule.by_month_day {
             let day = if *md > 0 { *md } else { n + 1 + md };
-            if (1..=n).contains(&day) {
+            if (1..=n).contains(&day) && rule.weekday_ok(first + day - 1) {
                 out.push(first + day - 1);
             }
         }
-        if !rule.by_day.is_empty() {
-            out.retain(|d| rule.by_day.iter().any(|(_, wd)| weekday(*d) == *wd));
-        }
     } else if !rule.by_day.is_empty() {
         for (ord, wd) in &rule.by_day {
-            let same: Vec<i64> = (first..first + n).filter(|d| weekday(*d) == *wd).collect();
+            // Первый такой день недели месяца — через `off` дней от первого числа; всего таких дней 4 или 5.
+            let off = (wd - weekday(first)).rem_euclid(7);
+            let count = (n - off + 6) / 7;
+            let at = |i: i64| first + off + 7 * i;
             match *ord {
-                0 => out.extend(same),
-                o if o > 0 => out.extend(same.get(o as usize - 1).copied()),
-                o => out.extend(same.len().checked_sub(o.unsigned_abs() as usize).and_then(|i| same.get(i)).copied()),
+                0 => out.extend((0..count).map(at)),
+                o if o > 0 && o <= count => out.push(at(o - 1)),
+                o if o < 0 && -o <= count => out.push(at(count + o)),
+                _ => {}
             }
         }
     } else if dom0 <= n {
@@ -559,38 +725,51 @@ fn period_first(rule: &Rule, d0: i64, k: i64) -> Option<i64> {
     })
 }
 
+/// Номер периода, в который попадает день `day` (раньше начала серии — отрицательный).
+fn period_index(rule: &Rule, d0: i64, day: i64) -> i64 {
+    let step = rule.interval;
+    match rule.freq {
+        Freq::Daily => (day - d0).div_euclid(step),
+        Freq::Weekly => (day - week_start(d0, rule.wkst)).div_euclid(7).div_euclid(step),
+        Freq::Monthly => {
+            let ((y0, m0, _), (y, m, _)) = (civil_from_days(d0), civil_from_days(day));
+            ((y * 12 + m) - (y0 * 12 + m0)).div_euclid(step)
+        }
+        Freq::Yearly => (civil_from_days(day).0 - civil_from_days(d0).0).div_euclid(step),
+    }
+}
+
 /// Дни периода номер `k`, что подходят правилу (уже без тех, что раньше начала серии `d0`), по возрастанию.
 fn period_days(rule: &Rule, d0: i64, k: i64) -> Vec<i64> {
     let Some(first) = period_first(rule, d0, k) else { return Vec::new() };
     let (_, m0, dom0) = civil_from_days(d0);
-    let weekday_ok = |d: i64| {
-        if rule.by_day.is_empty() { true } else { rule.by_day.iter().any(|(_, wd)| weekday(d) == *wd) }
-    };
-    let month_ok = |d: i64| rule.by_month.is_empty() || rule.by_month.contains(&civil_from_days(d).1);
     let days: Vec<i64> = match rule.freq {
         Freq::Daily => {
-            let ok = weekday_ok(first)
-                && month_ok(first)
-                && (rule.by_month_day.is_empty() || {
-                    let (y, m, d) = civil_from_days(first);
-                    rule.by_month_day
-                        .iter()
-                        .any(|md| if *md > 0 { *md == d } else { days_in_month(y, m) + 1 + md == d })
-                });
-            if ok { vec![first] } else { Vec::new() }
+            let (y, m, d) = civil_from_days(first);
+            let by_month_day = (rule.days_from_start == 0 && rule.days_from_end == 0)
+                || rule.days_from_start >> d & 1 == 1
+                || rule.days_from_end >> (days_in_month(y, m) + 1 - d) & 1 == 1;
+            if rule.weekday_ok(first) && rule.month_ok(m) && by_month_day { vec![first] } else { Vec::new() }
         }
         Freq::Weekly => {
-            let want = |d: i64| if rule.by_day.is_empty() { weekday(d) == weekday(d0) } else { weekday_ok(d) };
+            let want = |d: i64| if rule.by_day.is_empty() { weekday(d) == weekday(d0) } else { rule.weekday_ok(d) };
+            let month_ok = |d: i64| rule.months == 0 || rule.month_ok(civil_from_days(d).1);
             (first..first + 7).filter(|d| want(*d) && month_ok(*d)).collect()
         }
         Freq::Monthly => {
             let (y, m, _) = civil_from_days(first);
-            if month_ok(first) { month_days(rule, y, m, dom0) } else { Vec::new() }
+            if rule.month_ok(m) { month_days(rule, y, m, dom0) } else { Vec::new() }
         }
         Freq::Yearly => {
             let y = civil_from_days(first).0;
-            let months: Vec<i64> = if rule.by_month.is_empty() { vec![m0] } else { rule.by_month.clone() };
-            let mut all: Vec<i64> = months.iter().flat_map(|m| month_days(rule, y, *m, dom0)).collect();
+            let mut all: Vec<i64> = Vec::new();
+            if rule.by_month.is_empty() {
+                all.extend(month_days(rule, y, m0, dom0));
+            } else {
+                for m in &rule.by_month {
+                    all.extend(month_days(rule, y, *m, dom0));
+                }
+            }
             all.sort_unstable();
             all.dedup();
             all
@@ -599,60 +778,88 @@ fn period_days(rule: &Rule, d0: i64, k: i64) -> Vec<i64> {
     set_pos(days, &rule.by_set_pos).into_iter().filter(|d| *d >= d0).collect()
 }
 
-/// С какого периода начинать, чтобы не перебирать годы до окна: без `COUNT` — со стоящего перед окном (на один раньше —
-/// с запасом); с `COUNT` считать надо с самого начала серии.
-fn first_period(rule: &Rule, d0: i64, lo_day: i64) -> i64 {
-    if rule.count.is_some() {
-        return 0;
-    }
-    let step = rule.interval;
-    let k = match rule.freq {
-        Freq::Daily => (lo_day - d0).div_euclid(step),
-        Freq::Weekly => (lo_day - week_start(d0, rule.wkst)).div_euclid(7).div_euclid(step),
-        Freq::Monthly => {
-            let ((y0, m0, _), (y, m, _)) = (civil_from_days(d0), civil_from_days(lo_day));
-            ((y * 12 + m) - (y0 * 12 + m0)).div_euclid(step)
+/// С какого периода начинать, чтобы не перебирать годы до окна: со стоящего перед окном (на один раньше — с запасом). Со
+/// `COUNT` считать надо с самого начала серии — если только счёт не может кончиться до конца окна, даже когда в каждом
+/// периоде самое большое число дней: тогда он окну не мешает, и серия идёт как бесконечная.
+fn first_period(rule: &Rule, d0: i64, lo_day: i64, hi_day: i64) -> i64 {
+    if let Some(count) = rule.count {
+        let periods = period_index(rule, d0, hi_day).saturating_add(1).max(0);
+        if i64::from(count) < periods.saturating_mul(rule.max_per_period()) {
+            return 0;
         }
-        Freq::Yearly => (civil_from_days(lo_day).0 - civil_from_days(d0).0).div_euclid(step),
-    };
-    (k - 1).max(0)
+    }
+    (period_index(rule, d0, lo_day) - 1).max(0)
 }
 
-/// Вхождения правила от `start` (стенные секунды первого вхождения) в окне `lo..=hi` (тоже стенные): для каждого — `emit`.
-/// `until` — тоже стенное. Правило из файла не вечно: периодов перебирается не больше [`MAX_PERIODS`], и все вызовы разом тратят
-/// общий запас `work` — кончился, разворот прекращается.
-fn expand(rule: &Rule, start: i64, until: Option<i64>, lo: i64, hi: i64, work: &mut u32, emit: &mut dyn FnMut(i64)) {
+/// Вхождения правила от `start` (стенные секунды первого вхождения) в окне `lo..=hi` (тоже стенные): для каждого — `emit`
+/// (вернул ложь — хватит). `until` — тоже стенное. Правило из чужого файла не вечно: серия тратит не больше [`SERIES_STEPS`]
+/// шагов, потом считается кончившейся; запас у каждой серии свой, чужие серии его не расходуют. Ответ — сколько шагов потрачено.
+fn expand(rule: &Rule, start: i64, until: Option<i64>, lo: i64, hi: i64, emit: &mut dyn FnMut(i64) -> bool) -> u32 {
     let (d0, tod) = (start.div_euclid(DAY), start.rem_euclid(DAY));
     let (lo_day, hi_day) = (lo.div_euclid(DAY) - 1, hi.div_euclid(DAY) + 1);
+    let (cost, end_day) = (rule.period_cost(), days_from_civil(10_000, 1, 1));
+    let mut left = SERIES_STEPS;
     let mut seen = 0u32;
-    for k in (first_period(rule, d0, lo_day)..).take(MAX_PERIODS as usize) {
-        if *work == 0 {
-            return;
+    for k in first_period(rule, d0, lo_day, hi_day).. {
+        if left < cost {
+            break;
         }
-        *work -= 1;
+        left -= cost;
         match period_first(rule, d0, k) {
-            Some(first) if first <= hi_day && first < days_from_civil(10_000, 1, 1) => {}
-            _ => return,
+            Some(first) if first <= hi_day && first < end_day => {}
+            _ => break,
         }
         for day in period_days(rule, d0, k) {
             seen = seen.saturating_add(1);
             if rule.count.is_some_and(|c| seen > c) || day > hi_day {
-                return;
+                return SERIES_STEPS - left;
             }
             let wall = day * DAY + tod;
             if until.is_some_and(|u| wall > u) {
-                return;
+                return SERIES_STEPS - left;
             }
-            if (lo..=hi).contains(&wall) {
-                emit(wall);
+            if (lo..=hi).contains(&wall) && !emit(wall) {
+                return SERIES_STEPS - left;
             }
         }
     }
+    SERIES_STEPS - left
 }
 
 // ─── Часовые пояса файла ────────────────────────────────────────────────────
 
 impl Observance {
+    /// `UNTIL` правила пояса — в UTC; стенное время «до перехода» — со смещением до перехода.
+    fn until_of(&self, rule: &Rule) -> Option<i64> {
+        rule.until.map(|u| match u {
+            Time::Date(d) => (d + 1) * DAY - 1,
+            Time::At(secs, Zone::Utc) => secs + i64::from(self.from),
+            Time::At(secs, _) => secs,
+        })
+    }
+
+    /// Все переходы наблюдения от `lo` (включая) до `hi` — моменты UTC.
+    fn onsets(&self, lo: i64, hi: i64, emit: &mut dyn FnMut(i64)) {
+        let from = i64::from(self.from);
+        let mut take = |wall: i64| {
+            let at = wall - from;
+            if (lo..hi).contains(&at) {
+                emit(at);
+            }
+        };
+        take(self.start);
+        let first = self.rdates.partition_point(|r| *r - from < lo);
+        for r in self.rdates[first..].iter().take_while(|r| **r - from < hi) {
+            take(*r);
+        }
+        if let Some(rule) = &self.rule {
+            expand(rule, self.start, self.until_of(rule), lo + from, hi + from, &mut |w| {
+                take(w);
+                true
+            });
+        }
+    }
+
     /// Стенное время (до перехода) последнего перехода, что не позже `hi_wall`.
     fn latest_onset(&self, hi_wall: i64) -> Option<i64> {
         let mut best: Option<i64> = None;
@@ -662,26 +869,60 @@ impl Observance {
             }
         };
         take(self.start);
-        self.rdates.iter().for_each(|r| take(*r));
+        // `RDATE` по возрастанию (`Parser::end`): последний не позже `hi_wall` находится делением пополам.
+        if let Some(i) = self.rdates.partition_point(|r| *r <= hi_wall).checked_sub(1) {
+            take(self.rdates[i]);
+        }
         if let Some(rule) = &self.rule {
-            // `UNTIL` в поясе — в UTC; стенное время «до перехода» — со смещением до перехода.
-            let until = rule.until.map(|u| match u {
-                Time::Date(d) => (d + 1) * DAY - 1,
-                Time::At(secs, Zone::Utc) => secs + i64::from(self.from),
-                Time::At(secs, _) => secs,
-            });
             // Переходы бывают раз в год (шаг правила — лет), поэтому смотрим на пару шагов назад.
             let span = (rule.interval + 1) * 366 * DAY;
             // Правило пояса — годовое без счёта (см. `obs_prop`): до последнего перехода считанные шаги.
-            expand(rule, self.start, until, hi_wall - span, hi_wall, &mut 1000, &mut |w| take(w));
+            expand(rule, self.start, self.until_of(rule), hi_wall - span, hi_wall, &mut |w| {
+                take(w);
+                true
+            });
         }
         best
     }
 }
 
+/// Переходов в готовом списке не больше (чужой пояс с тысячами дат остаётся без списка и считается по наблюдениям).
+const MAX_STEPS: usize = 4096;
+
 impl TzRules {
     /// Смещение пояса от UTC в секундах на момент UTC `utc`: то, что поставил последний переход.
     fn offset_at(&self, utc: i64) -> i32 {
+        if let Some(t) = &self.table
+            && (t.lo..t.hi).contains(&utc)
+        {
+            return match t.steps.partition_point(|(at, _)| *at <= utc).checked_sub(1) {
+                Some(i) => t.steps[i].1,
+                None => t.base,
+            };
+        }
+        self.offset_slow(utc)
+    }
+
+    /// Составить список переходов на три года вокруг `now`: прошлый, нынешний и следующий. Те же ответы, что даёт
+    /// [`TzRules::offset_slow`] (проверяется тестом), только без обхода всех наблюдений на каждый вопрос.
+    fn tabulate(&mut self, now: i64) {
+        let year = civil_from_days(now.div_euclid(DAY)).0;
+        let (lo, hi) = (days_from_civil(year - 1, 1, 1) * DAY, days_from_civil(year + 2, 1, 1) * DAY);
+        let mut steps: Vec<(i64, i32)> = Vec::new();
+        for o in &self.obs {
+            o.onsets(lo, hi, &mut |at| steps.push((at, o.to)));
+            if steps.len() > MAX_STEPS {
+                return;
+            }
+        }
+        // По времени; два перехода в один миг — первый по порядку наблюдений (как в `offset_slow`).
+        steps.sort_by_key(|s| s.0);
+        steps.dedup_by_key(|s| s.0);
+        self.table = Some(Table { lo, hi, base: self.offset_slow(lo), steps });
+    }
+
+    /// То же по наблюдениям: у каждого — его последний переход, побеждает самый поздний.
+    fn offset_slow(&self, utc: i64) -> i32 {
         let mut best: Option<(i64, i32)> = None;
         for o in &self.obs {
             if let Some(w) = o.latest_onset(utc + i64::from(o.from)) {
@@ -727,6 +968,7 @@ struct EventB {
     exdates: Vec<Time>,
     recurrence_id: Option<Time>,
     cancelled: bool,
+    declined: Vec<String>,
 }
 
 #[derive(Default)]
@@ -753,10 +995,24 @@ struct Parser {
     obs: Option<ObsB>,
 }
 
+/// Правило перехода пояса: годовое, без счёта и с короткими списками (настоящие правила — «последнее воскресенье марта»).
+fn zone_rule_ok(rule: &Rule) -> bool {
+    rule.freq == Freq::Yearly
+        && rule.count.is_none()
+        && rule.by_day.len() <= 8
+        && rule.by_month_day.len() <= 31
+        && rule.by_month.len() <= 4
+        && rule.by_set_pos.len() <= 4
+}
+
 impl Parser {
     fn line(&mut self, line: &str) {
         let Some(raw) = split_line(line) else { return };
         let name = raw.name.to_ascii_uppercase();
+        // Длинное значение (вложение, мусор) пропускается целиком; описание — нет, но ссылку в нём ищут лишь в начале.
+        if raw.params.len() > MAX_VALUE || (raw.value.len() > MAX_VALUE && name != "DESCRIPTION") {
+            return;
+        }
         match name.as_str() {
             "BEGIN" => self.begin(raw.value.trim()),
             "END" => self.end(),
@@ -802,9 +1058,12 @@ impl Parser {
         match self.stack.pop() {
             Some(Scope::Event) => self.end_event(),
             Some(Scope::Observance) => {
-                if let Some(b) = self.obs.take()
+                if let Some(mut b) = self.obs.take()
                     && let (Some(from), Some(to), Some(start)) = (b.from, b.to, b.start)
+                    && self.zone_obs.len() < MAX_OBSERVANCES
                 {
+                    b.rdates.sort_unstable();
+                    b.rdates.dedup();
                     self.zone_obs.push(Observance { from, to, start, rule: b.rule, rdates: b.rdates });
                 }
             }
@@ -812,9 +1071,9 @@ impl Parser {
                 let obs = std::mem::take(&mut self.zone_obs);
                 if let Some(id) = self.zone_id.take().filter(|id| !id.is_empty())
                     && !obs.is_empty()
+                    && let Some(i) = self.zones.intern(&id)
                 {
-                    let i = self.zones.intern(&id);
-                    self.zones.list[i].rules = Some(TzRules { obs });
+                    self.zones.list[i].rules = Some(TzRules { obs, table: None });
                 }
             }
             _ => {}
@@ -827,9 +1086,19 @@ impl Parser {
             "DTSTART" => b.start = parse_stamp(raw.value).map(|(secs, _, _)| secs),
             "TZOFFSETFROM" => b.from = parse_offset(raw.value),
             "TZOFFSETTO" => b.to = parse_offset(raw.value),
-            // Правила поясов — годовые и без счёта; другие (чужой файл) не читаются: пояс тогда стоит по первому переходу и `RDATE`.
-            "RRULE" => b.rule = parse_rule(raw.value).filter(|r| r.freq == Freq::Yearly && r.count.is_none()),
-            "RDATE" => b.rdates.extend(raw.value.split(',').filter_map(|v| parse_stamp(v).map(|(secs, _, _)| secs))),
+            // Правила поясов — годовые, без счёта и с короткими списками; другие (чужой файл) не читаются: пояс тогда стоит
+            // по первому переходу и `RDATE`.
+            "RRULE" => b.rule = parse_rule(raw.value).filter(zone_rule_ok),
+            "RDATE" => {
+                for v in raw.value.split(',') {
+                    if b.rdates.len() >= MAX_RDATES {
+                        break;
+                    }
+                    if let Some((secs, _, _)) = parse_stamp(v) {
+                        b.rdates.push(secs);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -845,7 +1114,7 @@ impl Parser {
                 b.place = tidy(&text, MAX_PLACE);
             }
             "URL" => b.url_link = find_link(raw.value),
-            "DESCRIPTION" => b.text_link = find_link(&unescape(raw.value)),
+            "DESCRIPTION" => b.text_link = find_link(&unescape(head(raw.value, MAX_DESCRIPTION))),
             // Службы, что кладут ссылку на встречу в своё свойство.
             "X-GOOGLE-CONFERENCE"
             | "X-MICROSOFT-SKYPETEAMSMEETINGURL"
@@ -860,10 +1129,26 @@ impl Parser {
             "DTEND" => b.end = parse_time(raw.params, raw.value, &mut self.zones),
             "DURATION" => b.duration = parse_duration(raw.value),
             "RRULE" => b.rule = parse_rule(raw.value),
+            // Пояс исключений — один на свойство (не заново для каждого значения); исключений у события не больше `MAX_EXDATES`.
             "EXDATE" => {
+                let mut zone = None;
                 for v in raw.value.split(',') {
-                    if let Some(t) = parse_time(raw.params, v, &mut self.zones) {
+                    if b.exdates.len() >= MAX_EXDATES {
+                        break;
+                    }
+                    if let Some(t) = time_in(|| *zone.get_or_insert_with(|| zone_of(raw.params, &mut self.zones)), v) {
                         b.exdates.push(t);
+                    }
+                }
+            }
+            "ATTENDEE" => {
+                if b.declined.len() < MAX_DECLINED
+                    && has_ci(raw.params, "DECLINED")
+                    && param(raw.params, "PARTSTAT").is_some_and(|v| v.eq_ignore_ascii_case("DECLINED"))
+                {
+                    let v = raw.value.trim();
+                    if v.get(..7).is_some_and(|p| p.eq_ignore_ascii_case("mailto:")) {
+                        b.declined.push(v[7..].trim().to_ascii_lowercase());
                     }
                 }
             }
@@ -888,6 +1173,7 @@ impl Parser {
             exdates: b.exdates,
             recurrence_id: b.recurrence_id,
             cancelled: b.cancelled,
+            declined: b.declined,
         };
         // Что кончилось давно — не нужно. Отменённое одиночное событие и отменённая серия ничего не покажут и ничего не
         // заменяют; а отменённая замена одного повтора нужна: по ней вхождение серии убирается.
@@ -958,7 +1244,24 @@ impl Calendar {
         if !buf.is_empty() {
             p.line(&buf);
         }
-        p.saw_calendar.then_some(Calendar { name: p.name, events: p.events, zones: p.zones.list, overflow: p.overflow })
+        // Отклонённое владельцем приглашение (его адрес — имя основного календаря Google) — не встреча: событие пропадает, а
+        // отклонённый один повтор серии становится отменой этого повтора.
+        let me = p.name.as_deref().map(str::to_ascii_lowercase);
+        let mut events = p.events;
+        events.retain_mut(|e| {
+            let declined = std::mem::take(&mut e.declined);
+            if me.as_ref().is_some_and(|me| declined.contains(me)) {
+                e.cancelled = true;
+                return e.recurrence_id.is_some();
+            }
+            true
+        });
+        // Пояса с готовым списком переходов на годы вокруг «сейчас».
+        let mut zones = p.zones.list;
+        for rules in zones.iter_mut().filter_map(|z| z.rules.as_mut()) {
+            rules.tabulate(keep_from);
+        }
+        p.saw_calendar.then_some(Calendar { name: p.name, events, zones, overflow: p.overflow })
     }
 
     /// Пояса, что названы в событиях, а `VTIMEZONE` для них в файле нет: их время читается как местное.
@@ -992,7 +1295,9 @@ impl Calendar {
     }
 
     /// Встречи, что идут в окне `from..to` (секунды с 1970, UTC) или начнутся в нём: повторы развёрнуты, исключения и
-    /// отмены учтены, замены одного повтора поставлены на место. По началу, потом по концу и названию.
+    /// отмены учтены, замены одного повтора поставлены на место. По началу, потом по концу и названию. Событие длиннее
+    /// месяца — не встреча; у серии в окне не больше [`MAX_PER_SERIES`] вхождений, а перебор её правила — не больше
+    /// [`SERIES_STEPS`] шагов: чужой файл не растягивает ни время, ни память.
     pub fn meetings(&self, from: i64, to: i64, local: LocalFn<'_>) -> Vec<Meeting> {
         // Какие повторы каких серий заменены отдельными событиями: (номер серии, начало повтора по UTC).
         let mut replaced: HashSet<(&str, i64)> = HashSet::new();
@@ -1005,25 +1310,25 @@ impl Calendar {
             }
         }
         let mut out: Vec<Meeting> = Vec::new();
-        let mut work = WORK;
         for ev in self.events.iter().filter(|e| !e.cancelled) {
             let Some(start) = self.utc_of(ev.start, local) else { continue };
             let length = self.length_of(ev, start, local);
-            let mut push = |s: i64| {
-                let e = s + length;
-                if s < to && (e > from || (e == s && s >= from)) {
-                    out.push(Meeting {
-                        uid: ev.uid.clone(),
-                        title: ev.title.clone(),
-                        place: ev.place.clone(),
-                        start: s,
-                        end: e,
-                        link: ev.link.clone(),
-                    });
-                }
+            if length > MAX_LENGTH {
+                continue;
+            }
+            let shows = |s: i64| s < to && (s + length > from || (length == 0 && s >= from));
+            let make = |s: i64| Meeting {
+                uid: ev.uid.clone(),
+                title: ev.title.clone(),
+                place: ev.place.clone(),
+                start: s,
+                end: s + length,
+                link: ev.link.clone(),
             };
             let (Some(rule), None, Time::At(w0, zone)) = (&ev.rule, ev.recurrence_id, ev.start) else {
-                push(start);
+                if shows(start) {
+                    out.push(make(start));
+                }
                 continue;
             };
             let until = rule.until.map(|u| match u {
@@ -1031,19 +1336,37 @@ impl Calendar {
                 Time::At(secs, Zone::Utc) => secs + self.offset_in(zone, secs, local),
                 Time::At(secs, _) => secs,
             });
-            let excluded: Vec<i64> = ev.exdates.iter().filter_map(|t| self.utc_of(*t, local)).collect();
-            let excluded_days: Vec<i64> =
-                ev.exdates.iter().filter_map(|t| if let Time::Date(d) = t { Some(*d) } else { None }).collect();
             // Окно в стенном времени — с запасом на смещение пояса и на длину встречи.
             let (lo, hi) = (from - length - 2 * DAY, to + 2 * DAY);
-            expand(rule, w0, until, lo, hi, &mut work, &mut |wall| {
-                let Some(s) = self.utc_of(Time::At(wall, zone), local) else { return };
-                let skipped = excluded.contains(&s)
-                    || excluded_days.contains(&wall.div_euclid(DAY))
-                    || (!ev.uid.is_empty() && replaced.contains(&(ev.uid.as_str(), s)));
-                if !skipped {
-                    push(s);
+            // Исключения: смотрятся только те, что лежат у окна (остальные ни при чём), и не больше `MAX_NEAR_EXDATES` каждого
+            // рода. В том же поясе, что серия, они сверяются по стенному времени (переводить в UTC незачем), в другом — по UTC.
+            let near = |wall: i64| (lo - DAY..=hi + DAY).contains(&wall);
+            let (mut walls, mut excluded, mut days): (Vec<i64>, Vec<i64>, Vec<i64>) =
+                (Vec::new(), Vec::new(), Vec::new());
+            for t in &ev.exdates {
+                match *t {
+                    Time::At(w, z) if near(w) && z == zone && walls.len() < MAX_NEAR_EXDATES => walls.push(w),
+                    Time::At(w, z) if near(w) && z != zone && excluded.len() < MAX_NEAR_EXDATES => {
+                        excluded.extend(self.utc_of(*t, local));
+                    }
+                    Time::Date(d) if near(d * DAY) && days.len() < MAX_NEAR_EXDATES => days.push(d),
+                    _ => {}
                 }
+            }
+            let mut emitted = 0usize;
+            expand(rule, w0, until, lo, hi, &mut |wall| {
+                if walls.contains(&wall) || days.contains(&wall.div_euclid(DAY)) {
+                    return true;
+                }
+                let Some(s) = self.utc_of(Time::At(wall, zone), local) else { return true };
+                if excluded.contains(&s) || (!ev.uid.is_empty() && replaced.contains(&(ev.uid.as_str(), s))) {
+                    return true;
+                }
+                if shows(s) {
+                    out.push(make(s));
+                    emitted += 1;
+                }
+                emitted < MAX_PER_SERIES
             });
         }
         out.sort_by(|a, b| (a.start, a.end, &a.title).cmp(&(b.start, b.end, &b.title)));
@@ -1109,19 +1432,29 @@ pub fn check_link(url: &str) -> Option<Link> {
     Some(Link { url: format!("https://{host}{}", &rest[at..]), service })
 }
 
+/// Где в `hay` первое вхождение `needle` без учёта регистра ASCII.
+fn find_ci(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    hay.windows(needle.len()).position(|w| w.eq_ignore_ascii_case(needle))
+}
+
 /// Первая годная ссылка службы в тексте (описание, место, свойство): адрес идёт до пробела, скобки или кавычки, хвостовая
-/// пунктуация не в счёт.
+/// пунктуация не в счёт. Адрес длиннее [`MAX_LINK`] знаков не годится: его не обрезают, а пропускают. Каждый адрес смотрится
+/// не дальше этого предела от своего начала, поэтому поиск не растёт квадратом от длины текста (`https://https://…`).
 pub fn find_link(text: &str) -> Option<Link> {
-    let lower = text.to_ascii_lowercase();
+    let bytes = text.as_bytes();
     let mut from = 0;
-    while let Some(at) = lower[from..].find("https://") {
+    while let Some(at) = find_ci(&bytes[from..], b"https://") {
         let start = from + at;
-        let end = text[start..].find(|c: char| !url_char(c)).map_or(text.len(), |e| start + e);
+        from = start + 8;
+        let limit = (start + MAX_LINK + 1).min(bytes.len());
+        let end = bytes[start..limit].iter().position(|b| !url_char(char::from(*b))).map_or(limit, |e| start + e);
+        if end - start > MAX_LINK {
+            continue;
+        }
         let candidate = text[start..end].trim_end_matches(['.', ',', ';', ':', '!', '?', ')', '*']);
         if let Some(link) = check_link(candidate) {
             return Some(link);
         }
-        from = start + 8;
     }
     None
 }
@@ -1170,7 +1503,8 @@ pub fn split_url(url: &str) -> Option<(String, u16, String)> {
 }
 
 /// Ссылка на календарь для окна: сайт и конец («calendar.google.com/…/basic.ics»); середина и запрос — секрет, их нет.
-/// Конец показывается, только если это имя файла `.ics`, — иначе секрет мог бы быть и в нём.
+/// Конец показывается, только если это общее имя файла `.ics` — короткое, из строчных букв (`basic.ics`, `calendar.ics`):
+/// в другом имени мог бы быть секрет.
 pub fn short_url(url: &str) -> String {
     let rest = url.strip_prefix("https://").unwrap_or(url);
     let (site, path) = match rest.find(['/', '?']) {
@@ -1180,9 +1514,11 @@ pub fn short_url(url: &str) -> String {
     let path = path.split(['?', '#']).next().unwrap_or("");
     let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     let file = segments.last().filter(|s| {
-        s.len() <= 32
-            && s.to_ascii_lowercase().ends_with(".ics")
-            && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        let cut = s.len().saturating_sub(4);
+        (5..=16).contains(&s.len())
+            && s.is_char_boundary(cut)
+            && s[cut..].eq_ignore_ascii_case(".ics")
+            && s[..cut].bytes().all(|b| b.is_ascii_lowercase() || b == b'-' || b == b'_')
     });
     match (segments.len(), file) {
         (0, _) => site.to_string(),
@@ -1901,6 +2237,10 @@ mod tests {
         assert_eq!(short_url("https://example.com/Ab3dEf9GhIjKlMnOp"), "example.com/…");
         assert_eq!(short_url("https://example.com/"), "example.com");
         assert_eq!(short_url("https://example.com?token=secret"), "example.com");
+        // Имя с цифрами или заглавными буквами похоже на токен: не показывается, как и длинное.
+        assert_eq!(short_url("https://calendar.example.com/s3cr3tt0k3nABCDEF1234567.ics"), "calendar.example.com/…");
+        assert_eq!(short_url("https://calendar.example.com/AbCdEfGhIj.ics"), "calendar.example.com/…");
+        assert_eq!(short_url("https://calendar.example.com/private-0123456789abcdef.ics"), "calendar.example.com/…");
         // Длинное «имя файла» — тоже не файл.
         assert_eq!(short_url(&format!("https://example.com/a/{}.ics", "x".repeat(40))), "example.com/…");
         let secret = "SECRET123TOKEN";
@@ -1936,22 +2276,530 @@ mod tests {
         assert_eq!(c.meetings(0, i64::MAX / 2, &utc0).len(), 1);
     }
 
-    /// Чужой календарь не занимает окно надолго: тысячи серий со счётом с 1601 года и правило пояса, что считает до миллиарда, укладываются
-    /// в общий запас шагов, а не в миллиарды.
+    /// Сколько шагов потратила серия `rule` с началом `start` (стенные секунды) на окно `lo..=hi` и сколько вхождений дала.
+    fn steps_of(rule: &str, start: i64, lo: i64, hi: i64) -> (u32, usize) {
+        let rule = parse_rule(rule).expect("правило");
+        let mut found = 0;
+        let steps = expand(&rule, start, None, lo, hi, &mut |_| {
+            found += 1;
+            true
+        });
+        (steps, found)
+    }
+
+    /// Вхождения правила «в лоб»: с самого начала серии, без запаса шагов и без прыжка к окну.
+    fn expand_naive(rule: &Rule, start: i64, lo: i64, hi: i64) -> Vec<i64> {
+        let (d0, tod) = (start.div_euclid(DAY), start.rem_euclid(DAY));
+        let hi_day = hi.div_euclid(DAY) + 1;
+        let (mut out, mut seen) = (Vec::new(), 0u32);
+        'periods: for k in 0.. {
+            match period_first(rule, d0, k) {
+                Some(first) if first <= hi_day => {}
+                _ => break,
+            }
+            for day in period_days(rule, d0, k) {
+                seen += 1;
+                if rule.count.is_some_and(|c| seen > c) || day > hi_day {
+                    break 'periods;
+                }
+                let wall = day * DAY + tod;
+                if (lo..=hi).contains(&wall) {
+                    out.push(wall);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_count_that_cannot_run_out_before_the_window_costs_almost_nothing_and_the_answer_stays_exact() {
+        let (lo, hi) = (w(2026, 10, 25, 0, 0), w(2026, 10, 30, 0, 0));
+        let start = w(1601, 1, 1, 10, 0);
+        for rule in [
+            "FREQ=DAILY;COUNT=4000000000",
+            "FREQ=WEEKLY;COUNT=4000000000;BYDAY=MO,TU,WE,TH,FR,SA,SU",
+            "FREQ=MONTHLY;COUNT=4000000000;BYMONTHDAY=1,2,3,4,5,6,7,8,9,10",
+            "FREQ=YEARLY;COUNT=4000000000;BYMONTH=1,2,3,4,5,6,7,8,9,10,11,12",
+        ] {
+            let (steps, _) = steps_of(rule, start, lo, hi);
+            assert!(steps < 400, "{rule}: {steps} шагов");
+        }
+        assert_eq!(steps_of("FREQ=DAILY;COUNT=4000000000", start, lo, hi).1, 5, "25, 26, 27, 28 и 29 октября в 10:00");
+        // Счёт, что кончается до окна: серия кончилась, а труд — не больше запаса шагов серии.
+        for rule in [
+            "FREQ=DAILY;COUNT=100000",
+            "FREQ=WEEKLY;BYDAY=MO;COUNT=20000",
+            "FREQ=MONTHLY;COUNT=4000;BYMONTHDAY=1,15",
+            "FREQ=YEARLY;COUNT=300;BYMONTH=1,2,3,4,5,6,7,8,9,10,11,12;BYMONTHDAY=1,2,3,4,5,6,7,8,9,10",
+        ] {
+            let (steps, found) = steps_of(rule, start, lo, hi);
+            assert!(steps <= SERIES_STEPS && found == 0, "{rule}: {steps} шагов, {found} вхождений");
+        }
+        // Пропуск с прыжком и без него — одно и то же, и у самой границы счёта.
+        let from = w(2020, 1, 31, 9, 0);
+        let (lo, hi) = (w(2026, 10, 20, 0, 0), w(2026, 11, 20, 0, 0));
+        for base in [
+            "FREQ=DAILY",
+            "FREQ=DAILY;INTERVAL=3",
+            "FREQ=WEEKLY",
+            "FREQ=WEEKLY;BYDAY=MO,WE;INTERVAL=2;WKST=SU",
+            "FREQ=MONTHLY",
+            "FREQ=MONTHLY;BYDAY=2TU,-1FR",
+            "FREQ=MONTHLY;BYMONTHDAY=-1,15",
+            "FREQ=YEARLY",
+            "FREQ=YEARLY;BYMONTH=1,10,11;BYMONTHDAY=31",
+        ] {
+            let all = parse_rule(base).unwrap();
+            let total = expand_naive(&all, from, from, hi).len() as u32;
+            let counts =
+                [1, 2, 5, total.saturating_sub(2).max(1), total.saturating_sub(1).max(1), total, total + 1, total + 2];
+            for count in counts {
+                let rule = parse_rule(&format!("{base};COUNT={count}")).unwrap();
+                let mut got = Vec::new();
+                expand(&rule, from, None, lo, hi, &mut |wall| {
+                    got.push(wall);
+                    true
+                });
+                assert_eq!(got, expand_naive(&rule, from, lo, hi), "{base};COUNT={count}");
+            }
+        }
+    }
+
+    #[test]
+    fn one_hostile_series_does_not_hide_the_meetings_of_the_owner() {
+        let mut body = String::new();
+        for i in 0..200 {
+            body += &format!(
+                "BEGIN:VEVENT\nUID:h{i}\nSUMMARY:h{i}\nDTSTART:17000101T100000Z\nDTEND:17000101T110000Z\nRRULE:FREQ=DAILY;COUNT=100000\nEND:VEVENT\n"
+            );
+        }
+        body += "BEGIN:VEVENT\nUID:mine\nSUMMARY:Mine\nDTSTART:20261001T143000Z\nDTEND:20261001T150000Z\nRRULE:FREQ=DAILY\nEND:VEVENT\n";
+        let c = parse(&body);
+        let got = c.meetings(w(2026, 10, 27, 0, 0), w(2026, 10, 28, 0, 0), &utc0);
+        assert_eq!(got.iter().map(|m| m.title.as_str()).collect::<Vec<_>>(), ["Mine"]);
+    }
+
+    #[test]
+    fn the_numbers_of_a_rule_are_checked_without_a_panic_and_its_lists_are_bounded() {
+        // Самые большие числа не роняют разбор (в отладочной сборке `abs()` от минимума падало).
+        for bad in [
+            "FREQ=MONTHLY;BYMONTHDAY=-9223372036854775808",
+            "FREQ=MONTHLY;BYDAY=-9223372036854775808MO",
+            "FREQ=MONTHLY;BYDAY=MO;BYSETPOS=-9223372036854775808",
+            "FREQ=MONTHLY;BYMONTH=9223372036854775807",
+            "FREQ=MONTHLY;BYMONTHDAY=9223372036854775807",
+            "FREQ=MONTHLY;BYDAY=54MO",
+            "FREQ=MONTHLY;BYSETPOS=367;BYDAY=MO",
+        ] {
+            assert!(parse_rule(bad).is_none(), "{bad}");
+        }
+        // 64 разных дней — можно (63 порядковых и «каждый понедельник»), 65-й — нет; повторы не считаются.
+        let mut days: Vec<String> =
+            (1..=9).flat_map(|n| ["MO", "TU", "WE", "TH", "FR", "SA", "SU"].map(|d| format!("{n}{d}"))).collect();
+        days.push("MO".into());
+        assert_eq!(days.len(), MAX_BY_DAY);
+        assert!(parse_rule(&format!("FREQ=MONTHLY;BYDAY={}", days.join(","))).is_some());
+        days.push("10MO".into());
+        assert!(parse_rule(&format!("FREQ=MONTHLY;BYDAY={}", days.join(","))).is_none());
+        let repeats = format!("FREQ=WEEKLY;BYDAY={}TU", "MO,".repeat(5000));
+        assert_eq!(parse_rule(&repeats).map(|r| r.by_day.len()), Some(2), "повторы сворачиваются");
+        // Дни месяца: все 62 возможных помещаются; повторы свёрнуты.
+        let month_days: Vec<String> = (1..=31).flat_map(|d| [d.to_string(), (-d).to_string()]).collect();
+        assert_eq!(
+            parse_rule(&format!("FREQ=MONTHLY;BYMONTHDAY={}", month_days.join(","))).map(|r| r.by_month_day.len()),
+            Some(62)
+        );
+        // Места в наборе: 32 можно, 33-е — нет.
+        let pos: Vec<String> = (1..=33).map(|p| p.to_string()).collect();
+        assert!(parse_rule(&format!("FREQ=MONTHLY;BYDAY=MO;BYSETPOS={}", pos[..32].join(","))).is_some());
+        assert!(parse_rule(&format!("FREQ=MONTHLY;BYDAY=MO;BYSETPOS={}", pos.join(","))).is_none());
+        // Правило с негодным списком — серия показывается одним вхождением, а не пропадает и не вешает.
+        let c = parse(&format!(
+            "BEGIN:VEVENT\nUID:1\nSUMMARY:Odd\nDTSTART:20261027T100000Z\nDTEND:20261027T110000Z\nRRULE:FREQ=WEEKLY;BYDAY={}\nEND:VEVENT\n",
+            days.join(",")
+        ));
+        assert_eq!(c.meetings(0, i64::MAX / 2, &utc0).len(), 1);
+    }
+
+    #[test]
+    fn the_zones_and_their_lists_of_a_foreign_file_are_bounded() {
+        // Поясов в файле не больше 64: у остальных время читается как местное, даже если им дали VTIMEZONE.
+        let mut body = String::new();
+        for i in 0..=MAX_ZONES {
+            body += &format!(
+                "BEGIN:VTIMEZONE\nTZID:Zone{i}\nBEGIN:STANDARD\nDTSTART:19700101T000000\nTZOFFSETFROM:+0500\nTZOFFSETTO:+0500\nEND:STANDARD\nEND:VTIMEZONE\n"
+            );
+        }
+        body += "BEGIN:VEVENT\nUID:a\nSUMMARY:First\nDTSTART;TZID=Zone0:20261027T100000\nEND:VEVENT\n";
+        body +=
+            &format!("BEGIN:VEVENT\nUID:b\nSUMMARY:Beyond\nDTSTART;TZID=Zone{MAX_ZONES}:20261027T100000\nEND:VEVENT\n");
+        let c = parse(&body);
+        assert_eq!(c.zones.len(), MAX_ZONES);
+        let by: std::collections::HashMap<String, i64> =
+            c.meetings(0, i64::MAX / 2, &plus3).into_iter().map(|m| (m.title, m.start)).collect();
+        assert_eq!(by["First"], w(2026, 10, 27, 5, 0), "пояс из файла: +05");
+        assert_eq!(by["Beyond"], w(2026, 10, 27, 7, 0), "сверх предела — местное время ПК: +03");
+        // Наблюдений в поясе не больше 64, дат RDATE в наблюдении — 256.
+        let mut zone = String::from(
+            "BEGIN:VTIMEZONE\nTZID:Big\nBEGIN:DAYLIGHT\nDTSTART:19700101T000000\nTZOFFSETFROM:+0100\nTZOFFSETTO:+0200\n",
+        );
+        zone += &format!(
+            "RDATE:{}\nEND:DAYLIGHT\n",
+            (0..300).map(|i| format!("{}0101T000000", 1700 + i)).collect::<Vec<_>>().join(",")
+        );
+        for i in 0..(MAX_OBSERVANCES + 6) {
+            zone += &format!(
+                "BEGIN:STANDARD\nDTSTART:{:04}0101T000000\nTZOFFSETFROM:+0100\nTZOFFSETTO:+0100\nEND:STANDARD\n",
+                1900 + i
+            );
+        }
+        zone += "END:VTIMEZONE\n";
+        let c = parse(&format!("{zone}BEGIN:VEVENT\nUID:x\nSUMMARY:x\nDTSTART;TZID=Big:20261027T100000\nEND:VEVENT\n"));
+        let rules = c.zones[0].rules.as_ref().unwrap();
+        assert_eq!(rules.obs.len(), MAX_OBSERVANCES);
+        assert_eq!(rules.obs[0].rdates.len(), MAX_RDATES, "из 300 дат RDATE взято 256");
+        // Имя пояса в журнале — не длиннее 64 знаков.
+        let long = "Z".repeat(300);
+        let c = parse(&format!("BEGIN:VEVENT\nUID:1\nSUMMARY:x\nDTSTART;TZID={long}:20261027T100000\nEND:VEVENT\n"));
+        assert_eq!(c.unknown_zones(), ["Z".repeat(MAX_ZONE_NAME)]);
+    }
+
+    #[test]
+    fn a_long_value_is_skipped_but_the_description_is_read_from_its_start() {
+        let big = "x".repeat(MAX_VALUE + 1);
+        let c = parse(&format!(
+            "BEGIN:VEVENT\nUID:1\nSUMMARY:{big}\nLOCATION:{big}\nDTSTART:20261027T100000Z\nDTEND:20261027T110000Z\nEND:VEVENT\n"
+        ));
+        let m = &c.meetings(0, i64::MAX / 2, &utc0)[0];
+        assert!(m.title.is_empty() && m.place.is_empty(), "значение длиннее 8 КБ пропущено целиком");
+        let c = parse(&format!(
+            "BEGIN:VEVENT\nUID:1\nSUMMARY:{}\nDTSTART:20261027T100000Z\nEND:VEVENT\n",
+            "y".repeat(MAX_VALUE)
+        ));
+        assert!(!c.meetings(0, i64::MAX / 2, &utc0)[0].title.is_empty(), "ровно 8 КБ — читается");
+        // Описание бывает длинным: ссылка в начале находится, а за 64 КБ — нет.
+        let head = format!("Join https://us02web.zoom.us/j/1 {}", "z ".repeat(MAX_DESCRIPTION));
+        let tail = format!("{} Join https://us02web.zoom.us/j/1", "z ".repeat(MAX_DESCRIPTION));
+        for (description, found) in [(head, true), (tail, false)] {
+            let c = parse(&format!(
+                "BEGIN:VEVENT\nUID:1\nSUMMARY:x\nDTSTART:20261027T100000Z\nDESCRIPTION:{description}\nEND:VEVENT\n"
+            ));
+            assert_eq!(c.meetings(0, i64::MAX / 2, &utc0)[0].link.is_some(), found);
+        }
+        // Вложение в десять мегабайт — не наше дело: разбор идёт дальше.
+        let c = parse(&format!(
+            "BEGIN:VEVENT\nUID:1\nSUMMARY:x\nATTACH;ENCODING=BASE64;VALUE=BINARY:{}\nDTSTART:20261027T100000Z\nEND:VEVENT\n",
+            "QUJD".repeat(2_500_000)
+        ));
+        assert_eq!(c.meetings(0, i64::MAX / 2, &utc0).len(), 1);
+    }
+
+    #[test]
+    fn a_link_is_looked_for_in_bounded_steps_and_never_cut() {
+        // Описание из одних «https://»: поиск не растёт квадратом от длины.
+        let started = std::time::Instant::now();
+        assert_eq!(find_link(&"https://".repeat(20_000)), None);
+        let c = parse(&format!(
+            "BEGIN:VEVENT\nUID:1\nSUMMARY:x\nDTSTART:20261027T100000Z\nDESCRIPTION:{}\nEND:VEVENT\n",
+            "https://".repeat(130_000)
+        ));
+        assert!(c.meetings(0, i64::MAX / 2, &utc0)[0].link.is_none());
+        assert!(started.elapsed().as_secs() < 30, "поиск ссылки ограничен: {:?}", started.elapsed());
+        // Адрес ровно предельной длины годен, на знак длиннее — нет, и обрезком его не принимают, даже с точкой на конце.
+        let exact = format!("https://zoom.us/j/{}", "a".repeat(MAX_LINK - 18));
+        assert_eq!(exact.len(), MAX_LINK);
+        assert!(find_link(&exact).is_some());
+        assert!(find_link(&format!("{exact}a")).is_none());
+        assert!(
+            find_link(&format!("https://zoom.us/j/{}...", "a".repeat(MAX_LINK - 18 + 1))).is_none(),
+            "обрезок не годится"
+        );
+        // За длинным негодным адресом находится следующий годный.
+        assert_eq!(
+            find_link(&format!("https://zoom.us/{} https://zoom.us/j/2", "b".repeat(5000))).map(|l| l.url).as_deref(),
+            Some("https://zoom.us/j/2")
+        );
+    }
+
+    #[test]
+    fn evil_hosts_with_a_service_name_after_a_separator_are_not_links() {
+        for bad in [
+            "https://evil.example\\.zoom.us/",
+            "https://evil.example#.zoom.us",
+            "https://evil.example?.zoom.us/",
+            "https://evil.example/.zoom.us",
+        ] {
+            assert_eq!(check_link(bad), None, "{bad:?}");
+            assert_eq!(find_link(bad), None, "{bad:?} в тексте");
+            assert_eq!(find_link(&format!("Join: {bad} today")), None, "{bad:?} в предложении");
+        }
+    }
+
+    #[test]
+    fn exdates_are_bounded_resolved_once_and_compared_in_the_zone_of_the_series() {
+        // Исключений у события не больше 1000; пояс на всё свойство — один.
+        let values: Vec<String> = (0..1500).map(|i| format!("{:04}0101T100000", 1700 + i % 300)).collect();
+        let lines: String = values
+            .chunks(400)
+            .map(|c| {
+                format!(
+                    "EXDATE;TZID=Somewhere:{}
+",
+                    c.join(",")
+                )
+            })
+            .collect();
+        let c = parse(&format!(
+            "BEGIN:VEVENT
+UID:1
+SUMMARY:x
+DTSTART;TZID=Somewhere:20261001T100000
+RRULE:FREQ=DAILY
+{lines}END:VEVENT
+"
+        ));
+        assert_eq!(c.events[0].exdates.len(), MAX_EXDATES);
+        assert_eq!(c.zones.len(), 1, "пояс «Somewhere» — один на все исключения");
+        // В поясе серии исключение сверяется по стенному времени: 10:00 в Москве выпало, 11:00 осталось.
+        let c = parse(&format!(
+            "{ZONES}BEGIN:VEVENT\nUID:1\nSUMMARY:Daily\nDTSTART;TZID=Europe/Moscow:20261025T100000\nDTEND;TZID=Europe/Moscow:20261025T103000\nRRULE:FREQ=DAILY\nEXDATE;TZID=Europe/Moscow:20261027T100000\nEXDATE;TZID=Europe/Moscow:20261028T110000\nEND:VEVENT\n"
+        ));
+        let days: Vec<i64> = c
+            .meetings(w(2026, 10, 25, 0, 0), w(2026, 10, 30, 0, 0), &utc0)
+            .into_iter()
+            .map(|m| m.start.div_euclid(DAY) - days_from_civil(2026, 10, 25))
+            .collect();
+        assert_eq!(days, [0, 1, 3, 4], "27 октября выпало, 28-е с исключением на другое время — осталось");
+        // Исключение в UTC у серии в поясе тоже находит свой повтор (10:00 в Москве — 07:00 UTC).
+        let c = parse(&format!(
+            "{ZONES}BEGIN:VEVENT\nUID:1\nSUMMARY:Daily\nDTSTART;TZID=Europe/Moscow:20261025T100000\nRRULE:FREQ=DAILY\nEXDATE:20261026T070000Z\nEND:VEVENT\n"
+        ));
+        let got = c.meetings(w(2026, 10, 25, 0, 0), w(2026, 10, 28, 0, 0), &utc0);
+        assert_eq!(got.iter().map(|m| m.start).collect::<Vec<_>>(), [w(2026, 10, 25, 7, 0), w(2026, 10, 27, 7, 0)]);
+        // Далёкие исключения окну не мешают и ничего не стоят.
+        let far: Vec<String> = (0..450).map(|i| format!("{:04}0101T070000Z", 1700 + i % 300)).collect();
+        let c = parse(&format!(
+            "BEGIN:VEVENT\nUID:1\nSUMMARY:Daily\nDTSTART:20261025T070000Z\nRRULE:FREQ=DAILY\nEXDATE:{}\nEND:VEVENT\n",
+            far.join(",")
+        ));
+        assert_eq!(c.meetings(w(2026, 10, 25, 0, 0), w(2026, 10, 28, 0, 0), &utc0).len(), 3);
+    }
+
+    #[test]
+    fn a_very_long_event_is_not_a_meeting_and_a_series_fills_the_window_only_so_far() {
+        // Событие длиннее месяца — отпуск, а не встреча.
+        let c = parse(
+            "BEGIN:VEVENT\nUID:1\nSUMMARY:Holiday\nDTSTART:20261001T080000Z\nDTEND:20261201T080000Z\nEND:VEVENT\nBEGIN:VEVENT\nUID:2\nSUMMARY:Trip\nDTSTART:20261026T080000Z\nDTEND:20261030T080000Z\nEND:VEVENT\n",
+        );
+        let got = c.meetings(w(2026, 10, 27, 0, 0), w(2026, 10, 28, 0, 0), &utc0);
+        assert_eq!(got.iter().map(|m| m.title.as_str()).collect::<Vec<_>>(), ["Trip"], "четыре дня — ещё встреча");
+        // Серия каждый день с длительностью в миллион недель не заполняет память.
+        let c = parse(
+            "BEGIN:VEVENT\nUID:1\nSUMMARY:Huge\nDTSTART:16010101T080000Z\nDURATION:P1000000W\nRRULE:FREQ=DAILY\nEND:VEVENT\n",
+        );
+        assert!(c.meetings(w(2026, 10, 27, 0, 0), w(2026, 10, 28, 0, 0), &utc0).is_empty());
+        // А тридцать дней в каждом повторе — допустимо, и вхождений в окне не больше предела.
+        let c = parse(
+            "BEGIN:VEVENT\nUID:1\nSUMMARY:Long\nDTSTART:20260101T080000Z\nDURATION:P30D\nRRULE:FREQ=DAILY\nEND:VEVENT\n",
+        );
+        let n = c.meetings(w(2026, 10, 27, 0, 0), w(2026, 10, 28, 0, 0), &utc0).len();
+        assert!(n > 0 && n <= MAX_PER_SERIES, "{n}");
+    }
+
+    #[test]
+    fn what_the_owner_declined_is_not_a_meeting() {
+        let owner = "X-WR-CALNAME:Me@Example.com\n";
+        let event = |uid: &str, who: &str, state: &str| {
+            format!(
+                "BEGIN:VEVENT\nUID:{uid}\nSUMMARY:{uid}\nDTSTART:20261027T100000Z\nDTEND:20261027T110000Z\nATTENDEE;CN=\"Some One\";PARTSTAT={state};RSVP=TRUE:mailto:{who}\nEND:VEVENT\n"
+            )
+        };
+        let body = format!(
+            "{owner}{}{}{}{}",
+            event("declined", "me@example.com", "DECLINED"),
+            event("accepted", "me@example.com", "ACCEPTED"),
+            event("other-declined", "colleague@example.com", "DECLINED"),
+            event("shouted", "ME@EXAMPLE.COM", "declined"),
+        );
+        let got: Vec<String> = parse(&body).meetings(0, i64::MAX / 2, &utc0).into_iter().map(|m| m.title).collect();
+        assert_eq!(got, ["accepted", "other-declined"], "отклонил сам владелец — события нет (регистр не важен)");
+        // Календарь без имени — нечего сверять: всё остаётся.
+        let no_name = body.replacen(owner, "", 1);
+        assert_eq!(parse(&no_name).meetings(0, i64::MAX / 2, &utc0).len(), 4);
+        // Отклонён один повтор серии: он отменён, остальные идут; отклонена вся серия — её нет.
+        let series = format!(
+            "{owner}BEGIN:VEVENT\nUID:s\nSUMMARY:Daily\nDTSTART:20261026T100000Z\nDTEND:20261026T103000Z\nRRULE:FREQ=DAILY\nEND:VEVENT\n\
+             BEGIN:VEVENT\nUID:s\nSUMMARY:Daily\nRECURRENCE-ID:20261027T100000Z\nDTSTART:20261027T100000Z\nDTEND:20261027T103000Z\nATTENDEE;PARTSTAT=DECLINED:mailto:me@example.com\nEND:VEVENT\n"
+        );
+        let got = parse(&series).meetings(w(2026, 10, 26, 0, 0), w(2026, 10, 29, 0, 0), &utc0);
+        assert_eq!(
+            got.iter().map(|m| m.start.div_euclid(DAY) - days_from_civil(2026, 10, 26)).collect::<Vec<_>>(),
+            [0, 2],
+            "27 октября отклонено, остальные дни идут"
+        );
+        let whole = format!(
+            "{owner}BEGIN:VEVENT\nUID:s\nSUMMARY:Daily\nDTSTART:20261026T100000Z\nRRULE:FREQ=DAILY\nATTENDEE;PARTSTAT=DECLINED:mailto:me@example.com\nEND:VEVENT\n"
+        );
+        assert!(parse(&whole).meetings(w(2026, 10, 26, 0, 0), w(2026, 10, 29, 0, 0), &utc0).is_empty());
+    }
+
+    /// Старая проверка перехода часов: сутки до и после, обе кандидатуры.
+    fn wall_to_utc_reference(wall: i64, offset_at: &dyn Fn(i64) -> i32) -> i64 {
+        let before = i64::from(offset_at(wall - DAY));
+        let after = i64::from(offset_at(wall + DAY));
+        let (a, b) = (wall - before, wall - after);
+        let good_a = i64::from(offset_at(a)) == before;
+        let good_b = i64::from(offset_at(b)) == after;
+        match (good_a, good_b) {
+            (true, true) => a.min(b),
+            (false, true) => b,
+            _ => a,
+        }
+    }
+
+    /// Пояс ПК, похожий на берлинский: UTC+1, летом UTC+2 (с последнего воскресенья марта по последнее воскресенье октября).
+    fn berlin(utc: i64) -> i32 {
+        let year = civil_from_days(utc.div_euclid(DAY)).0;
+        let last_sunday = |m: i64| {
+            let last = days_from_civil(year, m, 31);
+            last - (weekday(last) - 6).rem_euclid(7)
+        };
+        if (last_sunday(3) * DAY + 3600..last_sunday(10) * DAY + 3600).contains(&utc) { 7200 } else { 3600 }
+    }
+
+    #[test]
+    fn the_shortcut_of_the_wall_clock_conversion_gives_the_old_answers() {
+        let zones: [&dyn Fn(i64) -> i32; 3] = [&utc0, &plus3, &berlin];
+        for offset_at in zones {
+            for wall in (w(2026, 1, 1, 0, 0)..w(2027, 1, 1, 0, 0)).step_by(15 * 60) {
+                assert_eq!(wall_to_utc(wall, offset_at), wall_to_utc_reference(wall, offset_at), "{wall}");
+            }
+        }
+    }
+
+    /// Ответы готового списка переходов и ответы по наблюдениям — одни и те же, в том числе у самих границ и вне списка.
+    fn check_table(zone: &str, step: usize) {
+        let now = w(2026, 10, 27, 0, 0);
+        let c = Calendar::parse(
+            &cal(&format!("{zone}BEGIN:VEVENT\nUID:x\nSUMMARY:x\nDTSTART:20261028T100000Z\nEND:VEVENT\n")),
+            now,
+        )
+        .unwrap();
+        let all: Vec<&TzRules> = c.zones.iter().filter_map(|z| z.rules.as_ref()).collect();
+        assert!(!all.is_empty(), "пояс с правилами");
+        for rules in all {
+            let table = rules.table.as_ref().expect("готовый список переходов");
+            assert!(table.lo <= now && now < table.hi);
+            let mut probes: Vec<i64> = (table.lo - 400 * DAY..table.hi + 400 * DAY).step_by(step).collect();
+            for (at, _) in &table.steps {
+                probes.extend([at - 1, *at, at + 1]);
+            }
+            probes.extend([table.lo - 1, table.lo, table.lo + 1, table.hi - 1, table.hi, table.hi + 1]);
+            for u in probes {
+                assert_eq!(rules.offset_at(u), rules.offset_slow(u), "{u}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_transition_table_answers_like_the_rules_of_the_zone() {
+        // Нью-Йорк и Москва из образца выше.
+        check_table(ZONES, 3_001);
+        // Берлин: последнее воскресенье марта и октября.
+        check_table(
+            "BEGIN:VTIMEZONE\nTZID:Europe/Berlin\nBEGIN:DAYLIGHT\nTZOFFSETFROM:+0100\nTZOFFSETTO:+0200\nDTSTART:19700329T020000\nRRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU\nEND:DAYLIGHT\nBEGIN:STANDARD\nTZOFFSETFROM:+0200\nTZOFFSETTO:+0100\nDTSTART:19701025T030000\nRRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU\nEND:STANDARD\nEND:VTIMEZONE\n",
+            3_001,
+        );
+        // Сидней: лето — с октября по апрель.
+        check_table(
+            "BEGIN:VTIMEZONE\nTZID:Australia/Sydney\nBEGIN:DAYLIGHT\nTZOFFSETFROM:+1000\nTZOFFSETTO:+1100\nDTSTART:19701004T020000\nRRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=1SU\nEND:DAYLIGHT\nBEGIN:STANDARD\nTZOFFSETFROM:+1100\nTZOFFSETTO:+1000\nDTSTART:19700405T030000\nRRULE:FREQ=YEARLY;BYMONTH=4;BYDAY=1SU\nEND:STANDARD\nEND:VTIMEZONE\n",
+            3_001,
+        );
+        // Только RDATE, без правил (так пишут некоторые экспортёры).
+        check_table(
+            "BEGIN:VTIMEZONE\nTZID:Odd/Dates\nBEGIN:STANDARD\nTZOFFSETFROM:+0100\nTZOFFSETTO:+0100\nDTSTART:20180101T000000\nEND:STANDARD\nBEGIN:DAYLIGHT\nTZOFFSETFROM:+0100\nTZOFFSETTO:+0000\nDTSTART:20250316T020000\nRDATE:20250316T020000,20260315T020000,20270314T020000,20280312T020000\nEND:DAYLIGHT\nBEGIN:STANDARD\nTZOFFSETFROM:+0000\nTZOFFSETTO:+0100\nDTSTART:20251026T030000\nRDATE:20251026T030000,20261025T030000,20271031T030000\nEND:STANDARD\nEND:VTIMEZONE\n",
+            3_001,
+        );
+        // Правило с концом (UNTIL) в 2025 и новое с 2026 года, как в истории настоящих поясов.
+        check_table(
+            "BEGIN:VTIMEZONE\nTZID:Odd/Until\nBEGIN:STANDARD\nTZOFFSETFROM:+0300\nTZOFFSETTO:+0200\nDTSTART:19961027T030000\nRRULE:FREQ=YEARLY;UNTIL=20251231T000000Z;BYMONTH=10;BYDAY=-1SU\nEND:STANDARD\nBEGIN:STANDARD\nTZOFFSETFROM:+0200\nTZOFFSETTO:+0300\nDTSTART:20260101T000000\nEND:STANDARD\nBEGIN:DAYLIGHT\nTZOFFSETFROM:+0200\nTZOFFSETTO:+0300\nDTSTART:19700329T020000\nRRULE:FREQ=YEARLY;UNTIL=20251231T000000Z;BYMONTH=3;BYDAY=-1SU\nEND:DAYLIGHT\nEND:VTIMEZONE\n",
+            3_001,
+        );
+        // Чужой пояс из десятков наблюдений: ответы те же.
+        let mut hostile = String::from("BEGIN:VTIMEZONE\nTZID:Hostile\n");
+        for i in 0..MAX_OBSERVANCES {
+            hostile += &format!(
+                "BEGIN:STANDARD\nDTSTART:{:04}0101T000000\nTZOFFSETFROM:+0100\nTZOFFSETTO:+{:02}00\nRRULE:FREQ=YEARLY;BYMONTH={};BYDAY=-1SU\nEND:STANDARD\n",
+                1900 + 2 * i,
+                1 + i % 5,
+                1 + i % 12,
+            );
+        }
+        hostile += "END:VTIMEZONE\n";
+        check_table(&hostile, 40_009);
+        // Список не больше предела; пояс сверх него остаётся без списка и считается по наблюдениям.
+        let c = parse(&format!("{ZONES}BEGIN:VEVENT\nUID:x\nSUMMARY:x\nDTSTART:20261028T100000Z\nEND:VEVENT\n"));
+        assert!(c.zones.iter().all(|z| z.rules.as_ref().is_none_or(|r| r.table.is_some())));
+    }
+
     #[test]
     fn a_hostile_calendar_costs_a_bounded_amount_of_work() {
-        let mut body = String::from(
-            "BEGIN:VTIMEZONE\nTZID:Hostile\nBEGIN:STANDARD\nDTSTART:16010101T000000\nTZOFFSETFROM:+0300\nTZOFFSETTO:+0300\nRRULE:FREQ=DAILY;COUNT=4000000000\nEND:STANDARD\nEND:VTIMEZONE\n",
-        );
-        for i in 0..2000 {
-            body.push_str(&format!(
-                "BEGIN:VEVENT\nUID:h{i}\nSUMMARY:H\nDTSTART;TZID=Hostile:16010101T100000\nDTEND;TZID=Hostile:16010101T110000\nRRULE:FREQ=DAILY;COUNT=4000000000\nEND:VEVENT\n"
-            ));
+        // Пояс из многих наблюдений и сотня серий разных видов: у каждой — свой запас шагов, у пояса — готовый список переходов.
+        let mut body = String::from("BEGIN:VTIMEZONE\nTZID:Hostile\n");
+        for i in 0..(MAX_OBSERVANCES + 20) {
+            body += &format!(
+                "BEGIN:STANDARD\nDTSTART:{:04}0101T000000\nTZOFFSETFROM:+0300\nTZOFFSETTO:+0300\nRRULE:FREQ=YEARLY;BYMONTH={};BYDAY=-1SU\nEND:STANDARD\n",
+                1700 + i,
+                1 + i % 12
+            );
+        }
+        body += "END:VTIMEZONE\n";
+        let ords: Vec<String> =
+            (1..=9).flat_map(|n| ["MO", "TU", "WE", "TH", "FR", "SA", "SU"].map(|d| format!("{n}{d}"))).collect();
+        let kinds = [
+            "FREQ=DAILY;COUNT=4000000000".to_string(),
+            "FREQ=DAILY;COUNT=100000".to_string(),
+            "FREQ=WEEKLY;COUNT=20000;BYDAY=MO,TU,WE,TH,FR,SA,SU".to_string(),
+            "FREQ=MONTHLY;COUNT=4000;BYMONTHDAY=1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,-1,-2,-3"
+                .to_string(),
+            format!("FREQ=MONTHLY;COUNT=4000;BYDAY={}", ords.join(",")),
+            format!("FREQ=YEARLY;COUNT=250;BYMONTH=1,2,3,4,5,6,7,8,9,10,11,12;BYDAY={}", ords.join(",")),
+        ];
+        let exdates: Vec<String> = (0..MAX_EXDATES).map(|i| format!("202610{:02}T100000", 1 + i % 28)).collect();
+        let exdate_lines: String = exdates
+            .chunks(400)
+            .map(|c| {
+                format!(
+                    "EXDATE:{}
+",
+                    c.join(",")
+                )
+            })
+            .collect();
+        for i in 0..120 {
+            body += &format!(
+                "BEGIN:VEVENT
+UID:h{i}
+SUMMARY:H
+DTSTART;TZID=Hostile:16010101T100000
+DTEND;TZID=Hostile:16010101T110000
+RRULE:{}
+{exdate_lines}END:VEVENT
+",
+                kinds[i % kinds.len()],
+            );
         }
         let c = Calendar::parse(&cal(&body), w(2026, 10, 27, 9, 0)).unwrap();
         let started = std::time::Instant::now();
-        let _ = c.meetings(w(2026, 10, 27, 0, 0), w(2026, 10, 29, 0, 0), &utc0);
-        assert!(started.elapsed().as_secs() < 4, "разворот ограничен общим запасом шагов: {:?}", started.elapsed());
+        let _ = c.meetings(w(2026, 10, 26, 0, 0), w(2026, 10, 31, 0, 0), &utc0);
+        // Настоящий замер на 2000 таких серий (release) — в отчёте этапа; здесь запас в десятки раз, чтобы не зависеть от нагрузки.
+        assert!(started.elapsed().as_secs() < 60, "{:?}", started.elapsed());
+        // Каждый вид правила стоит не больше своего запаса шагов.
+        let start = w(1601, 1, 1, 10, 0);
+        for rule in &kinds {
+            let (steps, _) = steps_of(rule, start, w(2026, 10, 26, 0, 0), w(2026, 10, 31, 0, 0));
+            assert!(steps <= SERIES_STEPS, "{rule}: {steps}");
+        }
         // Правило пояса, которого не бывает у настоящих поясов (не годовое или со счётом), не читается: пояс — по первому переходу.
         let z = parse(
             "BEGIN:VTIMEZONE\nTZID:Hostile\nBEGIN:STANDARD\nDTSTART:16010101T000000\nTZOFFSETFROM:+0300\nTZOFFSETTO:+0300\nRRULE:FREQ=DAILY;COUNT=4000000000\nEND:STANDARD\nEND:VTIMEZONE\nBEGIN:VEVENT\nUID:1\nSUMMARY:Z\nDTSTART;TZID=Hostile:20261027T103000\nEND:VEVENT\n",

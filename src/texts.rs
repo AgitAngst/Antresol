@@ -314,6 +314,8 @@ pub struct Tr {
     pub meetings_outlook: &'static str,
     pub meetings_link_bad: &'static str,
     pub meetings_how: &'static str,
+    pub meetings_calendars_hint: &'static str,
+    pub meetings_dup: &'static str,
     pub plaque_meeting: &'static str,
 }
 
@@ -624,6 +626,8 @@ const RU: Tr = Tr {
     meetings_outlook: "Outlook: Параметры → Календарь → Общие календари → Опубликовать календарь → ICS",
     meetings_link_bad: "Нужна ссылка вида https://… или webcal://…",
     meetings_how: "Календарь — по ссылке .ics из Google или Outlook, учётная запись Windows не нужна.",
+    meetings_calendars_hint: "Календари (или правый щелчок по карточке)",
+    meetings_dup: "Этот календарь уже есть",
     plaque_meeting: "{} через {} мин",
 };
 
@@ -934,6 +938,8 @@ const EN: Tr = Tr {
     meetings_outlook: "Outlook: Settings → Calendar → Shared calendars → Publish a calendar → ICS",
     meetings_link_bad: "A link like https://… or webcal://… is needed",
     meetings_how: "The calendar comes from an .ics link from Google or Outlook; no Windows account needed.",
+    meetings_calendars_hint: "Calendars (or right-click the card)",
+    meetings_dup: "This calendar is already added",
     plaque_meeting: "{} in {} min",
 };
 
@@ -1408,6 +1414,14 @@ pub fn meeting_left(lang: Lang, minutes: i64) -> String {
     }
 }
 
+/// Идущая встреча в списке «Дальше сегодня» вместо начала — до скольки: «до 17:00» / «until 17:00».
+pub fn meeting_until(lang: Lang, time: &str) -> String {
+    match lang {
+        Lang::Ru => format!("до {time}"),
+        Lang::En => format!("until {time}"),
+    }
+}
+
 /// Первая завтрашняя встреча, когда сегодня их больше нет: «Завтра 09:30 · Планёрка».
 pub fn meeting_tomorrow(t: &Tr, time: &str, title: &str) -> String {
     format!("{} {time} · {title}", t.meetings_tomorrow)
@@ -1437,10 +1451,11 @@ pub fn meetings_remove(lang: Lang, name: &str) -> String {
     }
 }
 
-/// Действие поиска: «Подключиться к «Планёрка»» / Join “Daily stand-up”.
+/// Действие поиска: «Подключиться к встрече «Планёрка»» / Join “Daily stand-up”. «К «Планёрка»» без слова «встреча» не
+/// склонить («к «Планёрке»»), а название берётся из календаря как есть.
 pub fn search_join(lang: Lang, title: &str) -> String {
     match lang {
-        Lang::Ru => format!("Подключиться к «{title}»"),
+        Lang::Ru => format!("Подключиться к встрече «{title}»"),
         Lang::En => format!("Join “{title}”"),
     }
 }
@@ -1508,13 +1523,30 @@ pub fn plaque_text_at(lang: Lang, say: &crate::plaque::Say, now: i64) -> String 
     }
 }
 
+/// Секунды с 1970 года для слов плашки («через 2 мин», «5 мин назад»): настоящие часы. В тестах своя точка отсчёта
+/// (`set_clock`): плашка «через 2 мин» не зависит от того, как быстро кадр нарисован.
+pub fn clock() -> i64 {
+    #[cfg(test)]
+    if let Some(at) = TEST_CLOCK.with(std::cell::Cell::get) {
+        return at;
+    }
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or_default()
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_CLOCK: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
+}
+
+/// Тест: часы слов плашки этого потока стоят на `at` (секунды с 1970); `None` — снова настоящие.
+#[cfg(test)]
+pub fn set_clock(at: Option<i64>) {
+    TEST_CLOCK.with(|c| c.set(at));
+}
+
 /// То же от сегодняшнего времени.
 pub fn plaque_text(lang: Lang, say: &crate::plaque::Say) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or_default();
-    plaque_text_at(lang, say, now)
+    plaque_text_at(lang, say, clock())
 }
 
 #[cfg(test)]
@@ -1645,7 +1677,11 @@ mod tests {
         );
         assert_eq!(
             (search_join(Lang::Ru, "Планёрка").as_str(), search_join(Lang::En, "Stand-up").as_str()),
-            ("Подключиться к «Планёрка»", "Join “Stand-up”")
+            ("Подключиться к встрече «Планёрка»", "Join “Stand-up”")
+        );
+        assert_eq!(
+            (meeting_until(Lang::Ru, "17:00").as_str(), meeting_until(Lang::En, "17:00").as_str()),
+            ("до 17:00", "until 17:00")
         );
         // Службы: свои имена, а Телемост — по языку.
         for (service, name) in [
@@ -1703,6 +1739,8 @@ mod tests {
                 t.meetings_outlook,
                 t.meetings_link_bad,
                 t.meetings_how,
+                t.meetings_calendars_hint,
+                t.meetings_dup,
                 t.plaque_meeting,
             ] {
                 assert!(!text.is_empty());

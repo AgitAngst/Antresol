@@ -421,6 +421,19 @@ impl Queue {
         {
             self.wait.push_front(s.plaque);
         }
+        // Важная плашка без срока («сборка упала») висит, пока её не закроют, и закрыла бы дорогу плашке со сроком (встреча
+        // через две минуты): та проходит вперёд, а прежняя встаёт первой в очереди и вернётся, когда срок выйдет.
+        if self
+            .shown
+            .as_ref()
+            .is_some_and(|s| s.held.is_none() && !s.busy && s.plaque.sticky && s.plaque.expires.is_none())
+            && let Some(at) = self.wait.iter().position(|p| p.expires.is_some() && gate.allows(p.kind))
+            && let Some(urgent) = self.wait.remove(at)
+            && let Some(old) = self.shown.take()
+        {
+            self.wait.push_front(old.plaque);
+            self.shown = Some(Shown::new(urgent, now));
+        }
         if self.shown.is_none()
             && idle
             && let Some(at) = self.wait.iter().position(|p| gate.allows(p.kind))
@@ -507,6 +520,10 @@ impl Queue {
             self.wait.drain(..).partition(|p| p.sticky && !important);
         self.wait = keep;
         out.extend(gone);
+        // Плашка, чей срок уже вышел (встреча началась), ни о чём не говорит: ни уведомлением, ни потом её не показывают.
+        let alive = |p: &Plaque| p.expires.is_none_or(|at| now < at);
+        out.retain(alive);
+        self.wait.retain(alive);
         out
     }
 }
@@ -1077,5 +1094,72 @@ mod tests {
         // Второй монитор правее: окно у его края, а не у первого.
         let second = PxRect { left: 1920, top: 0, right: 3840, bottom: 1080 };
         assert!(over((2880, 10), &second, 1.0) && !over((960, 10), &second, 1.0));
+    }
+
+    #[test]
+    fn a_plaque_with_a_deadline_goes_ahead_of_an_important_one_that_has_none() {
+        let t0 = Instant::now();
+        let meet = |key: &str, secs: u64| of(Kind::Meeting, key).sticky().expires(at(t0, secs * 1000));
+        let mut q = Queue::default();
+        // Показана важная плашка без срока («сборка упала»), её не закрыли.
+        q.push(of(Kind::Github, "build").sticky(), t0);
+        tick(&mut q, t0);
+        assert_eq!(keys(&q), ["build"]);
+        // Через минуту пришла плашка встречи со сроком: она проходит вперёд, а прежняя встаёт первой в очереди.
+        q.push(meet("meet", 180), at(t0, 60_000));
+        tick(&mut q, at(t0, 60_000));
+        assert_eq!(keys(&q), ["meet", "build"]);
+        // Срок вышел — встреча ушла сама, прежняя вернулась.
+        tick(&mut q, at(t0, 180_000));
+        assert_eq!(keys(&q), ["build"]);
+        // Другой плашке со сроком она не уступает: ждёт её срока.
+        let mut q = Queue::default();
+        q.push(meet("first", 100), t0);
+        tick(&mut q, t0);
+        q.push(meet("second", 150), at(t0, 10_000));
+        tick(&mut q, at(t0, 10_000));
+        assert_eq!(keys(&q), ["first", "second"]);
+        // Обычная плашка (на 4 с) сама уйдёт: ей уступать не надо.
+        let mut q = Queue::default();
+        q.push(of(Kind::Github, "ordinary"), t0);
+        tick(&mut q, t0);
+        q.push(meet("meet", 180), at(t0, 1_000));
+        tick(&mut q, at(t0, 1_000));
+        assert_eq!(keys(&q), ["ordinary", "meet"]);
+        // Показанная ждёт ответа («Извлекаю…») — её не трогаем.
+        let mut q = Queue::default();
+        q.push(of(Kind::Usb, "usb").sticky(), t0);
+        tick(&mut q, t0);
+        q.set_busy(true);
+        q.push(meet("meet", 180), at(t0, 1_000));
+        tick(&mut q, at(t0, 1_000));
+        assert_eq!(keys(&q), ["usb", "meet"]);
+        // Показ экрана: встрече сейчас нельзя, и важную никто не теснит.
+        let mut q = Queue::default();
+        q.push(of(Kind::Github, "build").sticky(), t0);
+        tick(&mut q, t0);
+        q.push(meet("meet", 180), at(t0, 1_000));
+        q.step(at(t0, 1_000), false, Gate::TimerOnly, true);
+        assert_eq!(keys(&q), ["build", "meet"]);
+    }
+
+    #[test]
+    fn the_panel_does_not_retell_a_plaque_whose_deadline_has_passed() {
+        let t0 = Instant::now();
+        let mut q = Queue::default();
+        q.push(of(Kind::Meeting, "meet").sticky().expires(at(t0, 100_000)), t0);
+        q.push(of(Kind::Github, "build").sticky(), t0);
+        tick(&mut q, t0);
+        assert_eq!(keys(&q), ["meet", "build"]);
+        // Панель выдвинулась с клавиатуры уже после начала встречи: о ней не напоминаем, об остальном — да.
+        let told: Vec<String> = q.take(at(t0, 101_000), true).into_iter().map(|p| p.key).collect();
+        assert_eq!(told, ["build"]);
+        // Без клавиатуры важная ждущая плашка с вышедшим сроком в очереди тоже не остаётся.
+        let mut q = Queue::default();
+        q.push(of(Kind::Github, "other").sticky(), t0);
+        tick(&mut q, t0);
+        q.push(of(Kind::Meeting, "meet").sticky().expires(at(t0, 100_000)), t0);
+        assert!(q.take(at(t0, 101_000), false).is_empty());
+        assert_eq!(keys(&q), ["other"]);
     }
 }

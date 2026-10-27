@@ -48,6 +48,33 @@ const MIN_LABEL: f32 = 70.0;
 /// Цвет: красный, зелёный, синий.
 pub type Rgb = [u8; 3];
 
+thread_local! {
+    /// Просьбы других карточек забыть текст в истории (`forget_text`). Все карточки живут в потоке окна, поэтому очередь своя у
+    /// потока: без замков и без помех между тестами.
+    static FORGET: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Тест: что в очереди на забвение (до того, как история это исполнила).
+#[cfg(test)]
+pub fn forgotten() -> Vec<String> {
+    FORGET.with(|q| q.borrow().clone())
+}
+
+/// Попросить историю забыть запись с этим текстом (по краям обрезается): «Встречи» так убирают ссылку календаря, которую
+/// владелец скопировал и добавил, — она секрет. Исполнится на ближайшем кадре. История только в памяти; копия в буфере
+/// Windows и в его журнале (Win+V) остаётся — это не наше.
+pub fn forget_text(text: &str) {
+    let text = text.trim();
+    if !text.is_empty() {
+        FORGET.with(|q| {
+            let mut q = q.borrow_mut();
+            if q.len() < 8 {
+                q.push(text.to_string());
+            }
+        });
+    }
+}
+
 /// Что запомнено. Вид текста — по самому тексту (`Clip::from_text`).
 #[derive(Debug, PartialEq)]
 enum Clip {
@@ -736,6 +763,14 @@ impl Clipboard {
         Clipboard { history: VecDeque::new(), seen: 0, filter: Filter::default(), demo_image: None, reader: None, read }
     }
 
+    /// Убрать из истории записи, о которых попросили другие карточки (`forget_text`).
+    fn apply_forgotten(&mut self) {
+        let asked = FORGET.with(|q| std::mem::take(&mut *q.borrow_mut()));
+        for text in asked {
+            self.history.retain(|e| e.clip.text().is_none_or(|t| t.trim() != text));
+        }
+    }
+
     /// Запоминание выключили: недавнее стирается (картинки с ним, текстуры освобождаются), закреплённое остаётся — оно в
     /// настройках. Чтение, что ещё идёт, ни к чему: его ответ не нужен.
     fn forget(&mut self) {
@@ -1029,6 +1064,7 @@ impl Module for Clipboard {
         if sys::demo() {
             return;
         }
+        self.apply_forgotten();
         let seq = clip::sequence();
         if !settings.clipboard {
             // Выключено: недавнее стирается, новое не берётся и с включением не всплывёт.
@@ -2375,5 +2411,22 @@ mod tests {
             "у текста под мышью вместо времени кнопки:\n{}",
             rig.text()
         );
+    }
+
+    #[test]
+    fn a_text_another_card_asks_to_forget_leaves_the_history() {
+        let mut c = Clipboard::with_reader(Arc::new(|| Ok(None)));
+        let link = "https://calendar.example.com/ical/secret/basic.ics";
+        remember(&mut c.history, Clip::from_text(link.into()));
+        remember(&mut c.history, Clip::from_text("keep me".into()));
+        forget_text(&format!("  {link} \n"));
+        forget_text("   ");
+        c.apply_forgotten();
+        let left: Vec<String> = c.history.iter().filter_map(|e| e.clip.text()).collect();
+        assert_eq!(left, ["keep me"]);
+        // Просьба исполняется один раз: скопированное снова — запоминается.
+        remember(&mut c.history, Clip::from_text(link.into()));
+        c.apply_forgotten();
+        assert_eq!(c.history.len(), 2);
     }
 }
