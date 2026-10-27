@@ -87,8 +87,10 @@ fn known_card(key: &str) -> bool {
     crate::modules::DEFAULT_SHELVES.iter().any(|(_, cards)| cards.contains(&key))
 }
 
-/// Какие плашки событий показывать у края («Живые плашки» в карточке «Панель»). В файле — строка `plaques=` со списком
-/// включённого (`bluetooth,usb,github,downloads`): нет строки — включено всё, пустая — всё выключено. Таймер выключить нельзя.
+/// Какие плашки событий показывать у края («Живые плашки» в карточке «Панель»). В файле — строка `plaques_off=` со списком
+/// выключенного (`bluetooth,usb,github,downloads`): нет строки или она пустая — включено всё. Список выключенного, а не
+/// включённого, чтобы новый вид событий (в 2.5 — «Встречи») у тех, кто уже сохранял настройки, был включён сам. Таймер
+/// выключить нельзя.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Plaques {
     pub bluetooth: bool,
@@ -104,11 +106,23 @@ impl Default for Plaques {
 }
 
 impl Plaques {
-    /// Список из файла: знакомое имя включает вид, остальное пропускается.
+    /// Список выключенного из файла: знакомое имя выключает вид, остальное пропускается.
     fn parse(value: &str) -> Plaques {
-        let on = list(value);
-        let has = |name: &str| on.iter().any(|v| v == name);
-        Plaques { bluetooth: has("bluetooth"), usb: has("usb"), github: has("github"), downloads: has("downloads") }
+        let off = list(value);
+        let has = |name: &str| off.iter().any(|v| v == name);
+        Plaques { bluetooth: !has("bluetooth"), usb: !has("usb"), github: !has("github"), downloads: !has("downloads") }
+    }
+
+    /// Включить или выключить плашки этого вида (таймер — всегда включён).
+    pub fn set(&mut self, kind: crate::plaque::Kind, on: bool) {
+        use crate::plaque::Kind;
+        match kind {
+            Kind::Bluetooth => self.bluetooth = on,
+            Kind::Usb => self.usb = on,
+            Kind::Github => self.github = on,
+            Kind::Downloads => self.downloads = on,
+            Kind::Timer => {}
+        }
     }
 
     /// Показывать ли плашки этого вида.
@@ -125,12 +139,12 @@ impl Plaques {
 }
 
 impl std::fmt::Display for Plaques {
-    /// Только включённое, по порядку: `bluetooth,usb,github,downloads`.
+    /// Только выключенное, по порядку: `bluetooth,usb,github,downloads`; всё включено — пусто.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let all =
             [("bluetooth", self.bluetooth), ("usb", self.usb), ("github", self.github), ("downloads", self.downloads)];
-        let on: Vec<&str> = all.iter().filter(|(_, on)| *on).map(|(name, _)| *name).collect();
-        f.write_str(&on.join(","))
+        let off: Vec<&str> = all.iter().filter(|(_, on)| !*on).map(|(name, _)| *name).collect();
+        f.write_str(&off.join(","))
     }
 }
 
@@ -179,7 +193,7 @@ pub struct Settings {
     pub accent: String,
     /// Пока что-то играет, спрятанная полоска шире: трек и кнопки плеера.
     pub media_strip: bool,
-    /// Какие события показывать плашками у края (`plaques=`).
+    /// Какие события показывать плашками у края (`plaques_off=` — список выключенного).
     pub plaques: Plaques,
     /// Где лежит `kamerton.exe` — для «Запустить Kamerton» в карточке «Звук»; пусто — не знаем.
     pub kamerton: String,
@@ -830,7 +844,7 @@ pub fn parse(text: &str) -> Settings {
             "clipboard" => s.clipboard = value != "false",
             "accent" if crate::look::valid(value) => s.accent = value.to_lowercase(),
             "media_strip" => s.media_strip = value == "true",
-            "plaques" => s.plaques = Plaques::parse(value),
+            "plaques_off" => s.plaques = Plaques::parse(value),
             "kamerton" => s.kamerton = value.to_string(),
             "snippet" if !value.is_empty() && s.pinned.len() < MAX_PINNED => s.pinned.push(unescape(value)),
             "clock" if s.clocks.len() < MAX_CLOCKS => {
@@ -912,7 +926,7 @@ pub fn format(s: &Settings) -> String {
         s.fullscreen_guard
     );
     out.push_str(&format!("strip={}\nexclude={}\nclipboard={}\n", s.strip, s.exclude.join(","), s.clipboard));
-    out.push_str(&format!("accent={}\nmedia_strip={}\nplaques={}\n", s.accent, s.media_strip, s.plaques));
+    out.push_str(&format!("accent={}\nmedia_strip={}\nplaques_off={}\n", s.accent, s.media_strip, s.plaques));
     if !s.kamerton.is_empty() {
         out.push_str(&format!("kamerton={}\n", s.kamerton));
     }
@@ -1122,27 +1136,42 @@ mod tests {
         assert_eq!(parse(&format(&s)), s);
     }
 
-    /// «Живые плашки»: без строки включено всё, строка `plaques=` перечисляет включённое; таймер выключить нельзя.
+    /// «Живые плашки»: без строки (и с пустой) включено всё, строка `plaques_off=` перечисляет выключенное; таймер выключить
+    /// нельзя. Список выключенного, а не включённого: новый вид событий у старого `config.txt` включён сам.
     #[test]
-    fn plaques_are_all_on_by_default_and_the_file_lists_what_is_on() {
+    fn plaques_are_all_on_by_default_and_the_file_lists_what_is_off() {
         use crate::plaque::Kind;
         let none = Plaques { bluetooth: false, usb: false, github: false, downloads: false };
         assert_eq!(parse("").plaques, Plaques::default());
+        assert_eq!(parse("plaques_off=\n").plaques, Plaques::default(), "пустая строка — выключенного нет");
         assert_eq!(
-            parse("plaques=usb, github\n").plaques,
-            Plaques { bluetooth: false, usb: true, github: true, downloads: false }
+            parse("plaques_off=usb, github\n").plaques,
+            Plaques { bluetooth: true, usb: false, github: false, downloads: true }
         );
-        assert_eq!(parse("plaques=\n").plaques, none, "пустая строка — всё выключено");
-        assert_eq!(parse("plaques=usb,what,usb\n").plaques, Plaques { usb: true, ..none }, "незнакомое пропускается");
+        assert_eq!(parse("plaques_off=bluetooth,usb,github,downloads\n").plaques, none);
+        assert_eq!(
+            parse("plaques_off=usb,what,usb\n").plaques,
+            Plaques { usb: false, ..Plaques::default() },
+            "незнакомое пропускается"
+        );
+        // Старая строка `plaques=` (список включённого, до выпуска её не было) ничего не значит: всё включено.
+        assert_eq!(parse("plaques=usb\n").plaques, Plaques::default());
         let s = Settings {
             plaques: Plaques { bluetooth: false, downloads: false, ..Plaques::default() },
             ..Default::default()
         };
-        assert!(format(&s).contains("\nplaques=usb,github\n"));
+        assert!(format(&s).contains("\nplaques_off=bluetooth,downloads\n"));
         assert_eq!(parse(&format(&s)).plaques, s.plaques);
         assert_eq!(parse(&format(&Settings::default())).plaques, Plaques::default());
-        assert!(format(&Settings::default()).contains("\nplaques=bluetooth,usb,github,downloads\n"));
+        assert!(format(&Settings::default()).contains("\nplaques_off=\n"));
         assert!(none.on(Kind::Timer) && !none.on(Kind::Usb) && Plaques::default().on(Kind::Downloads));
+        // `set` включает и выключает вид; таймер не трогает.
+        let mut p = Plaques::default();
+        p.set(Kind::Github, false);
+        p.set(Kind::Timer, false);
+        assert!(!p.on(Kind::Github) && p.on(Kind::Timer) && p.on(Kind::Usb));
+        p.set(Kind::Github, true);
+        assert_eq!(p, Plaques::default());
     }
 
     #[test]

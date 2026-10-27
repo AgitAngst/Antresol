@@ -31,8 +31,10 @@ pub struct Repo {
     pub name: String,
     pub run: Option<Run>,
     pub open_prs: Option<usize>,
-    /// Что пошло не так: «404», «403» (нет доступа или лимит), сеть.
+    /// Что пошло не так с прогонами: «404», «403» (нет доступа или лимит), сеть.
     pub error: Option<String>,
+    /// То же с пулл-реквестами: они читаются отдельно (и реже), и их сбой не мешает видеть прогоны.
+    pub pr_error: Option<String>,
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -218,8 +220,8 @@ pub fn iso_to_unix(s: &str) -> Option<i64> {
     Some(days * 86400 + hh * 3600 + mm * 60 + ss)
 }
 
-/// Только последний прогон репозитория `owner/name` — один запрос вместо двух: так следят за прогонами, пока панель
-/// спрятана (без токена GitHub даёт 60 запросов в час). Число PR не читается (`open_prs` — `None`).
+/// Только последний прогон репозитория `owner/name` — один запрос: так следят за прогонами, пока панель спрятана (без токена
+/// GitHub даёт 60 запросов в час). Число PR не читается (`open_prs` — `None`).
 pub fn read_runs(repo: &str, token: Option<&str>) -> Repo {
     let mut out = Repo { name: repo.to_string(), ..Default::default() };
     match get(&format!("/repos/{repo}/actions/runs?per_page=1"), token) {
@@ -230,15 +232,26 @@ pub fn read_runs(repo: &str, token: Option<&str>) -> Repo {
     out
 }
 
-/// Прочитать репозиторий `owner/name`: последний прогон и открытые PR.
+/// Только открытые пулл-реквесты репозитория `owner/name` — один запрос; прогон не читается (`run` — `None`). Нужны карточке, и
+/// читаются отдельно от прогонов, не чаще раза в 5 минут.
+pub fn read_prs(repo: &str, token: Option<&str>) -> Repo {
+    let mut out = Repo { name: repo.to_string(), ..Default::default() };
+    match get(&format!("/repos/{repo}/pulls?state=open&per_page=100"), token) {
+        Ok((200, body)) => out.open_prs = Some(count_prs(&body)),
+        Ok((code, _)) => out.pr_error = Some(code.to_string()),
+        Err(e) => out.pr_error = Some(e),
+    }
+    out
+}
+
+/// Прочитать репозиторий `owner/name`: последний прогон и открытые PR (два запроса; PR не читаются, если прогон не прочитался —
+/// лимит или сеть ответили бы так же).
 pub fn read(repo: &str, token: Option<&str>) -> Repo {
     let mut out = read_runs(repo, token);
     if out.error.is_none() {
-        match get(&format!("/repos/{repo}/pulls?state=open&per_page=100"), token) {
-            Ok((200, body)) => out.open_prs = Some(count_prs(&body)),
-            Ok((code, _)) => out.error = Some(code.to_string()),
-            Err(e) => out.error = Some(e),
-        }
+        let prs = read_prs(repo, token);
+        out.open_prs = prs.open_prs;
+        out.pr_error = prs.pr_error;
     }
     out
 }

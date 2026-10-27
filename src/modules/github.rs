@@ -1,5 +1,6 @@
 // Состояние GitHub: последний прогон CI и открытые пулл-реквесты своих репозиториев — только
-// чтение. Запросы — в своём потоке и не чаще раза в 5 минут (без токена GitHub даёт 60 в час).
+// чтение. Запросы — в своём потоке; без токена GitHub даёт 60 в час, поэтому на репозиторий не больше 24: прогоны — не чаще
+// раза в 5 минут (для плашек или карточки) и пулл-реквесты — не чаще раза в 5 минут и только для карточки (`Pacing`).
 // Щелчок по репозиторию — его страница Actions в браузере. CI отсюда не запускается.
 // Плашки у края (2.4): последний прогон сменил состояние — «сборка упала» (висит, пока не закроют) или «сборка прошла».
 // Пока плашки GitHub включены, прогоны читаются и при спрятанной панели (один запрос на репозиторий, без пулл-реквестов,
@@ -19,8 +20,40 @@ use crate::plaque::{self, Do, Glyph, Look, Plaque, Say};
 use crate::sys::{self, gh};
 use crate::texts::{self, Tr};
 
-/// Как часто перечитывать, пока панель открыта.
+/// Как часто читать прогоны и, отдельно, пулл-реквесты: каждое не чаще этого — 12 запросов в час на репозиторий, оба вместе 24.
 const EVERY: Duration = Duration::from_secs(300);
+
+/// Когда что читать: прогоны и пулл-реквесты ведут свои часы, а сменился список репозиториев — читать сразу.
+#[derive(Default)]
+struct Pacing {
+    asked_runs: Option<Instant>,
+    /// Для каких репозиториев прогоны читали в последний раз.
+    runs_for: Vec<String>,
+    asked_prs: Option<Instant>,
+    prs_for: Vec<String>,
+}
+
+impl Pacing {
+    /// Пора ли читать (прогоны, пулл-реквесты). Прогоны нужны плашкам и карточке, пулл-реквесты — только карточке (`card`).
+    fn due(&self, now: Instant, wanted: &[String], card: bool) -> (bool, bool) {
+        let late = |asked: Option<Instant>, was_for: &[String]| {
+            was_for != wanted || asked.is_none_or(|at| now.saturating_duration_since(at) >= EVERY)
+        };
+        (late(self.asked_runs, &self.runs_for), card && late(self.asked_prs, &self.prs_for))
+    }
+
+    /// Прочитали (или начали читать) это.
+    fn asked(&mut self, now: Instant, wanted: &[String], runs: bool, prs: bool) {
+        if runs {
+            self.asked_runs = Some(now);
+            self.runs_for = wanted.to_vec();
+        }
+        if prs {
+            self.asked_prs = Some(now);
+            self.prs_for = wanted.to_vec();
+        }
+    }
+}
 
 #[derive(Default)]
 struct Shared {
@@ -31,11 +64,18 @@ struct Shared {
 }
 
 impl Shared {
-    /// Новое чтение. Короткое (`full` ложь: только прогоны) не знает числа PR — оно остаётся прежним.
-    fn apply(&mut self, mut list: Vec<gh::Repo>, full: bool) {
-        if !full {
-            for repo in &mut list {
-                repo.open_prs = self.repos.iter().find(|r| r.name == repo.name).and_then(|r| r.open_prs);
+    /// Новое чтение. Что не читали (`runs` — прогоны, `prs` — пулл-реквесты), остаётся прежним: короткое чтение не знает ни
+    /// числа PR, ни прогона и не стирает их.
+    fn apply(&mut self, mut list: Vec<gh::Repo>, runs: bool, prs: bool) {
+        for repo in &mut list {
+            let Some(old) = self.repos.iter().find(|r| r.name == repo.name) else { continue };
+            if !runs {
+                repo.run = old.run.clone();
+                repo.error = old.error.clone();
+            }
+            if !prs {
+                repo.open_prs = old.open_prs;
+                repo.pr_error = old.pr_error.clone();
             }
         }
         self.repos = list;
@@ -53,12 +93,8 @@ pub struct Github {
     known: HashMap<String, Option<gh::Run>>,
     /// Плашки GitHub включены и репозитории есть, мы следим: иначе прежнее чтение сверять не с чем.
     watching: bool,
-    /// Когда последний раз читали (любое чтение): слежка для плашек не чаще раза в 5 минут.
-    asked: Option<Instant>,
-    /// Когда последний раз читали целиком, с пулл-реквестами: карточка при открытии не ждёт короткого чтения слежки.
-    asked_full: Option<Instant>,
-    /// Что спрашивали в последний раз: сменился список — спросить сразу.
-    asked_for: Vec<String>,
+    /// Когда что читали: прогоны и пулл-реквесты — каждое не чаще раза в 5 минут.
+    pacing: Pacing,
     /// Пишут имя нового репозитория.
     adding: String,
     /// Последние известные репозитории и токен — из настроек (refresh их не видит).
@@ -127,12 +163,13 @@ pub fn run_plaque(repo: &str, run: &gh::Run, event: RunEvent) -> Plaque {
             Plaque::new(plaque::Kind::Github, key, Glyph::Branch, Tone::Accent, Say::BuildPassed(repo.to_string()))
         }
     };
-    plaque.sub(age).button(Say::Open, Look::Secondary, Do::Open(url)).external().shelf("github")
+    plaque.sub(age).button(Say::Open, Look::Secondary, Do::Open(url.into())).external().shelf("github")
 }
 
 impl Github {
-    /// Читать в потоке. `full` — и пулл-реквесты (карточка открыта), иначе только прогоны (слежка для плашек).
-    fn fetch(&mut self, full: bool) {
+    /// Читать в потоке: `runs` — прогоны (один запрос на репозиторий), `prs` — открытые пулл-реквесты (ещё один; нужны
+    /// только карточке).
+    fn fetch(&mut self, runs: bool, prs: bool) {
         {
             let mut s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
             if s.busy {
@@ -140,11 +177,7 @@ impl Github {
             }
             s.busy = true;
         }
-        self.asked = Some(Instant::now());
-        if full {
-            self.asked_full = self.asked;
-        }
-        self.asked_for = self.wanted.clone();
+        self.pacing.asked(Instant::now(), &self.wanted, runs, prs);
         let (repos, token, shared) = (self.wanted.clone(), self.token.clone(), self.shared.clone());
         std::thread::spawn(move || {
             // Сбой чтения не должен оставить «занято» навсегда — иначе карточка замрёт.
@@ -152,15 +185,21 @@ impl Github {
                 // Демо и тесты — выдуманный мир, без сети.
                 if sys::isolated() {
                     demo()
-                } else if full {
-                    repos.iter().map(|r| gh::read(r, token.as_deref())).collect()
                 } else {
-                    repos.iter().map(|r| gh::read_runs(r, token.as_deref())).collect()
+                    let token = token.as_deref();
+                    repos
+                        .iter()
+                        .map(|r| match (runs, prs) {
+                            (true, true) => gh::read(r, token),
+                            (true, false) => gh::read_runs(r, token),
+                            _ => gh::read_prs(r, token),
+                        })
+                        .collect()
                 }
             });
             let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
             if let Ok(list) = list {
-                s.apply(list, full);
+                s.apply(list, runs, prs);
             }
             s.busy = false;
         });
@@ -189,9 +228,19 @@ fn demo() -> Vec<gh::Repo> {
         })
     };
     vec![
-        gh::Repo { name: "demo/app".into(), run: run("completed", "success", 12), open_prs: Some(2), error: None },
-        gh::Repo { name: "demo/site".into(), run: run("completed", "failure", 95), open_prs: Some(0), error: None },
-        gh::Repo { name: "demo/tool".into(), run: run("in_progress", "", 1), open_prs: Some(1), error: None },
+        gh::Repo {
+            name: "demo/app".into(),
+            run: run("completed", "success", 12),
+            open_prs: Some(2),
+            ..Default::default()
+        },
+        gh::Repo {
+            name: "demo/site".into(),
+            run: run("completed", "failure", 95),
+            open_prs: Some(0),
+            ..Default::default()
+        },
+        gh::Repo { name: "demo/tool".into(), run: run("in_progress", "", 1), open_prs: Some(1), ..Default::default() },
     ]
 }
 
@@ -223,12 +272,14 @@ impl Module for Github {
         240.0
     }
 
+    /// Карточка на открытой полке: прогоны и пулл-реквесты — каждое, когда подошло его время (не чаще раза в 5 минут).
     fn refresh(&mut self, _monitor: &str) {
         if self.wanted.is_empty() && !sys::demo() {
             return;
         }
-        if self.asked_full.is_none_or(|at| at.elapsed() >= EVERY) || self.asked_for != self.wanted {
-            self.fetch(true);
+        let (runs, prs) = self.pacing.due(Instant::now(), &self.wanted, true);
+        if runs || prs {
+            self.fetch(runs, prs);
         }
     }
 
@@ -241,8 +292,8 @@ impl Module for Github {
             self.watching = on;
             self.known.clear();
         }
-        if on && (self.asked.is_none_or(|at| at.elapsed() >= EVERY) || self.asked_for != self.wanted) {
-            self.fetch(false);
+        if on && self.pacing.due(Instant::now(), &self.wanted, false).0 {
+            self.fetch(true, false);
         }
     }
 
@@ -345,7 +396,8 @@ impl Module for Github {
                             }
                         });
                     });
-                    let detail = match (&r.run, &r.error) {
+                    let failure = r.error.as_ref().or(r.pr_error.as_ref());
+                    let detail = match (&r.run, failure) {
                         (_, Some(e)) => texts::github_error(cx.lang, e),
                         (Some(run), _) => {
                             let ago = gh::iso_to_unix(&run.updated)
@@ -538,7 +590,7 @@ mod tests {
     }
 
     fn repo(name: &str, run: Option<gh::Run>, error: Option<&str>) -> gh::Repo {
-        gh::Repo { name: name.into(), run, open_prs: Some(1), error: error.map(String::from) }
+        gh::Repo { name: name.into(), run, open_prs: Some(1), error: error.map(String::from), pr_error: None }
     }
 
     /// Чтение приходит из потока: модуль сверяет его с известным и отдаёт плашки один раз.
@@ -546,7 +598,7 @@ mod tests {
     fn a_changed_run_gives_a_plaque_once_and_the_first_read_gives_none() {
         let settings = Settings { github: vec!["demo/site".into(), "demo/tool".into()], ..Settings::default() };
         let mut github = Github::default();
-        let read = |github: &Github, list: Vec<gh::Repo>| github.shared.lock().unwrap().apply(list, true);
+        let read = |github: &Github, list: Vec<gh::Repo>| github.shared.lock().unwrap().apply(list, true, true);
         let running = gh_run(1, "in_progress", "", "t1");
         let failed = gh_run(1, "completed", "failure", "t2");
         // Первое чтение: упавший прогон уже был — молчим.
@@ -588,7 +640,7 @@ mod tests {
         let off = Settings { plaques: crate::config::Plaques { github: false, ..Default::default() }, ..on.clone() };
         let mut github = Github::default();
         let read = |github: &Github, run: gh::Run| {
-            github.shared.lock().unwrap().apply(vec![repo("demo/site", Some(run), None)], false)
+            github.shared.lock().unwrap().apply(vec![repo("demo/site", Some(run), None)], true, false)
         };
         read(&github, gh_run(1, "in_progress", "", "t1"));
         assert!(github.events(&on).is_empty());
@@ -600,8 +652,7 @@ mod tests {
         // Слежка выключалась и включалась — известное забыто, следующее чтение первое.
         read(&github, gh_run(2, "in_progress", "", "t3"));
         github.events(&on);
-        github.asked = Some(Instant::now());
-        github.asked_for = on.github.clone();
+        github.pacing.asked(Instant::now(), &on.github, true, false);
         github.background(&on);
         assert!(github.watching);
         github.background(&off);
@@ -610,35 +661,107 @@ mod tests {
         read(&github, gh_run(2, "completed", "failure", "t4"));
         assert!(github.events(&on).is_empty(), "первое чтение после включения тихое");
         // Репозиторий убрали из ответа — его не помним.
-        github.shared.lock().unwrap().apply(Vec::new(), true);
+        github.shared.lock().unwrap().apply(Vec::new(), true, true);
         github.events(&on);
         assert!(github.known.is_empty());
     }
 
-    /// Короткое чтение (только прогоны, для плашек) не знает числа PR и не стирает его у карточки.
+    /// Что не читали, то остаётся прежним: чтение прогонов не стирает число PR карточки, а чтение PR — прогон и его ошибку.
     #[test]
-    fn a_short_read_keeps_the_pull_request_count_of_the_card() {
+    fn a_read_of_only_one_kind_keeps_what_it_did_not_read() {
         let github = Github::default();
         let mut full = repo("demo/site", Some(gh_run(1, "completed", "success", "t")), None);
         full.open_prs = Some(3);
-        github.shared.lock().unwrap().apply(vec![full], true);
-        let mut short = repo("demo/site", Some(gh_run(2, "completed", "success", "t")), None);
-        short.open_prs = None;
-        github.shared.lock().unwrap().apply(vec![short], false);
+        github.shared.lock().unwrap().apply(vec![full], true, true);
+        // Прогоны одни: PR не знает — остаются прежние, а прогон новый.
+        let mut runs_only = repo("demo/site", Some(gh_run(2, "completed", "success", "t")), None);
+        runs_only.open_prs = None;
+        github.shared.lock().unwrap().apply(vec![runs_only], true, false);
+        {
+            let s = github.shared.lock().unwrap();
+            assert_eq!(s.repos[0].open_prs, Some(3));
+            assert_eq!(s.repos[0].run.as_ref().map(|r| r.id), Some(2), "а прогон — новый");
+            assert_eq!(s.version, 2);
+        }
+        // PR одни: прогона не знает — остаётся прежний, а число новое (и своя ошибка, если не прочиталось).
+        let prs_only = gh::Repo { name: "demo/site".into(), open_prs: Some(5), ..Default::default() };
+        github.shared.lock().unwrap().apply(vec![prs_only], false, true);
+        {
+            let s = github.shared.lock().unwrap();
+            assert_eq!(s.repos[0].open_prs, Some(5));
+            assert_eq!(s.repos[0].run.as_ref().map(|r| r.id), Some(2), "прогон не тронут");
+        }
+        let failed = gh::Repo { name: "demo/site".into(), pr_error: Some("403".into()), ..Default::default() };
+        github.shared.lock().unwrap().apply(vec![failed], false, true);
         let s = github.shared.lock().unwrap();
-        assert_eq!(s.repos[0].open_prs, Some(3));
-        assert_eq!(s.repos[0].run.as_ref().map(|r| r.id), Some(2), "а прогон — новый");
-        assert_eq!(s.version, 2);
+        assert_eq!((s.repos[0].open_prs, s.repos[0].pr_error.as_deref()), (None, Some("403")));
+        assert!(s.repos[0].error.is_none(), "сбой PR прогонам не мешает: плашки о сборке работают");
     }
 
-    /// Слежка читает коротко (только прогоны), но карточка при открытии всё равно читает целиком — иначе до пяти минут не было бы
-    /// числа пулл-реквестов.
+    /// Сбой пулл-реквестов (лимит) не глушит плашки о сборке: прогоны читаются отдельно.
     #[test]
-    fn opening_the_card_after_a_short_watch_read_still_reads_the_pull_requests() {
+    fn a_pull_request_failure_does_not_silence_the_build_plaques() {
+        let settings = Settings { github: vec!["demo/site".into()], ..Settings::default() };
+        let mut github = Github::default();
+        let running = gh_run(1, "in_progress", "", "t1");
+        let failed = gh_run(1, "completed", "failure", "t2");
+        github.shared.lock().unwrap().apply(vec![repo("demo/site", Some(running), None)], true, true);
+        assert!(github.events(&settings).is_empty());
+        let pr_limit = gh::Repo { name: "demo/site".into(), pr_error: Some("403".into()), ..Default::default() };
+        github.shared.lock().unwrap().apply(vec![pr_limit], false, true);
+        assert!(github.events(&settings).is_empty());
+        github.shared.lock().unwrap().apply(vec![repo("demo/site", Some(failed), None)], true, false);
+        let told = github.events(&settings);
+        assert_eq!(told.len(), 1, "упала сборка — плашка есть, хоть PR и не читаются");
+        assert!(told[0].sticky);
+    }
+
+    /// Не больше 24 запросов в час на репозиторий: прогоны — не чаще раза в 5 минут, пулл-реквесты — тоже, и только пока
+    /// карточка на виду. Считаем по часам, которыми владеет тест.
+    #[test]
+    fn reads_stay_within_twenty_four_requests_an_hour_per_repository() {
+        let wanted = vec!["demo/site".to_string()];
+        let t0 = Instant::now();
+        // За час: окно открыто всё время (читает и прогоны, и PR) или спрятано (плашки читают прогоны).
+        for card in [true, false] {
+            let mut pacing = Pacing::default();
+            let (mut runs_read, mut prs_read) = (0, 0);
+            for second in 0..3600u64 {
+                let now = t0 + Duration::from_secs(second);
+                let (runs, prs) = pacing.due(now, &wanted, card);
+                if runs || prs {
+                    pacing.asked(now, &wanted, runs, prs);
+                }
+                runs_read += usize::from(runs);
+                prs_read += usize::from(prs);
+            }
+            assert_eq!(runs_read, 12, "прогоны: раз в 5 минут");
+            assert_eq!(prs_read, if card { 12 } else { 0 }, "PR — только для карточки, раз в 5 минут");
+            assert!(runs_read + prs_read <= 24);
+        }
+        // Сменился список репозиториев — читать сразу, обоих видов; а в обычное время — по часам.
+        let mut pacing = Pacing::default();
+        pacing.asked(t0, &wanted, true, true);
+        let soon = t0 + Duration::from_secs(10);
+        assert_eq!(pacing.due(soon, &wanted, true), (false, false));
+        let more = vec!["demo/site".to_string(), "demo/tool".to_string()];
+        assert_eq!(pacing.due(soon, &more, true), (true, true));
+        assert_eq!(pacing.due(soon, &more, false), (true, false), "слежка для плашек PR не читает");
+        // Прогоны читали слежкой минуту назад, PR не читали вовсе: карточка читает только PR.
+        let mut pacing = Pacing::default();
+        pacing.asked(t0, &wanted, true, false);
+        assert_eq!(pacing.due(t0 + Duration::from_secs(60), &wanted, true), (false, true));
+    }
+
+    /// Слежка читает только прогоны, а карточка при открытии добирает пулл-реквесты, не перечитывая прогоны, что слежка прочла
+    /// минуту назад: иначе до пяти минут не было бы числа PR.
+    #[test]
+    fn opening_the_card_after_a_watch_read_reads_only_the_pull_requests() {
         let mut github = Github::default();
         let on = Settings { github: vec!["demo/site".into()], ..Settings::default() };
         github.background(&on);
-        assert!(github.asked.is_some() && github.asked_full.is_none(), "слежка — короткое чтение");
+        assert!(github.pacing.asked_runs.is_some() && github.pacing.asked_prs.is_none(), "слежка — только прогоны");
+        let runs_asked = github.pacing.asked_runs;
         let wait = |github: &Github, version: u64| {
             let start = Instant::now();
             while github.shared.lock().unwrap().version < version {
@@ -652,9 +775,10 @@ mod tests {
         };
         wait(&github, 1);
         github.refresh("");
-        assert!(github.asked_full.is_some(), "карточка прочла целиком, не дожидаясь пяти минут");
+        assert!(github.pacing.asked_prs.is_some(), "карточка прочла PR, не дожидаясь пяти минут");
+        assert_eq!(github.pacing.asked_runs, runs_asked, "а прогоны не перечитала");
         wait(&github, 2);
-        // А целиком уже читали — повторно в ближайшие пять минут не читает.
+        // И то, и другое уже читали — повторно в ближайшие пять минут не читает.
         github.refresh("");
         assert_eq!(github.shared.lock().unwrap().version, 2);
     }
@@ -664,17 +788,17 @@ mod tests {
     fn watching_needs_the_plaques_and_repositories_and_reads_the_invented_world() {
         let mut github = Github::default();
         github.background(&Settings::default());
-        assert!(!github.watching && github.asked.is_none(), "репозиториев нет — читать нечего");
+        assert!(!github.watching && github.pacing.asked_runs.is_none(), "репозиториев нет — читать нечего");
         let off = Settings {
             github: vec!["demo/site".into()],
             plaques: crate::config::Plaques { github: false, ..Default::default() },
             ..Settings::default()
         };
         github.background(&off);
-        assert!(!github.watching && github.asked.is_none(), "плашки выключены — не читаем");
+        assert!(!github.watching && github.pacing.asked_runs.is_none(), "плашки выключены — не читаем");
         let on = Settings { github: vec!["demo/site".into()], ..Settings::default() };
         github.background(&on);
-        assert!(github.watching && github.asked.is_some());
+        assert!(github.watching && github.pacing.asked_runs.is_some());
         let start = Instant::now();
         while github.shared.lock().unwrap().version == 0 {
             assert!(start.elapsed() < Duration::from_secs(3), "поток чтения не ответил");

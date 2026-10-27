@@ -287,9 +287,12 @@ pub struct Tr {
     pub plaque_build_failed: &'static str,
     pub plaque_build_passed: &'static str,
     pub plaque_downloaded: &'static str,
+    pub plaque_many: &'static str,
     pub plaque_in_downloads: &'static str,
     pub plaque_to_tray: &'static str,
     pub plaque_close: &'static str,
+    pub plaque_gone: &'static str,
+    pub plaque_ejecting: &'static str,
 }
 
 const RU: Tr = Tr {
@@ -560,9 +563,9 @@ const RU: Tr = Tr {
     plaques: "Живые плашки",
     plaques_usb: "Флешки",
     plaques_downloads: "Загрузки",
-    plaque_connected: "{} подключены",
+    plaque_connected: "{}: подключено",
     plaque_bt_charge: "Bluetooth · заряд {} %",
-    plaque_low: "{} разряжается",
+    plaque_low: "{}: разряжается",
     plaque_battery: "Заряд {} %",
     plaque_usb: "Флешка «{}»",
     plaque_usb_in: "{} · вставлена",
@@ -572,10 +575,13 @@ const RU: Tr = Tr {
     plaque_busy: "Не извлечь: диск занят",
     plaque_build_failed: "{}: сборка упала",
     plaque_build_passed: "{}: сборка прошла",
-    plaque_downloaded: "{} скачан",
+    plaque_downloaded: "{}: скачано",
+    plaque_many: "Скачано файлов: {}",
     plaque_in_downloads: "{} · Загрузки",
     plaque_to_tray: "В лоток",
     plaque_close: "Закрыть",
+    plaque_gone: "Флешку уже вынули",
+    plaque_ejecting: "Извлекаю…",
 };
 
 const EN: Tr = Tr {
@@ -846,9 +852,9 @@ const EN: Tr = Tr {
     plaques: "Live plaques",
     plaques_usb: "USB drives",
     plaques_downloads: "Downloads",
-    plaque_connected: "{} connected",
+    plaque_connected: "{}: connected",
     plaque_bt_charge: "Bluetooth · battery {}%",
-    plaque_low: "{} is running low",
+    plaque_low: "{}: running low",
     plaque_battery: "Battery {}%",
     plaque_usb: "USB drive “{}”",
     plaque_usb_in: "{} · plugged in",
@@ -858,10 +864,13 @@ const EN: Tr = Tr {
     plaque_busy: "Can’t eject: the drive is busy",
     plaque_build_failed: "{}: build failed",
     plaque_build_passed: "{}: build passed",
-    plaque_downloaded: "{} downloaded",
+    plaque_downloaded: "{}: downloaded",
+    plaque_many: "{} files downloaded",
     plaque_in_downloads: "{} · Downloads",
     plaque_to_tray: "To tray",
     plaque_close: "Close",
+    plaque_gone: "The drive is already gone",
+    plaque_ejecting: "Ejecting…",
 };
 
 pub fn tr(lang: Lang) -> &'static Tr {
@@ -1314,6 +1323,8 @@ pub fn plaque_text_at(lang: Lang, say: &crate::plaque::Say, now: i64) -> String 
         Say::UsbIn(bytes) => with(t.plaque_usb_in, &plaque_size(lang, *bytes)),
         Say::Safe => t.plaque_safe.to_string(),
         Say::Busy => t.plaque_busy.to_string(),
+        Say::Ejecting => t.plaque_ejecting.to_string(),
+        Say::Gone => t.plaque_gone.to_string(),
         Say::BuildFailed(repo) => with(t.plaque_build_failed, repo),
         Say::BuildPassed(repo) => with(t.plaque_build_passed, repo),
         Say::RunAge { branch, at } => {
@@ -1325,9 +1336,11 @@ pub fn plaque_text_at(lang: Lang, say: &crate::plaque::Say, now: i64) -> String 
             }
         }
         Say::Downloaded(name) => with(t.plaque_downloaded, name),
+        Say::DownloadedMany(count) => with(t.plaque_many, &count.to_string()),
         Say::InDownloads(bytes) => with(t.plaque_in_downloads, &plaque_size(lang, *bytes)),
         Say::Failed(name) => format!("{}: {name}", t.failed),
         Say::Open => t.plaque_open.to_string(),
+        Say::Reveal => t.tray_reveal.to_string(),
         Say::Eject => t.plaque_eject.to_string(),
         Say::ToTray => t.plaque_to_tray.to_string(),
         Say::Done => t.done.to_string(),
@@ -1384,21 +1397,25 @@ mod tests {
         let words = |lang: Lang, say: Say| plaque_text_at(lang, &say, 10_000);
         let gib = 1024u64 * 1024 * 1024;
         let cases: Vec<(Say, &str, &str)> = vec![
-            (Say::Connected("Headphones".into()), "Headphones подключены", "Headphones connected"),
+            (Say::Connected("Headphones".into()), "Headphones: подключено", "Headphones: connected"),
             (Say::BtCharge(Some(80)), "Bluetooth · заряд 80 %", "Bluetooth · battery 80%"),
             (Say::BtCharge(None), "Bluetooth", "Bluetooth"),
-            (Say::Low("Mouse".into()), "Mouse разряжается", "Mouse is running low"),
+            (Say::Low("Mouse".into()), "Mouse: разряжается", "Mouse: running low"),
             (Say::Battery(12), "Заряд 12 %", "Battery 12%"),
             (Say::Usb("DEMO".into()), "Флешка «DEMO»", "USB drive “DEMO”"),
             (Say::UsbIn(32 * gib), "32 ГБ · вставлена", "32 GB · plugged in"),
             (Say::Safe, "Можно вынимать", "Safe to remove"),
             (Say::Busy, "Не извлечь: диск занят", "Can’t eject: the drive is busy"),
+            (Say::Ejecting, "Извлекаю…", "Ejecting…"),
+            (Say::Gone, "Флешку уже вынули", "The drive is already gone"),
             (Say::BuildFailed("demo/site".into()), "demo/site: сборка упала", "demo/site: build failed"),
             (Say::BuildPassed("demo/site".into()), "demo/site: сборка прошла", "demo/site: build passed"),
-            (Say::Downloaded("report.pdf".into()), "report.pdf скачан", "report.pdf downloaded"),
+            (Say::Downloaded("report.pdf".into()), "report.pdf: скачано", "report.pdf: downloaded"),
+            (Say::DownloadedMany(3), "Скачано файлов: 3", "3 files downloaded"),
             (Say::InDownloads(1_258_291), "1,2 МБ · Загрузки", "1.2 MB · Downloads"),
             (Say::Failed("report.pdf".into()), "Не получилось: report.pdf", "Failed: report.pdf"),
             (Say::Open, "Открыть", "Open"),
+            (Say::Reveal, "Показать в папке", "Show in folder"),
             (Say::Eject, "Извлечь", "Eject"),
             (Say::ToTray, "В лоток", "To tray"),
             (Say::Done, "Готово", "Done"),

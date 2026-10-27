@@ -1,10 +1,13 @@
 // Bluetooth: сопряжённые устройства — подключено ли, заряд. Перечисление идёт через SetupAPI и может
 // занять заметное время — в своём потоке, окно читает готовое. Подключать — в «Параметрах Windows».
-// Плашки у края (2.4): устройство подключилось («Наушники подключены», заряд) и разряжается (15 % и ниже, раз за разряд).
+// Плашки у края (2.4): аудиоустройство подключилось («Наушники: подключено», заряд) и любое устройство разряжается (15 % и
+// ниже, раз за разряд: «Мышь: разряжается»). О мыши и клавиатуре «подключено» не говорят — они засыпают и просыпаются сами, и
+// каждое пробуждение было бы плашкой. Устройство считается отключённым, когда оно не подключено в двух чтениях подряд: после
+// сна Windows отвечает неполным списком, и одно такое чтение не должно давать ложных «подключено».
 // Для этого, пока плашки Bluetooth включены, устройства читаются и при спрятанной панели — раз в несколько секунд; первое
 // чтение (после запуска и после включения плашек) ничего не объявляет: плашка только о новом.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -24,11 +27,13 @@ const WATCH_EVERY: Duration = Duration::from_secs(5);
 /// выше второго, о разряде не повторяют.
 pub const LOW: u8 = 15;
 pub const RECOVERED: u8 = 20;
+/// Сколько чтений подряд подключённое устройство должно быть не подключено, чтобы считаться отключённым.
+const OFF_READS: u8 = 2;
 
 /// Что изменилось у устройства между двумя чтениями.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Change {
-    /// Стало подключённым (раньше не было в списке или не было подключено).
+    /// Аудиоустройство стало подключённым (раньше не было в списке или не было подключено).
     Connected(bt::Device),
     /// Заряд упал до [`LOW`] и ниже — первый раз с тех пор, как был выше [`RECOVERED`].
     Low(bt::Device),
@@ -48,7 +53,8 @@ pub fn changes(prev: Option<&[bt::Device]>, now: &[bt::Device], warned: &mut Has
             }
             Some(prev) => {
                 let was = prev.iter().find(|p| p.address == d.address);
-                if d.connected && was.is_none_or(|p| !p.connected) {
+                // Только аудио: мышь и клавиатура засыпают и просыпаются сами — каждое пробуждение было бы плашкой.
+                if d.connected && d.audio && was.is_none_or(|p| !p.connected) {
                     out.push(Change::Connected(d.clone()));
                 }
                 if low && warned.insert(d.address) {
@@ -58,6 +64,48 @@ pub fn changes(prev: Option<&[bt::Device]>, now: &[bt::Device], warned: &mut Has
         }
         if d.battery.is_some_and(|b| b > RECOVERED) {
             warned.remove(&d.address);
+        }
+    }
+    out
+}
+
+/// Какими считать устройства после нового чтения `now`: подключённое, что в одном чтении пропало или оказалось неподключённым,
+/// ещё подключено (после сна Windows отвечает неполным списком); в двух подряд — отключено. `off` — сколько чтений подряд
+/// устройства (по адресу) не подключены. Первое чтение (`prev` — `None`) берётся как есть.
+pub fn settle(prev: Option<&[bt::Device]>, now: Vec<bt::Device>, off: &mut HashMap<u64, u8>) -> Vec<bt::Device> {
+    let Some(prev) = prev else {
+        off.clear();
+        return now;
+    };
+    let was_connected = |address: u64| prev.iter().find(|p| p.address == address).filter(|p| p.connected);
+    let listed: HashSet<u64> = now.iter().map(|d| d.address).collect();
+    let mut out = Vec::with_capacity(now.len());
+    for d in now {
+        match was_connected(d.address) {
+            Some(before) if !d.connected => {
+                let reads = off.entry(d.address).or_insert(0);
+                *reads += 1;
+                if *reads >= OFF_READS {
+                    off.remove(&d.address);
+                    out.push(d);
+                } else {
+                    out.push(before.clone());
+                }
+            }
+            _ => {
+                off.remove(&d.address);
+                out.push(d);
+            }
+        }
+    }
+    // Подключённое, что вовсе пропало из списка: так же — пока не в двух чтениях подряд.
+    for gone in prev.iter().filter(|p| p.connected && !listed.contains(&p.address)) {
+        let reads = off.entry(gone.address).or_insert(0);
+        *reads += 1;
+        if *reads >= OFF_READS {
+            off.remove(&gone.address);
+        } else {
+            out.push(gone.clone());
         }
     }
     out
@@ -96,8 +144,11 @@ struct Shared {
     list: Vec<bt::Device>,
     loaded: bool,
     busy: bool,
-    /// Прошлое чтение, с ним сверяют новое; `None` — следующее чтение первое и ничего не объявит.
+    /// Какими считали устройства после прошлого чтения (`settle`), с ними сверяют новое; `None` — следующее чтение первое и
+    /// ничего не объявит.
     prev: Option<Vec<bt::Device>>,
+    /// Сколько чтений подряд подключённое устройство не подключено (по адресу).
+    off: HashMap<u64, u8>,
     /// У кого о разряде уже сказали.
     warned: HashSet<u64>,
     /// Изменения, что ещё не стали плашками.
@@ -105,11 +156,12 @@ struct Shared {
 }
 
 impl Shared {
-    /// Новое чтение: сверить с прошлым, а список — в карточку.
+    /// Новое чтение: сверить с прошлым, а список как есть — в карточку.
     fn apply(&mut self, list: Vec<bt::Device>) {
-        let found = changes(self.prev.as_deref(), &list, &mut self.warned);
+        let believed = settle(self.prev.as_deref(), list.clone(), &mut self.off);
+        let found = changes(self.prev.as_deref(), &believed, &mut self.warned);
         self.pending.extend(found);
-        self.prev = Some(list.clone());
+        self.prev = Some(believed);
         self.list = list;
         self.loaded = true;
     }
@@ -163,7 +215,9 @@ impl Module for Bluetooth {
         let on = settings.plaques.on(plaque::Kind::Bluetooth);
         if on != self.watching {
             self.watching = on;
-            self.shared.lock().unwrap_or_else(|e| e.into_inner()).prev = None;
+            let mut shared = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+            shared.prev = None;
+            shared.off.clear();
         }
         if on && self.read_at.is_none_or(|at| at.elapsed() >= WATCH_EVERY) {
             self.read();
@@ -279,6 +333,11 @@ mod tests {
         bt::Device { name: name.into(), connected, battery, address, audio: false }
     }
 
+    /// Наушники, колонки: аудиоустройство.
+    fn audio(address: u64, name: &str, connected: bool, battery: Option<u8>) -> bt::Device {
+        bt::Device { audio: true, ..device(address, name, connected, battery) }
+    }
+
     /// Первое чтение ничего не объявляет — ни подключённых, ни севших; кто уже сел, о том не скажут и потом.
     #[test]
     fn the_first_read_announces_nothing_and_marks_the_low_ones_as_told() {
@@ -290,17 +349,82 @@ mod tests {
     }
 
     #[test]
-    fn a_device_that_became_connected_is_announced_once() {
+    fn an_audio_device_that_became_connected_is_announced_once() {
         let mut warned = HashSet::new();
-        let off = [device(1, "Headphones", false, None), device(2, "Mouse", true, Some(60))];
-        let on = [device(1, "Headphones", true, Some(80)), device(2, "Mouse", true, Some(60))];
+        let off = [audio(1, "Headphones", false, None), device(2, "Mouse", true, Some(60))];
+        let on = [audio(1, "Headphones", true, Some(80)), device(2, "Mouse", true, Some(60))];
         assert_eq!(changes(Some(&off), &on, &mut warned), [Change::Connected(on[0].clone())]);
         assert!(changes(Some(&on), &on, &mut warned).is_empty(), "ещё раз то же — не событие");
         // Отключилось и подключилось снова — снова событие; новое сопряжённое сразу подключённое — тоже.
         assert!(changes(Some(&on), &off, &mut warned).is_empty(), "отключение плашки не даёт");
         assert_eq!(changes(Some(&off), &on, &mut warned).len(), 1);
-        let fresh = [on[0].clone(), on[1].clone(), device(3, "Keyboard", true, None)];
+        let fresh = [on[0].clone(), on[1].clone(), audio(3, "Speaker", true, None)];
         assert_eq!(changes(Some(&on), &fresh, &mut warned), [Change::Connected(fresh[2].clone())]);
+    }
+
+    /// Мышь и клавиатура засыпают и просыпаются сами: «подключено» о них не говорят, а «разряжается» — да.
+    #[test]
+    fn a_mouse_or_keyboard_waking_up_is_not_news_but_a_flat_battery_is() {
+        let mut warned = HashSet::new();
+        let asleep = [device(2, "Mouse", false, None), device(3, "Keyboard", false, None)];
+        let awake = [device(2, "Mouse", true, Some(60)), device(3, "Keyboard", true, Some(9))];
+        let told = changes(Some(&asleep), &awake, &mut warned);
+        assert_eq!(told, [Change::Low(awake[1].clone())], "проснулись — молча; у клавиатуры 9 % — разряжается");
+    }
+
+    /// Устройство, пропавшее или неподключённое в одном чтении, ещё подключено; в двух подряд — отключено.
+    #[test]
+    fn a_device_is_off_only_after_two_reads_without_it_connected() {
+        let mut off = HashMap::new();
+        // Порядок в ответе не важен (пропавшее ещё подключённым идёт в конец): сравниваем по адресам.
+        let sorted = |mut list: Vec<bt::Device>| {
+            list.sort_by_key(|d| d.address);
+            list
+        };
+        let on = vec![audio(1, "Headphones", true, Some(80)), device(2, "Mouse", true, Some(60))];
+        // Первое чтение — как есть.
+        assert_eq!(settle(None, on.clone(), &mut off), on);
+        // Наушники: в списке, но «не подключены» один раз — всё ещё подключены (с прежним зарядом).
+        let blip = vec![audio(1, "Headphones", false, None), device(2, "Mouse", true, Some(60))];
+        assert_eq!(settle(Some(&on), blip.clone(), &mut off), on);
+        // Вернулись — счёт сброшен.
+        assert_eq!(settle(Some(&on), on.clone(), &mut off), on);
+        assert!(off.is_empty());
+        // Второй раз подряд — отключены.
+        assert_eq!(settle(Some(&on), blip.clone(), &mut off), on);
+        let after = settle(Some(&on), blip.clone(), &mut off);
+        assert_eq!(after, blip, "в двух чтениях подряд — отключены");
+        assert!(off.is_empty());
+        // Пропал из списка вовсе: так же — одно чтение не в счёт, два — убран.
+        let one_left = vec![device(2, "Mouse", true, Some(60))];
+        assert_eq!(sorted(settle(Some(&on), one_left.clone(), &mut off)), on);
+        assert_eq!(settle(Some(&on), one_left.clone(), &mut off), one_left);
+        // Не подключённое и раньше — без отсрочки.
+        let was_off = vec![audio(1, "Headphones", false, None)];
+        assert_eq!(settle(Some(&was_off), was_off.clone(), &mut off), was_off);
+        assert!(off.is_empty());
+    }
+
+    /// Сон: одно чтение без наушников и снова они — ложного «подключено» нет; настоящее отключение и возвращение — есть.
+    #[test]
+    fn a_sleep_blip_does_not_announce_the_headphones_again() {
+        let mut warned = HashSet::new();
+        let mut off = HashMap::new();
+        let on = vec![audio(1, "Headphones", true, Some(80))];
+        let mut believed = settle(None, on.clone(), &mut off);
+        let announced = std::cell::Cell::new(0usize);
+        let mut read = |list: Vec<bt::Device>, believed: &mut Vec<bt::Device>| {
+            let next = settle(Some(believed), list, &mut off);
+            announced.set(announced.get() + changes(Some(believed), &next, &mut warned).len());
+            *believed = next;
+        };
+        read(vec![], &mut believed);
+        read(on.clone(), &mut believed);
+        assert_eq!(announced.get(), 0, "одно пустое чтение — не отключение");
+        read(vec![], &mut believed);
+        read(vec![], &mut believed);
+        read(on.clone(), &mut believed);
+        assert_eq!(announced.get(), 1, "два пустых чтения подряд — отключились; вернулись — подключено");
     }
 
     /// «Разряжается» — раз за разряд: заряд упал до 15 % и ниже, повторов нет, пока не поднимется выше 20 %.
@@ -355,9 +479,9 @@ mod tests {
         let mut module = Bluetooth::default();
         let on = Settings::default();
         let apply = |module: &Bluetooth, list: Vec<bt::Device>| module.shared.lock().unwrap().apply(list);
-        apply(&module, vec![device(1, "Headphones", false, None)]);
+        apply(&module, vec![audio(1, "Headphones", false, None)]);
         assert!(module.events(&on).is_empty(), "первое чтение тихое");
-        apply(&module, vec![device(1, "Headphones", true, Some(80))]);
+        apply(&module, vec![audio(1, "Headphones", true, Some(80))]);
         let first = module.events(&on);
         assert_eq!(first.len(), 1);
         assert!(module.events(&on).is_empty(), "второй раз то же не отдаётся");
@@ -366,8 +490,10 @@ mod tests {
             plaques: crate::config::Plaques { bluetooth: false, ..Default::default() },
             ..Settings::default()
         };
-        apply(&module, vec![device(1, "Headphones", false, None)]);
-        apply(&module, vec![device(1, "Headphones", true, Some(80))]);
+        // Отключились (два чтения подряд) и подключились снова.
+        apply(&module, vec![audio(1, "Headphones", false, None)]);
+        apply(&module, vec![audio(1, "Headphones", false, None)]);
+        apply(&module, vec![audio(1, "Headphones", true, Some(80))]);
         assert!(module.events(&off).is_empty());
         assert!(module.events(&on).is_empty(), "не копится");
         // Слежка: включили — первое чтение ничего не объявит (прошлого нет), выключили — и так забыто.

@@ -113,13 +113,24 @@ pub fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// То же для пути или имени как есть: имя файла с непарным суррогатом в текст не переводится — оно искажается.
+pub fn wide_os(s: &std::ffi::OsStr) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    s.encode_wide().chain(std::iter::once(0)).collect()
+}
+
 /// Открыть как двойным щелчком: программу, папку, файл или адрес. `args` — только для программ.
 pub fn launch(target: &str, args: &str) -> Result<(), String> {
-    if blocked(&format!("launch {target} {args}")) {
+    launch_os(std::ffi::OsStr::new(target), std::ffi::OsStr::new(args))
+}
+
+/// То же для пути как есть (`OsStr`): файл, чьё имя не переводится в текст без потерь, открывается тоже.
+pub fn launch_os(target: &std::ffi::OsStr, args: &std::ffi::OsStr) -> Result<(), String> {
+    if blocked(&format!("launch {} {}", target.to_string_lossy(), args.to_string_lossy())) {
         return Ok(());
     }
     real_write("ShellExecuteW");
-    let (t, a) = (wide(target), wide(args));
+    let (t, a) = (wide_os(target), wide_os(args));
     let args = if args.is_empty() { PCWSTR::null() } else { PCWSTR(a.as_ptr()) };
     let h = unsafe { ShellExecuteW(None, PCWSTR::null(), PCWSTR(t.as_ptr()), args, PCWSTR::null(), SW_SHOWNORMAL) };
     // По договору ShellExecute ответ больше 32 — успех.
@@ -559,12 +570,10 @@ mod tests {
         assert_eq!(net::set_vpn("guard-test-vpn", true), Ok(()));
         assert_eq!(nightlight::set(true), Ok(()));
         assert_eq!(clip::write_text("guard-test"), Ok(()));
-        assert_eq!(
-            usb::eject(r"Y:\"),
-            Ok(()),
-            "выдуманный мир: нет такого тома — извлекать нечего, и всё равно «готово»"
-        );
-        assert_eq!(shell::drag_file(r"C:\guard-test\file.txt"), Ok(()));
+        let guard_drive = usb::Volume::invented(r"Y:\", "GUARD", 1 << 30);
+        usb::fake_add(guard_drive.clone());
+        assert_eq!(usb::eject(r"Y:\", guard_drive.serial), Ok(()), "выдуманный мир: том извлекается за заслоном");
+        assert_eq!(shell::drag_file(std::path::Path::new(r"C:\guard-test\file.txt")), Ok(()));
         let mut dib = vec![0u8; 40];
         dib[0..4].copy_from_slice(&40u32.to_le_bytes());
         dib[4..8].copy_from_slice(&2i32.to_le_bytes());
