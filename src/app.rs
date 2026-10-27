@@ -59,10 +59,14 @@ const NUM_KEYS: [egui::Key; 9] = [
 const GAP: f32 = 10.0;
 /// Задержка выезда в настройках — чипами, мс.
 const DELAYS: [u32; 4] = [0, 150, 300, 600];
-/// Полоска у края, пока панель спрятана: ширина и высота в точках.
+/// Полоска у края, пока панель спрятана: ширина и высота в точках при размере 100 % (`Settings::strip_scale`).
 const STRIP: Vec2 = Vec2::new(120.0, 5.0);
 /// Полоска, пока мышь у края и идёт отсчёт выезда: шире и наполняется.
 const STRIP_HOT: Vec2 = Vec2::new(160.0, 6.0);
+/// Чипы настроек края: зона вдоль края (%, 0 — весь край), толщина зоны (пикс.), размер полоски (%).
+const EDGE_ZONES: [u32; 4] = [100, 150, 200, 0];
+const EDGE_DEPTHS: [u32; 4] = [1, 2, 4, 8];
+const STRIP_SCALES: [u32; 4] = [100, 150, 200, 300];
 /// Полоска с медиа: обложка, трек и три кнопки.
 const MEDIA_STRIP: Vec2 = Vec2::new(372.0, 34.0);
 /// Плашка у края — событие, пока панель спрятана: значок, название и пояснение, до двух кнопок (`crate::plaque`).
@@ -562,9 +566,23 @@ impl App {
         match self.strip_kind {
             StripKind::Media => MEDIA_STRIP,
             StripKind::Plaque => PLAQUE,
-            _ if self.strip_fill.is_some() => STRIP_HOT,
-            _ => STRIP,
+            _ => self.plain_size(self.strip_fill.is_some()),
         }
+    }
+
+    /// Простая полоска у края в размере из настроек; `hot` — идёт отсчёт выезда.
+    fn plain_size(&self, hot: bool) -> Vec2 {
+        (if hot { STRIP_HOT } else { STRIP }) * (self.settings.strip_scale as f32 / 100.0)
+    }
+
+    /// Мышь над простой полоской у края (спрятанная панель): наведение на полоску выдвигает панель, как край.
+    fn over_plain_strip(&self, cursor: (i32, i32), ppp: f32) -> bool {
+        if self.edge.shown || self.strip_kind != StripKind::Plain {
+            return false;
+        }
+        let Some((pos, size)) = self.placed else { return false };
+        let px = |v: f32| (v * ppp).round() as i32;
+        panel::inside(cursor, (px(pos.x), px(pos.y), px(pos.x + size.x), px(pos.y + size.y)))
     }
 
     /// Отдать команду всем модулям (`device` — монитор панели); их уведомления — на экран, изменённые настройки — в файл.
@@ -911,7 +929,11 @@ impl App {
         // Мышь над плашкой — не у края панели: бросок мыши вверх через плашку не должен выдвигать панель и превращать её в
         // уведомление.
         let over_plaque = self.plaque_drawn.is_some() && plaque::over(cursor, &m.rect, ppp);
-        let at_edge = plaque_ui::counts_as_edge(panel::at_edge(cursor, m.rect.top, left, right), over_plaque);
+        let (zone_left, zone_right) =
+            panel::edge_span((m.rect.left, m.rect.right), (left, right), self.settings.edge_zone);
+        let near = panel::at_edge(cursor, m.rect.top, self.settings.edge_depth, zone_left, zone_right)
+            || self.over_plain_strip(cursor, ppp);
+        let at_edge = plaque_ui::counts_as_edge(near, over_plaque);
         let excluded = self.foreground.as_deref().is_some_and(|e| self.settings.excluded(e));
         let fullscreen = self.settings.fullscreen_guard && monitor::fullscreen_on(m.rect);
         self.strip_on = self.settings.strip && !excluded && !fullscreen;
@@ -1267,6 +1289,36 @@ impl App {
         {
             self.open_scene(i, false, View::Settings);
         }
+    }
+
+    /// Край, от которого выезжает панель: зона вдоль края, её толщина и размер видимой полоски — чипами, как «Выезжать через».
+    /// Значение, вписанное в `config.txt` руками и не совпавшее ни с одним чипом, остаётся: просто ни один чип не выбран.
+    fn edge_ui(&mut self, ui: &mut Ui) {
+        let t = texts::tr(self.lang());
+        let weak = Palette::of(ui).weak;
+        let pct: Vec<String> = EDGE_ZONES.iter().map(|z| format!("{z} %")).collect();
+        let opts: Vec<(u32, &str)> =
+            EDGE_ZONES.iter().zip(&pct).map(|(z, l)| (*z, if *z == 0 { t.edge_whole } else { l.as_str() })).collect();
+        ui.horizontal(|ui| {
+            ui.label(t.edge_zone).on_hover_text(t.edge_zone_hint);
+            modules::chips(ui, &mut self.settings.edge_zone, &opts);
+        });
+        let labels: Vec<String> = EDGE_DEPTHS.iter().map(|d| d.to_string()).collect();
+        let opts: Vec<(u32, &str)> = EDGE_DEPTHS.iter().zip(&labels).map(|(d, l)| (*d, l.as_str())).collect();
+        ui.horizontal(|ui| {
+            ui.label(t.edge_depth).on_hover_text(t.edge_depth_hint);
+            modules::chips(ui, &mut self.settings.edge_depth, &opts);
+            ui.label(egui::RichText::new(t.px).color(weak));
+        });
+        let labels: Vec<String> = STRIP_SCALES.iter().map(|s| s.to_string()).collect();
+        let opts: Vec<(u32, &str)> = STRIP_SCALES.iter().zip(&labels).map(|(s, l)| (*s, l.as_str())).collect();
+        ui.add_enabled_ui(self.settings.strip, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(t.strip_scale);
+                modules::chips(ui, &mut self.settings.strip_scale, &opts);
+                ui.label(egui::RichText::new("%").color(weak));
+            });
+        });
     }
 
     /// «Не выезжать над программами»: список с крестиками и «Добавить» последнюю программу на
@@ -2235,6 +2287,7 @@ impl App {
                     modules::chips(ui, &mut self.settings.show_delay_ms, &opts);
                     ui.label(egui::RichText::new(t.ms).color(Palette::of(ui).weak));
                 });
+                self.edge_ui(ui);
                 ui.horizontal(|ui| {
                     ui.label(t.hide_delay);
                     ui.add(
@@ -2933,13 +2986,17 @@ impl App {
         let corner = CornerRadius { nw: 0, ne: 0, sw: 3, se: 3 };
         match self.strip_fill {
             Some(fill) => {
-                let rect = Rect::from_min_size(Pos2::ZERO, STRIP_HOT);
-                ui.painter().rect_filled(rect, corner, p.raised);
-                let done = Rect::from_min_size(Pos2::ZERO, Vec2::new(STRIP_HOT.x * fill, STRIP_HOT.y));
+                let hot = self.plain_size(true);
+                ui.painter().rect_filled(Rect::from_min_size(Pos2::ZERO, hot), corner, p.raised);
+                let done = Rect::from_min_size(Pos2::ZERO, Vec2::new(hot.x * fill, hot.y));
                 ui.painter().rect_filled(done, corner, p.accent);
             }
             None => {
-                ui.painter().rect_filled(Rect::from_min_size(Pos2::ZERO, STRIP), corner, p.border_strong);
+                ui.painter().rect_filled(
+                    Rect::from_min_size(Pos2::ZERO, self.plain_size(false)),
+                    corner,
+                    p.border_strong,
+                );
             }
         }
     }
@@ -7356,6 +7413,52 @@ mod tests {
         rig.app.strip_kind = StripKind::Off;
         rig.app.place(&rig.ctx, 1.0, 0.0);
         assert!(rig.app.placed.unwrap().0.x > 1920.0);
+    }
+
+    /// Полоска у края — в размере из настроек (по умолчанию 120 × 5, как было); наведение на неё выдвигает панель, как край.
+    #[test]
+    fn the_plain_strip_scales_and_hovering_it_counts_as_the_edge() {
+        let dev = r"\\.\TEST-PLAIN-STRIP";
+        let mut rig = Rig::new();
+        let rect = monitor::PxRect { left: 0, top: 0, right: 1920, bottom: 1080 };
+        rig.app.monitors = vec![monitor::Monitor { device: dev.into(), rect, primary: true, handle: 0 }];
+        rig.app.settings.monitor = dev.into();
+        rig.app.strip_kind = StripKind::Plain;
+        rig.app.place(&rig.ctx, 1.0, 0.0);
+        assert_eq!(rig.app.placed, Some((Pos2::new(900.0, 0.0), Vec2::new(120.0, 5.0))), "по умолчанию — как было");
+        assert!(rig.app.over_plain_strip((960, 4), 1.0) && !rig.app.over_plain_strip((960, 5), 1.0));
+        rig.app.settings.strip_scale = 200;
+        rig.app.place(&rig.ctx, 1.0, 0.0);
+        assert_eq!(rig.app.placed, Some((Pos2::new(840.0, 0.0), Vec2::new(240.0, 10.0))));
+        // Масштаб экрана 150 %: окно в точках, мышь в пикселях.
+        assert!(rig.app.over_plain_strip((1300, 14), 1.5) && !rig.app.over_plain_strip((1300, 15), 1.5));
+        // Медиа на полоске и плашка — не край: там кнопки.
+        rig.app.strip_kind = StripKind::Media;
+        assert!(!rig.app.over_plain_strip((960, 4), 1.0));
+        rig.app.strip_kind = StripKind::Plain;
+        rig.app.edge.shown = true;
+        assert!(!rig.app.over_plain_strip((960, 4), 1.0), "выдвинутая панель — уже не полоска");
+    }
+
+    /// Настройки края в «Панели»: зона, толщина и размер полоски — чипами; выбранное по умолчанию — прежнее.
+    #[test]
+    fn the_settings_card_has_edge_zone_rows() {
+        for (lang, words) in [
+            (Lang::En, ["Edge zone", "Whole edge", "Zone depth", "Strip size"]),
+            (Lang::Ru, ["Зона у края", "Весь край", "Толщина зоны", "Размер полоски"]),
+        ] {
+            let mut rig = Rig::new();
+            // Высокое окно — весь столбец «Панель» на виду, без прокрутки.
+            rig.app.settings.height = 900.0;
+            rig.size.y = 900.0;
+            rig.app.settings.common.language = lang;
+            rig.app.view = View::Settings;
+            rig.settle();
+            let text = painted(&rig);
+            for word in words {
+                assert!(text.contains(word), "нет «{word}»");
+            }
+        }
     }
 
     /// «Живые плашки» в «Панели»: подпись и по чипу на вид событий, каждый пишет в настройки; таймера среди них нет.

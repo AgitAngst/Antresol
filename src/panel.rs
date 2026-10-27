@@ -148,10 +148,27 @@ impl Edge {
     }
 }
 
-/// Мышь у края: на верхней строке пикселей монитора и между левым и правым краем панели.
+/// Мышь у края: в верхних `depth` строках пикселей монитора (хотя бы одна) и между `left` и `right` (`edge_span`).
 /// Выше края — уже другой монитор, там панели нет.
-pub fn at_edge(cursor: (i32, i32), monitor_top: i32, left: i32, right: i32) -> bool {
-    cursor.1 == monitor_top && cursor.0 >= left && cursor.0 < right
+pub fn at_edge(cursor: (i32, i32), monitor_top: i32, depth: u32, left: i32, right: i32) -> bool {
+    let depth = depth.max(1) as i32;
+    cursor.1 >= monitor_top && cursor.1 < monitor_top + depth && cursor.0 >= left && cursor.0 < right
+}
+
+/// Где вдоль края мышь выдвигает панель, пиксели `[left, right)`: `zone_pct` % ширины панели по её центру, 0 — весь край
+/// монитора; не шире монитора. 100 % — ровно под панелью.
+pub fn edge_span(monitor: (i32, i32), panel: (i32, i32), zone_pct: u32) -> (i32, i32) {
+    if zone_pct == 0 {
+        return monitor;
+    }
+    let center = (panel.0 + panel.1) / 2;
+    let half = ((panel.1 - panel.0) as i64 * zone_pct as i64 / 200) as i32;
+    ((center - half).max(monitor.0), (center + half).min(monitor.1))
+}
+
+/// Мышь над окном в пикселях `(left, top, right, bottom)`; правый и нижний край не входят.
+pub fn inside(cursor: (i32, i32), rect: (i32, i32, i32, i32)) -> bool {
+    cursor.0 >= rect.0 && cursor.0 < rect.2 && cursor.1 >= rect.1 && cursor.1 < rect.3
 }
 
 #[cfg(test)]
@@ -336,9 +353,32 @@ mod tests {
 
     #[test]
     fn edge_zone() {
-        assert!(at_edge((500, 0), 0, 100, 900));
-        assert!(!at_edge((500, -3), 0, 100, 900));
-        assert!(!at_edge((500, 1), 0, 100, 900));
-        assert!(!at_edge((950, 0), 0, 100, 900));
+        assert!(at_edge((500, 0), 0, 1, 100, 900));
+        assert!(!at_edge((500, -3), 0, 1, 100, 900));
+        assert!(!at_edge((500, 1), 0, 1, 100, 900));
+        assert!(!at_edge((950, 0), 0, 1, 100, 900));
+        // Толщина: верхние строки входят, ниже — нет; 0 считается одной строкой.
+        assert!(at_edge((500, 3), 0, 4, 100, 900));
+        assert!(!at_edge((500, 4), 0, 4, 100, 900));
+        assert!(!at_edge((500, -1), 0, 4, 100, 900));
+        assert!(at_edge((500, 0), 0, 0, 100, 900) && !at_edge((500, 1), 0, 0, 100, 900));
+    }
+
+    #[test]
+    fn edge_span_along_edge() {
+        let (mon, panel) = ((0, 2560), (630, 1930));
+        assert_eq!(edge_span(mon, panel, 100), panel, "100 % — под панелью, как было");
+        assert_eq!(edge_span(mon, panel, 200), (0, 2560), "шире монитора не бывает");
+        assert_eq!(edge_span(mon, panel, 150), (305, 2255));
+        assert_eq!(edge_span(mon, panel, 50), (955, 1605));
+        assert_eq!(edge_span(mon, panel, 0), mon, "0 — весь край");
+        // Второй монитор справа: отсчёт не с нуля.
+        assert_eq!(edge_span((2560, 4480), (2870, 4170), 0), (2560, 4480));
+    }
+
+    #[test]
+    fn inside_rect() {
+        assert!(inside((10, 0), (0, 0, 120, 5)));
+        assert!(!inside((120, 0), (0, 0, 120, 5)) && !inside((10, 5), (0, 0, 120, 5)));
     }
 }

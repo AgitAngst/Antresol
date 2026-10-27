@@ -1,6 +1,6 @@
 [package]
 name = "antresol"
-version = "2.6.1"
+version = "2.7.0"
 edition = "2024"
 description = "Quick-access panel at the top edge of the monitor"
 license = "MIT"

@@ -8,6 +8,14 @@ use anvil_ui::{CommonSettings, Icon, Lang, ThemeChoice};
 pub const MIN_WIDTH: f32 = 560.0;
 pub const MIN_HEIGHT: f32 = 150.0;
 pub const MAX_HEIGHT: f32 = 520.0;
+/// Зона выезда вдоль края, % ширины панели (`edge_zone=`): от `MIN_EDGE_ZONE` до `MAX_EDGE_ZONE`; 0 — весь край монитора.
+pub const MIN_EDGE_ZONE: u32 = 50;
+pub const MAX_EDGE_ZONE: u32 = 400;
+/// Толщина зоны выезда вниз от края, пикселей (`edge_depth=`), от 1.
+pub const MAX_EDGE_DEPTH: u32 = 16;
+/// Размер видимой полоски у края, % (`strip_scale=`).
+pub const MIN_STRIP_SCALE: u32 = 50;
+pub const MAX_STRIP_SCALE: u32 = 400;
 /// Сколько любимых разрешений у одного монитора.
 pub const MAX_FAVORITES: usize = 3;
 /// `monitor=*` — панель у того монитора, к краю которого подошла мышь.
@@ -180,6 +188,12 @@ pub struct Settings {
     pub fullscreen_guard: bool,
     /// Тонкая полоска у края, пока панель спрятана: видно, что она есть.
     pub strip: bool,
+    /// Зона выезда вдоль края, % ширины панели (по центру панели); 0 — весь край монитора.
+    pub edge_zone: u32,
+    /// Толщина зоны выезда вниз от края, пикселей (1 — только верхняя строка монитора).
+    pub edge_depth: u32,
+    /// Размер видимой полоски у края, % от 120 × 5. Наведение на полоску тоже выдвигает панель.
+    pub strip_scale: u32,
     /// Программы (имя файла маленькими буквами), над которыми панель не выезжает от края.
     pub exclude: Vec<String>,
     /// Своя клавиша показа панели; `None` — первая свободная из готовых.
@@ -739,6 +753,9 @@ impl Default for Settings {
             hide_delay_ms: 450,
             fullscreen_guard: true,
             strip: true,
+            edge_zone: 100,
+            edge_depth: 1,
+            strip_scale: 100,
             exclude: Vec::new(),
             panel_hotkey: None,
             clipboard: true,
@@ -874,6 +891,16 @@ pub fn parse(text: &str) -> Settings {
             "hide_delay_ms" => s.hide_delay_ms = value.parse().unwrap_or(s.hide_delay_ms),
             "fullscreen_guard" => s.fullscreen_guard = value != "false",
             "strip" => s.strip = value != "false",
+            "edge_zone" => {
+                if let Ok(v) = value.parse::<u32>() {
+                    s.edge_zone = if v == 0 { 0 } else { v.clamp(MIN_EDGE_ZONE, MAX_EDGE_ZONE) };
+                }
+            }
+            "edge_depth" => s.edge_depth = value.parse::<u32>().map_or(s.edge_depth, |v| v.clamp(1, MAX_EDGE_DEPTH)),
+            "strip_scale" => {
+                s.strip_scale =
+                    value.parse::<u32>().map_or(s.strip_scale, |v| v.clamp(MIN_STRIP_SCALE, MAX_STRIP_SCALE))
+            }
             "exclude" => {
                 s.exclude = value.split(',').map(|e| e.trim().to_lowercase()).filter(|e| !e.is_empty()).collect();
                 s.exclude.dedup();
@@ -973,6 +1000,7 @@ pub fn format(s: &Settings) -> String {
         s.fullscreen_guard
     );
     out.push_str(&format!("strip={}\nexclude={}\nclipboard={}\n", s.strip, s.exclude.join(","), s.clipboard));
+    out.push_str(&format!("edge_zone={}\nedge_depth={}\nstrip_scale={}\n", s.edge_zone, s.edge_depth, s.strip_scale));
     out.push_str(&format!("accent={}\nmedia_strip={}\nplaques_off={}\n", s.accent, s.media_strip, s.plaques));
     if !s.kamerton.is_empty() {
         out.push_str(&format!("kamerton={}\n", s.kamerton));
@@ -1530,6 +1558,9 @@ mod tests {
     fn panel_options_round_trip() {
         let s = Settings {
             strip: false,
+            edge_zone: 0,
+            edge_depth: 4,
+            strip_scale: 200,
             exclude: vec!["game.exe".into(), "obs64.exe".into()],
             panel_hotkey: Hotkey::parse("Ctrl+Alt+Q"),
             monitor: ALL_MONITORS.into(),
@@ -1547,6 +1578,20 @@ mod tests {
         assert!(back.excluded("GAME.EXE") && !back.excluded("chrome.exe"));
         assert!(parse("exclude= A.exe , ,b.exe\n").excluded("a.exe"));
         assert!(Settings::default().strip, "полоска по умолчанию есть");
+        assert_eq!(parse(&format(&Settings::default())).edge_zone, 100);
+    }
+
+    #[test]
+    fn edge_zone_limits() {
+        let d = Settings::default();
+        assert_eq!((d.edge_zone, d.edge_depth, d.strip_scale), (100, 1, 100), "по умолчанию — как было");
+        let s = parse("edge_zone=9999\nedge_depth=0\nstrip_scale=5\n");
+        assert_eq!((s.edge_zone, s.edge_depth, s.strip_scale), (MAX_EDGE_ZONE, 1, MIN_STRIP_SCALE));
+        let s = parse("edge_zone=10\nedge_depth=99\nstrip_scale=999\n");
+        assert_eq!((s.edge_zone, s.edge_depth, s.strip_scale), (MIN_EDGE_ZONE, MAX_EDGE_DEPTH, MAX_STRIP_SCALE));
+        assert_eq!(parse("edge_zone=0\n").edge_zone, 0, "0 — весь край");
+        let s = parse("edge_zone=abc\nedge_depth=-1\nstrip_scale=\n");
+        assert_eq!((s.edge_zone, s.edge_depth, s.strip_scale), (100, 1, 100), "мусор — по умолчанию");
         assert_eq!(Settings::default().accent, "lime");
         assert_eq!(parse("accent=red\n").accent, "lime", "незнакомый цвет — по умолчанию");
         assert_eq!(parse("accent=SKY\n").accent, "sky");
