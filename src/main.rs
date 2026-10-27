@@ -3,9 +3,11 @@
 
 mod app;
 mod config;
+mod icon;
 mod ics;
 mod layout;
 mod look;
+mod mark;
 mod modules;
 mod panel;
 mod plaque;
@@ -24,6 +26,7 @@ fn main() -> eframe::Result<()> {
     // App ставит сам у верхнего края монитора.
     let viewport = eframe::egui::ViewportBuilder::default()
         .with_title("Antresol")
+        .with_icon(icon::window())
         .with_decorations(false)
         .with_always_on_top()
         .with_taskbar(false)

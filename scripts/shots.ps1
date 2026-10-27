@@ -100,7 +100,39 @@ $scenes = @(
   @{ n = "plaque-timer-dark-ru";       lang = "ru"; theme = "dark";  view = "strip-plaque-timer" },
   @{ n = "plaque-timer-light-en";      lang = "en"; theme = "light"; view = "strip-plaque-timer" },
   @{ n = "plaque-meeting-dark-ru";     lang = "ru"; theme = "dark";  view = "strip-plaque-meeting" },
-  @{ n = "plaque-meeting-light-en";    lang = "en"; theme = "light"; view = "strip-plaque-meeting" }
+  @{ n = "plaque-meeting-light-en";    lang = "en"; theme = "light"; view = "strip-plaque-meeting" },
+  @{ n = "about-dark-ru";      lang = "ru"; theme = "dark";  view = "about" },
+  @{ n = "about-light-en";     lang = "en"; theme = "light"; view = "about" },
+  @{ n = "mark-A-0-dark-ru";  lang = "ru"; theme = "dark";  view = "mark-A"; markat = "0" },
+  @{ n = "mark-A-0-light-en"; lang = "en"; theme = "light"; view = "mark-A"; markat = "0" },
+  @{ n = "mark-A-0_5-dark-ru";  lang = "ru"; theme = "dark";  view = "mark-A"; markat = "0.5" },
+  @{ n = "mark-A-0_5-light-en"; lang = "en"; theme = "light"; view = "mark-A"; markat = "0.5" },
+  @{ n = "mark-A-1-dark-ru";  lang = "ru"; theme = "dark";  view = "mark-A"; markat = "1" },
+  @{ n = "mark-A-1-light-en"; lang = "en"; theme = "light"; view = "mark-A"; markat = "1" },
+  @{ n = "mark-B-0-dark-ru";  lang = "ru"; theme = "dark";  view = "mark-B"; markat = "0" },
+  @{ n = "mark-B-0-light-en"; lang = "en"; theme = "light"; view = "mark-B"; markat = "0" },
+  @{ n = "mark-B-0_5-dark-ru";  lang = "ru"; theme = "dark";  view = "mark-B"; markat = "0.5" },
+  @{ n = "mark-B-0_5-light-en"; lang = "en"; theme = "light"; view = "mark-B"; markat = "0.5" },
+  @{ n = "mark-B-1-dark-ru";  lang = "ru"; theme = "dark";  view = "mark-B"; markat = "1" },
+  @{ n = "mark-B-1-light-en"; lang = "en"; theme = "light"; view = "mark-B"; markat = "1" },
+  @{ n = "mark-C-0-dark-ru";  lang = "ru"; theme = "dark";  view = "mark-C"; markat = "0" },
+  @{ n = "mark-C-0-light-en"; lang = "en"; theme = "light"; view = "mark-C"; markat = "0" },
+  @{ n = "mark-C-0_5-dark-ru";  lang = "ru"; theme = "dark";  view = "mark-C"; markat = "0.5" },
+  @{ n = "mark-C-0_5-light-en"; lang = "en"; theme = "light"; view = "mark-C"; markat = "0.5" },
+  @{ n = "mark-C-1-dark-ru";  lang = "ru"; theme = "dark";  view = "mark-C"; markat = "1" },
+  @{ n = "mark-C-1-light-en"; lang = "en"; theme = "light"; view = "mark-C"; markat = "1" },
+  @{ n = "mark-D-0-dark-ru";  lang = "ru"; theme = "dark";  view = "mark-D"; markat = "0" },
+  @{ n = "mark-D-0-light-en"; lang = "en"; theme = "light"; view = "mark-D"; markat = "0" },
+  @{ n = "mark-D-0_5-dark-ru";  lang = "ru"; theme = "dark";  view = "mark-D"; markat = "0.5" },
+  @{ n = "mark-D-0_5-light-en"; lang = "en"; theme = "light"; view = "mark-D"; markat = "0.5" },
+  @{ n = "mark-D-1-dark-ru";  lang = "ru"; theme = "dark";  view = "mark-D"; markat = "1" },
+  @{ n = "mark-D-1-light-en"; lang = "en"; theme = "light"; view = "mark-D"; markat = "1" },
+  @{ n = "mark-E-0-dark-ru";  lang = "ru"; theme = "dark";  view = "mark-E"; markat = "0" },
+  @{ n = "mark-E-0-light-en"; lang = "en"; theme = "light"; view = "mark-E"; markat = "0" },
+  @{ n = "mark-E-0_5-dark-ru";  lang = "ru"; theme = "dark";  view = "mark-E"; markat = "0.5" },
+  @{ n = "mark-E-0_5-light-en"; lang = "en"; theme = "light"; view = "mark-E"; markat = "0.5" },
+  @{ n = "mark-E-1-dark-ru";  lang = "ru"; theme = "dark";  view = "mark-E"; markat = "1" },
+  @{ n = "mark-E-1-light-en"; lang = "en"; theme = "light"; view = "mark-E"; markat = "1" }
 )
 foreach ($s in $scenes) {
   if ($Only -and $s.n -ne $Only) { continue }
@@ -118,6 +150,7 @@ foreach ($s in $scenes) {
   $env:ANTRESOL_SHELF = $s.shelf
   $env:ANTRESOL_SCENE = $s.scene
   $env:ANTRESOL_QUERY = $s.query
+  $env:ANTRESOL_MARK_AT = $s.markat
   $p = Start-Process -FilePath $exe -PassThru -WindowStyle Normal -RedirectStandardError "$Out\$($s.n).log"
   if (-not $p.WaitForExit(30000)) { $p.Kill(); "timeout $($s.n)" } else { "done $($s.n)" }
 }

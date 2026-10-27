@@ -20,7 +20,7 @@ use crate::modules::{self, Command, Ctx, Module, anchor};
 use crate::panel::{self, Edge, Input};
 use crate::plaque::{self, Plaque};
 use crate::sys::{self, monitor};
-use crate::{look, texts, watch};
+use crate::{look, mark, texts, watch};
 
 mod header_plan;
 mod plaque_ui;
@@ -337,6 +337,11 @@ pub struct App {
     update_retry: Option<Instant>,
     /// Высота баннера обновления над карточками в прошлом кадре: своя высота полки растёт на неё (иначе баннер теснит карточки).
     banner_h: f32,
+    /// Знак программы: текущая сцена анимации (`mark.rs`) и открыто ли «О программе».
+    mark: mark::Player,
+    about_open: bool,
+    /// Прошлая проверка обновлений не удалась (знак мигает один раз на переходе).
+    update_failed: bool,
 }
 
 /// Сочетание в виде, который ждёт поток клавиш: модификаторы и клавиша.
@@ -444,6 +449,9 @@ impl App {
             launched: Instant::now(),
             update_retry: None,
             banner_h: 0.0,
+            mark: mark::Player::launched(),
+            about_open: false,
+            update_failed: false,
         };
         // Для снимков: `ANTRESOL_VIEW=search` — сразу вид поиска, `ANTRESOL_QUERY=1080` — с этим запросом.
         if app.view == View::Search {
@@ -471,6 +479,19 @@ impl App {
         // `scene-ask` — с вопросом «Удалить сцену?», `scene-name` — с именем, что уже есть у другой сцены, `settings-ask` —
         // настройки с тем же вопросом у этой сцены.
         let hook = std::env::var("ANTRESOL_VIEW").unwrap_or_default();
+        // Для снимков: `ANTRESOL_VIEW=about` — сразу «О программе»; `mark-<A|B|C|D|E>` — оно же в настройках со знаком,
+        // замершим на кадре сцены (`ANTRESOL_MARK_AT` — доля от 0 до 1, по умолчанию 1; E — «Пульс» при ошибке).
+        if hook == "about" {
+            app.about_open = true;
+        }
+        if let Some(name) = hook.strip_prefix("mark-") {
+            let at = std::env::var("ANTRESOL_MARK_AT").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(1.0);
+            if let Some(pose) = mark::Player::frame(name, at) {
+                app.mark.hold(pose);
+                app.about_open = true;
+                app.view = View::Settings;
+            }
+        }
         let n = std::env::var("ANTRESOL_SCENE").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(1);
         let scenes = app.settings.profiles.len();
         let shown = n.saturating_sub(1).min(scenes.saturating_sub(1));
@@ -683,7 +704,7 @@ impl App {
             module.command(cmd, &mut cx);
         }
         for (text, tone) in toasts {
-            self.toasts.push(text, tone);
+            self.toast(text, tone);
         }
         if self.settings != before {
             self.save();
@@ -884,7 +905,7 @@ impl App {
             problems.extend(module.problems(t));
         }
         for (text, tone) in problems {
-            self.toasts.push(text, tone);
+            self.toast(text, tone);
         }
         self.undo_refused_scenes();
         events
@@ -970,6 +991,13 @@ impl App {
 
     fn tick(&mut self, ctx: &egui::Context) {
         motion::tick(ctx);
+        self.mark.tick(ctx);
+        // Проверка или загрузка не удалась — знак мигает в цвете «ошибка» (одним мельканием на переходе).
+        let failed = self.updater.as_ref().is_some_and(|u| matches!(u.state(), anvil_update::State::Failed { .. }));
+        if failed && !self.update_failed {
+            self.mark.start(mark::Scene::Alarm);
+        }
+        self.update_failed = failed;
         // Обновления: через минуту после запуска и раз в сутки, если включено; не удалась сама (нет сети) — ещё раз через 15 мин.
         if let Some(u) = &self.updater
             && self.launched.elapsed() >= crate::update::FIRST_CHECK
@@ -1247,7 +1275,7 @@ impl App {
             module.command(&cmd, &mut cx);
         }
         for (text, tone) in toasts {
-            self.toasts.push(text, tone);
+            self.toast(text, tone);
         }
         self.save();
     }
@@ -1469,6 +1497,58 @@ impl App {
         }
     }
 
+    /// Поза знака сейчас: событие, потом занятость (в «О программе» идёт проверка, в шапке — загрузка), иначе за панелью.
+    fn mark_pose(&self, ctx: &egui::Context, in_about: bool) -> mark::Pose {
+        let state = self.updater.as_ref().map(|u| u.state());
+        let busy = match state {
+            Some(anvil_update::State::Checking) => in_about,
+            Some(anvil_update::State::Downloading { .. }) => !in_about,
+            _ => false,
+        };
+        self.mark.pose(ctx, self.edge.shown, busy)
+    }
+
+    /// Окно «О программе»: знак, версия и сборка, строка об обновлениях, кнопка «Проверить обновления», ссылка.
+    fn about_dialog(&mut self, ctx: &egui::Context) {
+        if !self.about_open {
+            return;
+        }
+        let t = texts::tr(self.lang());
+        let info = anvil_ui::chrome::AppInfo {
+            name: "Antresol",
+            icon: Icon::Gear,
+            version: env!("CARGO_PKG_VERSION"),
+            tagline: t.tagline,
+            repository: "https://github.com/AgitAngst/Antresol",
+        };
+        let status = self.updater.as_ref().and_then(|u| anvil_update::ui::about_status(ctx, u));
+        let status = status.or_else(|| self.updater.is_none().then(|| t.updates_demo.to_string()));
+        let extra = mark::AboutExtra { build: env!("ANTRESOL_BUILD"), build_label: t.build, status: status.as_deref() };
+        let pose = self.mark_pose(ctx, true);
+        let mut open = true;
+        let action = mark::about(ctx, &mut open, &info, &extra, &pose);
+        self.about_open = open;
+        if action == Some(anvil_ui::chrome::AboutAction::CheckUpdates)
+            && let Some(u) = &self.updater
+        {
+            u.check(self.settings.common.prerelease, None, true);
+        }
+    }
+
+    /// Открыть «О программе»: знак окна выезжает на место.
+    fn open_about(&mut self) {
+        self.about_open = true;
+        self.mark.start(mark::Scene::Enter);
+    }
+
+    /// Уведомление; «опасное» заодно мигает знаком в цвете «ошибка».
+    fn toast(&mut self, text: impl Into<String>, tone: Tone) {
+        if tone == Tone::Danger {
+            self.mark.start(mark::Scene::Alarm);
+        }
+        self.toasts.push(text, tone);
+    }
+
     fn header(&mut self, ui: &mut Ui, ops: &mut Vec<Op>) {
         match self.view {
             View::Cards => return self.header_cards(ui, ops),
@@ -1479,9 +1559,18 @@ impl App {
         let t = texts::tr(self.lang());
         let p = Palette::of(ui);
         let ctx = ui.ctx().clone();
+        let pose = self.mark_pose(&ctx, false);
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             ui.add_space(2.0);
+            // Знак программы; щелчок открывает «О программе» (и знак выезжает на место, сцена A).
+            if mark::brand(ui, &pose)
+                .on_hover_text(tr(&ctx, "О программе"))
+                .on_hover_cursor(CursorIcon::PointingHand)
+                .clicked()
+            {
+                self.open_about();
+            }
             match self.view {
                 View::Cards | View::Scene | View::Search => {}
                 View::Settings => {
@@ -2325,7 +2414,7 @@ impl App {
             pos += 1;
         }
         for (text, tone) in toasts {
-            self.toasts.push(text, tone);
+            self.toast(text, tone);
         }
         if self.settings != before {
             self.save();
@@ -2421,7 +2510,7 @@ impl App {
                 if on != self.autostart {
                     match sys::set_autostart(on) {
                         Ok(()) => self.autostart = on,
-                        Err(e) => self.toasts.push(format!("{}: {e}", t.failed), Tone::Danger),
+                        Err(e) => self.toast(format!("{}: {e}", t.failed), Tone::Danger),
                     }
                 }
                 w::switch(ui, &mut self.settings.fullscreen_guard, t.fullscreen_guard);
@@ -2578,7 +2667,7 @@ impl App {
                             crate::update::arm_restart();
                             match u.restart() {
                                 Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
-                                Err(e) => self.toasts.push(format!("{}: {e}", t.failed), Tone::Danger),
+                                Err(e) => self.toast(format!("{}: {e}", t.failed), Tone::Danger),
                             }
                         }
                         Button::None => {}
@@ -3373,11 +3462,15 @@ impl App {
             View::Search => self.search_view(&mut body_ui),
         }
         self.apply_ops(ops);
+        // «О программе» — диалог поверх панели; его Esc закрывает только его.
+        let about_was_open = self.about_open;
+        self.about_dialog(&ctx);
         if t >= 1.0 {
             self.grips(ui, panel, ppp);
         }
         if ctx.input(|i| i.key_pressed(egui::Key::Escape))
             && !notes_open
+            && !about_was_open
             && self.grip.is_none()
             && self.capture.is_none()
             && !self.capture_panel
@@ -4139,6 +4232,9 @@ mod tests {
                 launched: Instant::now(),
                 update_retry: None,
                 banner_h: 0.0,
+                mark: mark::Player::default(),
+                about_open: false,
+                update_failed: false,
             }
         }
     }

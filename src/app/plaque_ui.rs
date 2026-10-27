@@ -71,7 +71,11 @@ impl App {
         let lang = self.lang();
         let (title, sub) = (texts::plaque_text(lang, &plaque.title), texts::plaque_text(lang, &plaque.sub));
         let text = if sub.is_empty() { title } else { format!("{title} · {sub}") };
-        self.toasts.push(text, plaque.tone);
+        // Напоминание и встреча мигают знаком (сцена D); ошибка — тем же миганием в цвете «ошибка» (в `toast`).
+        if matches!(plaque.kind, plaque::Kind::Timer | plaque::Kind::Meeting) && plaque.tone != Tone::Danger {
+            self.mark.start(crate::mark::Scene::Pulse);
+        }
+        self.toast(text, plaque.tone);
     }
 
     /// Можно ли сейчас показывать уведомления (`SHQueryUserNotificationState`): спрашиваем раз в полсекунды и только пока

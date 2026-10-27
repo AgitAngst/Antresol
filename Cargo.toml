@@ -70,6 +70,10 @@ windows = { version = "0.62.2", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+# Значок у exe (ресурс Windows) — по слову владельца 28.10.2026.
+[build-dependencies]
+winresource = "0.1"
+
 [profile.release]
 opt-level = 3
 lto = true
