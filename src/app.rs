@@ -340,6 +340,8 @@ pub struct App {
     /// Знак программы: текущая сцена анимации (`mark.rs`) и открыто ли «О программе».
     mark: mark::Player,
     about_open: bool,
+    /// Знак в шапке настроек уже выезжал (сцена A) за этот запуск.
+    mark_shown: bool,
     /// Прошлая проверка обновлений не удалась (знак мигает один раз на переходе).
     update_failed: bool,
 }
@@ -449,8 +451,9 @@ impl App {
             launched: Instant::now(),
             update_retry: None,
             banner_h: 0.0,
-            mark: mark::Player::launched(),
+            mark: mark::Player::default(),
             about_open: false,
+            mark_shown: false,
             update_failed: false,
         };
         // Для снимков: `ANTRESOL_VIEW=search` — сразу вид поиска, `ANTRESOL_QUERY=1080` — с этим запросом.
@@ -1559,6 +1562,10 @@ impl App {
         let t = texts::tr(self.lang());
         let p = Palette::of(ui);
         let ctx = ui.ctx().clone();
+        // Первый показ знака за запуск — сцена A «Выезд».
+        if !std::mem::replace(&mut self.mark_shown, true) {
+            self.mark.start(mark::Scene::Enter);
+        }
         let pose = self.mark_pose(&ctx, false);
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
@@ -1615,6 +1622,7 @@ impl App {
         let p = Palette::of(ui);
         let rect = ui.max_rect();
         let editing = self.editing.is_some();
+        let pose = self.mark_pose(ui.ctx(), false);
         let tabs = self.tab_metrics(ui);
         let plan = header_plan::plan(&self.header_sizes(ui, &tabs), rect.width());
         self.header_plan = plan;
@@ -1633,7 +1641,13 @@ impl App {
         left.set_clip_rect(left_rect.expand2(Vec2::new(0.0, 4.0)).intersect(ui.clip_rect()));
         left.spacing_mut().item_spacing.x = 8.0;
         left.add_space(2.0);
-        anvil_ui::chrome::app_mark(&mut left, Icon::Layers, 24.0);
+        if mark::app_mark(&mut left, 24.0, &pose, Sense::click())
+            .on_hover_text(tr(ui.ctx(), "О программе"))
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .clicked()
+        {
+            self.open_about();
+        }
         if plan.word {
             left.label(egui::RichText::new("Antresol").font(anvil_ui::semibold(14.5)).color(p.text));
         }
@@ -4234,6 +4248,7 @@ mod tests {
                 banner_h: 0.0,
                 mark: mark::Player::default(),
                 about_open: false,
+                mark_shown: false,
                 update_failed: false,
             }
         }

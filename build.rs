@@ -19,16 +19,29 @@ fn main() {
     if let Some(log) = git(&["rev-parse", "--git-path", "logs/HEAD"]) {
         println!("cargo:rerun-if-changed={log}");
     }
-    let build = git(&["rev-list", "--count", "HEAD"]).unwrap_or_default();
+    // Номер из окружения главнее; в неполном клоне (CI берёт один коммит) счёт был бы «1» — тогда номера нет вовсе.
+    println!("cargo:rerun-if-env-changed=ANTRESOL_BUILD");
+    let shallow = git(&["rev-parse", "--is-shallow-repository"]).is_none_or(|v| v != "false");
+    let build = std::env::var("ANTRESOL_BUILD").ok().filter(|v| !v.is_empty()).unwrap_or_else(|| {
+        if shallow { String::new() } else { git(&["rev-list", "--count", "HEAD"]).unwrap_or_default() }
+    });
     println!("cargo:rustc-env=ANTRESOL_BUILD={build}");
 
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
     let mut res = winresource::WindowsResource::new();
-    res.set_icon(ico.to_str().expect("utf-8 path"));
+    match ico.to_str() {
+        Some(path) => {
+            res.set_icon(path);
+        }
+        None => {
+            println!("cargo:warning=exe icon skipped: the path is not valid UTF-8");
+            return;
+        }
+    }
     res.set("ProductName", "Antresol");
-    res.set("FileDescription", "Antresol — quick-access panel at the top edge of the monitor");
+    res.set("FileDescription", "Antresol - quick-access panel at the top edge of the monitor");
     if let Err(e) = res.compile() {
         // Без rc.exe программа соберётся, просто без значка у exe.
         println!("cargo:warning=exe icon skipped: {e}");

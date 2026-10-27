@@ -419,6 +419,8 @@ impl App {
     pub(super) fn search_header(&mut self, ui: &mut Ui) {
         let t = texts::tr(self.lang());
         let p = Palette::of(ui);
+        let pose = self.mark_pose(ui.ctx(), false);
+        let mut about = false;
         // Стрелки — до поля: иначе оно двигало бы в себе курсор.
         let (up, down) = ui.input_mut(|i| {
             (i.consume_key(Modifiers::NONE, Key::ArrowUp), i.consume_key(Modifiers::NONE, Key::ArrowDown))
@@ -436,7 +438,10 @@ impl App {
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             ui.add_space(2.0);
-            anvil_ui::chrome::app_mark(ui, Icon::Layers, 24.0);
+            about = mark::app_mark(ui, 24.0, &pose, Sense::click())
+                .on_hover_text(tr(ui.ctx(), "О программе"))
+                .on_hover_cursor(CursorIcon::PointingHand)
+                .clicked();
             if show_word {
                 ui.label(egui::RichText::new("Antresol").font(anvil_ui::semibold(14.5)).color(p.text));
             }
@@ -459,6 +464,9 @@ impl App {
         });
         if close {
             self.close_search();
+        }
+        if about {
+            self.open_about();
         }
     }
 

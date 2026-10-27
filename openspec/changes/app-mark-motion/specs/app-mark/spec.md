@@ -22,12 +22,12 @@ fixed colours independent of the theme and the language.
 - **THEN** знак не меняется
 
 ### Requirement: Анимация знака
-The mark SHALL play one scene per event, once: A «Выезд» on launch and when About opens, B «Прятки» following the panel
+The mark SHALL play one scene per event, once: A «Выезд» on the first showing of the mark after launch and when About opens, B «Прятки» following the panel
 showing and hiding, C «Модули» while an update check or download runs, D «Пульс» a twice-blink on a reminder or meeting
 plaque and, in the error colour, on an error; with animations turned off in Windows the mark MUST stand in its final state.
 
-#### Scenario: Запуск
-- **WHEN** программа запущена и окно настроек открыто
+#### Scenario: Первый показ
+- **WHEN** после запуска программы впервые показан знак в шапке (или открыто «О программе»)
 - **THEN** панель знака выезжает из-за кромки экрана знака за 240 мс и встаёт на место
 
 #### Scenario: Панель спряталась

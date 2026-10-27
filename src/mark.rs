@@ -11,10 +11,12 @@ use anvil_ui::chrome::{self, AboutAction, AppInfo};
 use anvil_ui::motion::{self, Motion, ease_out, ease_standard};
 use anvil_ui::widgets as w;
 use anvil_ui::{Icon, Kind, Palette, semibold};
-use eframe::egui::{self, Color32, Painter, Rect, Response, RichText, Sense, Ui, Vec2, pos2, vec2};
+use eframe::egui::{self, Color32, Mesh, Painter, Rect, Response, RichText, Sense, Ui, Vec2, pos2, vec2};
 
-/// Плитка — середина её градиента `#F6F8EF → #DCE5CB`.
-const TILE: Color32 = Color32::from_rgb(0xE9, 0xEE, 0xDD);
+/// Плитка — вертикальный градиент `#F6F8EF → #DCE5CB` (как в SVG); кромка — его середина, для гладких краёв.
+const TILE_TOP: Color32 = Color32::from_rgb(0xF6, 0xF8, 0xEF);
+const TILE_BOTTOM: Color32 = Color32::from_rgb(0xDC, 0xE5, 0xCB);
+const TILE_EDGE: Color32 = Color32::from_rgb(0xE9, 0xEE, 0xDD);
 /// Знак `#5E9A1A`.
 const GLYPH: (u8, u8, u8) = (0x5E, 0x9A, 0x1A);
 /// Метки сцены C светлее плитки.
@@ -151,11 +153,6 @@ pub struct Player {
 }
 
 impl Player {
-    /// Запуск программы: сцена A, отсчёт — с первого кадра.
-    pub fn launched() -> Player {
-        Player { scene: Some((Scene::Enter, None)), held: None }
-    }
-
     /// Событие: сцена играет заново с первого кадра (прежняя обрывается).
     pub fn start(&mut self, scene: Scene) {
         self.scene = Some((scene, None));
@@ -202,13 +199,16 @@ impl Player {
             return Pose::REST;
         }
         let now = ctx.input(|i| i.time);
-        if let Some((scene, Some(at))) = self.scene {
+        if let Some((scene, since)) = self.scene {
+            // Сцену только что начали (`tick` ещё не ставил время): с её первого кадра, без мелькания покоя.
             ctx.request_repaint();
-            return scene.pose((now - at) as f32);
+            return scene.pose(since.map_or(0.0, |at| (now - at) as f32));
         }
         if busy {
+            // Круг — от начала проверки или загрузки, а не от часов программы.
+            let at = motion.first_seen(ctx, egui::Id::new("mark-busy"));
             ctx.request_repaint();
-            return modules((now as f32) % MODULES_PERIOD);
+            return modules(((now - at) % MODULES_PERIOD as f64) as f32);
         }
         // B: вверх `ENTER`, вниз `LAYOUT`; ход по времени, форма — `ease_standard`.
         let secs = if shown { motion::ENTER } else { motion::LAYOUT };
@@ -219,6 +219,40 @@ impl Player {
 
 fn glyph(alpha: f32) -> Color32 {
     Color32::from_rgba_unmultiplied(GLYPH.0, GLYPH.1, GLYPH.2, (alpha.clamp(0.0, 1.0) * 255.0).round() as u8)
+}
+
+/// Плитка с градиентом: скруглённый квадрат (радиус 0,2578 стороны), цвет по высоте. Гладкую кромку даёт подложка
+/// одним цветом, градиент — сеткой поверх, на полпикселя внутрь.
+fn tile(painter: &Painter, rect: Rect) {
+    let r = rect.width() * 0.2578;
+    painter.rect_filled(rect, r.round() as u8, TILE_EDGE);
+    let inner = rect.shrink(0.5);
+    let r = (r - 0.5).max(0.0);
+    let mut points = Vec::new();
+    // Углы по часовой, от левого верхнего; по восемь отрезков на угол.
+    for (cx, cy, from) in [
+        (inner.right() - r, inner.top() + r, -90.0_f32),
+        (inner.right() - r, inner.bottom() - r, 0.0),
+        (inner.left() + r, inner.bottom() - r, 90.0),
+        (inner.left() + r, inner.top() + r, 180.0),
+    ] {
+        for i in 0..=8 {
+            let a = (from + 90.0 * i as f32 / 8.0).to_radians();
+            points.push(pos2(cx + r * a.cos(), cy + r * a.sin()));
+        }
+    }
+    let color = |y: f32| {
+        let t = ((y - inner.top()) / inner.height()).clamp(0.0, 1.0);
+        TILE_TOP.lerp_to_gamma(TILE_BOTTOM, t)
+    };
+    let mut mesh = Mesh::default();
+    for p in &points {
+        mesh.colored_vertex(*p, color(p.y));
+    }
+    for i in 1..points.len() as u32 - 1 {
+        mesh.add_triangle(0, i, i + 1);
+    }
+    painter.add(mesh);
 }
 
 /// Знак в квадрате `rect`: плитка и монитор в покое.
@@ -232,7 +266,7 @@ pub fn paint_pose(painter: &Painter, rect: Rect, pose: &Pose, error: Color32) {
     let k = rect.width() / 1024.0;
     let at = |x: f32, y: f32| pos2(rect.min.x + x * k, rect.min.y + (y + SHIFT_Y) * k);
     let rr = |x: f32, y: f32, w: f32, h: f32| Rect::from_min_size(at(x, y), vec2(w * k, h * k));
-    painter.rect_filled(rect, (rect.width() * 0.2578).round() as u8, TILE);
+    tile(painter, rect);
 
     let (bx, by, bw, bh, br) = BODY;
     let body = rr(bx, by, bw, bh);
@@ -395,7 +429,8 @@ mod tests {
     #[test]
     fn player_plays_once_and_stops() {
         let ctx = egui::Context::default();
-        let mut player = Player::launched();
+        let mut player = Player::default();
+        player.start(Scene::Enter);
         let frame = |ctx: &egui::Context, time: f64, player: &mut Player| {
             let input = egui::RawInput { time: Some(time), ..Default::default() };
             let mut pose = Pose::REST;
@@ -417,6 +452,20 @@ mod tests {
     }
 
     #[test]
+    fn a_scene_just_started_does_not_flash_the_rest_pose() {
+        // Событие пришло после `tick` кадра: время начала ещё не стоит, но поза уже первого кадра сцены, а не покой.
+        let ctx = egui::Context::default();
+        let mut player = Player::default();
+        player.start(Scene::Enter);
+        let mut pose = Pose::REST;
+        let mut out = ctx.run_ui(egui::RawInput { time: Some(3.0), ..Default::default() }, |ui| {
+            pose = player.pose(ui.ctx(), true, false);
+        });
+        out.textures_delta.clear();
+        assert_eq!(pose, enter(0.0));
+    }
+
+    #[test]
     fn frames_for_screenshots() {
         assert_eq!(Player::frame("A", 1.0), Some(Pose::REST));
         assert_eq!(Player::frame("B", 0.0).map(|p| p.height), Some(STRIP_H));
@@ -430,7 +479,7 @@ mod tests {
     fn without_motion_the_mark_stands_in_its_final_state() {
         let ctx = egui::Context::default();
         motion::set_reduced(&ctx, true);
-        let mut player = Player::launched();
+        let mut player = Player::default();
         player.start(Scene::Alarm);
         let mut got = None;
         let mut out = ctx.run_ui(egui::RawInput { time: Some(5.0), ..Default::default() }, |ui| {
