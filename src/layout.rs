@@ -2,11 +2,18 @@
 // Windows: перевод по клавишам ЙЦУКЕН ↔ QWERTY и распознавание, что текст набран не в той раскладке.
 //
 // Перевод идёт по клавишам: `q` → `й`, `[` → `х`, `;` → `ж`, `'` → `э`, `,` → `б`, `.` → `ю`, `` ` `` → `ё` (и их пары с
-// Shift). Всё остальное — цифры, пробелы, `? ! ( ) -` — остаётся как набрано. Знаки на клавишах букв внутри слова — буквы
-// (`cgfcb,j` → «спасибо»); в начале слова — буква, если слово с ней похоже на русское; в конце слова знак остаётся знаком
-// («Ghbdtn,» → «Привет,»), кроме `[` и `` ` `` (х, ё) и точки перед словом с маленькой буквы и в конце текста («k.,k. nt,z» →
-// «люблю тебя», «Gjplhfdkz.» → «Поздравляю»); запятая после слова, за которой «б» не бывает, выдаёт обычную пунктуацию — тогда
-// и точки остаются точками; `/` в конце слова — точка.
+// Shift). Знаки на клавишах букв внутри слова — буквы (`cgfcb,j` → «спасибо»); в начале слова — буква, если слово с ней
+// похоже на русское; в конце слова знак остаётся знаком («Ghbdtn,» → «Привет,»), кроме `[` и `` ` `` (х, ё) и точки перед
+// словом с маленькой буквы и в конце текста («k.,k. nt,z» → «люблю тебя», «Gjplhfdkz.» → «Поздравляю»); запятая после слова,
+// за которой «б» не бывает, выдаёт обычную пунктуацию — тогда и точки остаются точками.
+//
+// Русская пунктуация набирается другими клавишами, чем английская (так выходит, когда пишут не в той раскладке): точка —
+// `/`, запятая — Shift+`/` (`?`), вопрос — Shift+7 (`&`), двоеточие — Shift+6 (`^`), точка с запятой — Shift+4 (`$`),
+// кавычка — Shift+2 (`@`), «№» — Shift+3 (`#`). После слова это знаки: «Ghbdtn? rfr ltkf&» → «Привет, как дела?» (`?` —
+// запятая, если за ней идёт ещё слово; последний `?` текста остаётся вопросом, как и в «Ghbdtn, rfr ltkf?», где запятая
+// — запятая). В таком тексте запятая, точка с запятой и точка в конце слова — буквы б, ж, ю («масштаб», «муж», «вживую»).
+// Обратно: запятая русской раскладки — `?` английской («Рщц фку нщг,» → «How are you?»). Всё остальное — цифры, пробелы,
+// `! ( ) -` — остаётся как набрано.
 //
 // Предлагаем, только если текст похож на обычную речь, а перевод — на другой язык заметно больше, чем исходный на свой:
 // доля частых пар соседних букв (небольшие списки ниже) у перевода выше, чем у исходного, на запас `MARGIN`. Короткие слова,
@@ -28,6 +35,13 @@ const MIN_TARGET: f32 = 0.35;
 const MARGIN: f32 = 0.25;
 /// Букв среди знаков (цифры и пробелы не в счёт) не меньше этой доли: `rgb(79, 122, 18)` — не речь.
 const MIN_LETTER_SHARE: f32 = 0.6;
+/// Одно слово заглавными не длиннее этого — сокращение (`LGTM`, `HTTP`, `UEFI`), а не слово с включённым Caps Lock.
+const MAX_ACRONYM: usize = 5;
+/// Русская пунктуация, набранная клавишами английской раскладки (`ltkf&`), в английском тексте почти не бывает: тогда
+/// сравнивать перевод с исходным не нужно — хватает, чтобы он был похож на русский не меньше чем на столько.
+const MIN_TARGET_TYPED: f32 = 0.5;
+/// Что может стоять после последней буквы слова: знаки русской пунктуации в английской раскладке и их соседи.
+const TAIL: &str = "&^$@?!)/.,;:'\"][";
 
 const EN_LOW: &str = "qwertyuiop[]asdfghjkl;'zxcvbnm,.`";
 const RU_LOW: &str = "йцукенгшщзхъфывапролджэячсмитьбюё";
@@ -187,10 +201,33 @@ fn word_start_ok(ru: char, next: char, lists: &Lists) -> bool {
     }
 }
 
+/// Как читать знаки в конце слов текста.
+#[derive(Clone, Copy)]
+struct Reading {
+    /// Точка в конце слова здесь — «ю».
+    dot_is_letter: bool,
+    /// `?` после слова — запятая русской раскладки (Shift+`/`): за словом идёт ещё слово, а запятая в тексте не обычная.
+    question_is_comma: bool,
+    /// Текст набран настоящими клавишами (в нём есть `?` вместо запятой или `&`, `^`, `$`): запятая в конце слова — «б», точка
+    /// с запятой — «ж», точка — «ю»; обычной пунктуации на этих клавишах там нет.
+    real_keys: bool,
+}
+
 /// Одно слово английской раскладки: буквы переводятся по клавишам, знаки в начале и в конце — по правилам из заголовка.
-/// `out` и `letter` — то же слово: результат и «этот знак стал буквой»; `dot_is_letter` — точка в конце слова здесь «ю».
-fn convert_token(tok: &[char], out: &mut [char], letter: &mut [bool], dot_is_letter: bool, lists: &Lists) {
-    let Some(first) = tok.iter().position(|c| c.is_ascii_alphabetic()) else { return };
+/// `out` и `letter` — то же слово: результат и «этот знак стал буквой».
+fn convert_token(tok: &[char], out: &mut [char], letter: &mut [bool], reading: Reading, lists: &Lists) {
+    let Some(first) = tok.iter().position(|c| c.is_ascii_alphabetic()) else {
+        // Число в конце предложения: «28/» → «28.», «34)/» → «34).»
+        let n = tok.len();
+        if n > 1
+            && tok[n - 1] == '/'
+            && tok[..n - 1].iter().all(|c| c.is_ascii_digit() || *c == ')')
+            && tok[0].is_ascii_digit()
+        {
+            out[n - 1] = '.';
+        }
+        return;
+    };
     let last = tok.iter().rposition(|c| c.is_ascii_alphabetic()).unwrap_or(first);
     // Буквы и всё, что между ними: знаки на клавишах букв — тоже буквы.
     for i in first..=last {
@@ -218,7 +255,24 @@ fn convert_token(tok: &[char], out: &mut [char], letter: &mut [bool], dot_is_let
         let c = tok[i];
         if (c == '[' || c == '`') && !wrapped {
             // «х» и «ё» в конце слова («их», «всё»): `[` и `` ` `` знаком в обычной речи не бывают.
-            if let Some(r) = key_to_ru(c).filter(|&r| c == '`' || weight(&lists.ru, prev, r) > 0) {
+            // После гласной («двух», «трёх», «случаях») — всегда; после согласной («их» → `b[`) — по паре букв.
+            let ok = |r: char| c == '`' || VOWELS.contains(lower(prev)) || weight(&lists.ru, prev, r) > 0;
+            if let Some(r) = key_to_ru(c).filter(|&r| ok(r)) {
+                out[i] = r;
+                letter[i] = true;
+                prev = r;
+                continue;
+            }
+        }
+        // Настоящими клавишами запятая, точка с запятой и точка — буквы б, ж, ю («масштаб», «муж», «вживую»).
+        if reading.real_keys && i == last + 1 {
+            let key = match c {
+                ',' => Some('б'),
+                ';' => Some('ж'),
+                '.' => Some('ю'),
+                _ => None,
+            };
+            if let Some(r) = key {
                 out[i] = r;
                 letter[i] = true;
                 prev = r;
@@ -226,18 +280,88 @@ fn convert_token(tok: &[char], out: &mut [char], letter: &mut [bool], dot_is_let
             }
         }
         // «ю» в конце слова («люблю»), а не точка: русская точка — на клавише `/`.
-        if c == '.' && i == last + 1 && dot_is_letter && weight(&lists.ru, prev, 'ю') > 0 {
+        if c == '.' && i == last + 1 && reading.dot_is_letter && weight(&lists.ru, prev, 'ю') > 0 {
             out[i] = 'ю';
             letter[i] = true;
             prev = 'ю';
             continue;
         }
-        // Русская точка — на клавише `/`.
-        if c == '/' && i == tok.len() - 1 && tok[i - 1].is_ascii_alphabetic() {
+        // Запятая русской раскладки — Shift+`/`: «Ghbdtn? rfr» → «Привет, как».
+        if c == '?' && reading.question_is_comma {
+            out[i] = ',';
+            continue;
+        }
+        // Вопрос, двоеточие, точку с запятой и кавычку ставит `typed_signs`; они не мешают знакам за ними («@lf@?»).
+        if "&^$@!)".contains(c) {
+            continue;
+        }
+        // Русская точка — на клавише `/`; до неё в хвосте только знаки, что принимались выше («...экрана)/»).
+        if c == '/' && i == tok.len() - 1 {
             out[i] = '.';
         }
         break;
     }
+}
+
+/// Знак русской пунктуации, набранный клавишей английской раскладки: где он в тексте и чем стал.
+struct Typed {
+    at: usize,
+    sign: char,
+    /// После слова, а не между цифрами или перед числом: так английский текст не пишут (`ltkf&`, `Dhtvz^`).
+    after_word: bool,
+}
+
+/// Русская пунктуация, набранная клавишами английской раскладки: `&` — «?», `^` — «:», `$` — «;», `@` — кавычка (парная),
+/// `#` перед числом — «№», `^` и `?` между цифрами — «:» и «,» (время, десятичная запятая). Только там, где знак может быть знаком: после слова (за ним — лишь такие
+/// же знаки и пробел) и перед числом; `a@b.c`, `#tag`, `$HOME`, `x^2`, `AT&T` остаются кодом. `?` (запятая) и `/` (точка)
+/// разбирает `convert_token`.
+fn typed_signs(chars: &[char]) -> Vec<Typed> {
+    let mut found = Vec::new();
+    // Открывающие кавычки, что ждут закрывающей.
+    let mut open: Vec<usize> = Vec::new();
+    for (start, end) in tokens(chars) {
+        let tok = &chars[start..end];
+        // `#15` — «№15».
+        if tok.len() > 1 && tok[0] == '#' && tok[1..].iter().all(char::is_ascii_digit) {
+            found.push(Typed { at: start, sign: '№', after_word: false });
+            continue;
+        }
+        // `15^00` — «15:00», `1?5` — «1,5»: между цифрами.
+        for i in 1..tok.len().saturating_sub(1) {
+            let between_digits = tok[i - 1].is_ascii_digit() && tok[i + 1].is_ascii_digit();
+            match tok[i] {
+                '^' if between_digits => found.push(Typed { at: start + i, sign: ':', after_word: false }),
+                '?' if between_digits => found.push(Typed { at: start + i, sign: ',', after_word: false }),
+                _ => {}
+            }
+        }
+        // Открывающая кавычка — `@` в начале слова перед клавишей буквы.
+        if tok.len() > 1 && tok[0] == '@' && key_to_ru(tok[1]).is_some() {
+            open.push(start);
+        }
+        let Some(last) = tok.iter().rposition(|c| c.is_ascii_alphabetic()) else { continue };
+        let tail = &tok[last + 1..];
+        if !tail.iter().all(|c| TAIL.contains(*c)) {
+            continue;
+        }
+        for (k, &c) in tail.iter().enumerate() {
+            let at = start + last + 1 + k;
+            match c {
+                '&' => found.push(Typed { at, sign: '?', after_word: true }),
+                '^' => found.push(Typed { at, sign: ':', after_word: true }),
+                '$' => found.push(Typed { at, sign: ';', after_word: true }),
+                '@' => {
+                    // Закрывающая кавычка — если есть открывающая.
+                    if let Some(opening) = open.pop() {
+                        found.push(Typed { at: opening, sign: '"', after_word: true });
+                        found.push(Typed { at, sign: '"', after_word: true });
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    found
 }
 
 /// Текст с обычной пунктуацией: после слова стоит запятая, точка с запятой или двоеточие, за которыми «б», «ж», «Ж» не бывает
@@ -255,21 +379,52 @@ fn natural_punctuation(chars: &[char], lists: &Lists) -> bool {
 }
 
 /// Английская раскладка → русский: результат и пометки «стал буквой» по знакам.
-fn latin_to_russian(chars: &[char]) -> (Vec<char>, Vec<bool>) {
+fn latin_to_russian(chars: &[char], typed: &[Typed]) -> (Vec<char>, Vec<bool>) {
     let lists = lists();
     let mut out = chars.to_vec();
     let mut letter = vec![false; chars.len()];
+    // Запятая после слова, за которой «б» не бывает, — обычная пунктуация: и `?`, и точки в таком тексте остаются как есть.
     let natural = natural_punctuation(chars, lists);
-    for (start, end) in tokens(chars) {
+    let words = tokens(chars);
+    // `?` после слова, за которым есть ещё слово, — запятая; вместе со знаками вроде `&` это признак настоящего набора.
+    let comma_questions = words.iter().take(words.len().saturating_sub(1)).any(|&(start, end)| {
+        let tok = &chars[start..end];
+        tok.iter().rposition(|c| c.is_ascii_alphabetic()).is_some_and(|last| tok[last + 1..].contains(&'?'))
+    });
+    let real_keys = !natural && (comma_questions || typed.iter().any(|t| t.after_word));
+    for (start, end) in words {
         // Точка в конце слова — «ю», если после неё слово с маленькой буквы или текст кончился: точку так не ставят.
+        // `?` после слова — запятая, если за ним идёт ещё слово; последний `?` текста остаётся вопросом.
         let next = chars[end..].iter().find(|c| !c.is_whitespace());
-        let dot_is_letter = !natural && next.is_none_or(|c| c.is_ascii_lowercase());
-        convert_token(&chars[start..end], &mut out[start..end], &mut letter[start..end], dot_is_letter, lists);
+        let reading = Reading {
+            dot_is_letter: !natural && next.is_none_or(|c| c.is_ascii_lowercase()),
+            question_is_comma: !natural && next.is_some(),
+            real_keys,
+        };
+        convert_token(&chars[start..end], &mut out[start..end], &mut letter[start..end], reading, lists);
+    }
+    for t in typed {
+        out[t.at] = t.sign;
     }
     (out, letter)
 }
 
-/// Русская раскладка → английский: каждая русская буква — клавиша, остальное как есть.
+/// Знак русской раскладки на клавише английской (Shift+`/` — запятая, Shift+7 — вопрос и т. д.); `None` — клавиша та же.
+fn sign_to_key(c: char) -> Option<char> {
+    Some(match c {
+        ',' => '?',
+        '.' => '/',
+        '?' => '&',
+        '"' => '@',
+        '№' => '#',
+        ';' => '$',
+        ':' => '^',
+        _ => return None,
+    })
+}
+
+/// Русская раскладка → английский: каждая русская буква — клавиша; знаки русской раскладки — клавиши английской («Рщц фку нщг,»
+/// → «How are you?»); цифры, пробелы и прочее — как есть.
 fn cyrillic_to_latin(chars: &[char]) -> (Vec<char>, Vec<bool>) {
     let mut out = chars.to_vec();
     let mut letter = vec![false; chars.len()];
@@ -277,16 +432,18 @@ fn cyrillic_to_latin(chars: &[char]) -> (Vec<char>, Vec<bool>) {
         if let Some(k) = letter_to_key(c) {
             out[i] = k;
             letter[i] = true;
+        } else if let Some(k) = sign_to_key(c) {
+            out[i] = k;
         }
     }
     (out, letter)
 }
 
-/// Текст, набранный в английской раскладке, как он вышел бы в русской: «Ghbdtn, rfr ltkf?» → «Привет, как дела?».
+/// Текст, набранный в английской раскладке, как он вышел бы в русской: «Ghbdtn? rfr ltkf&» → «Привет, как дела?».
 #[cfg(test)]
 fn to_russian(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
-    latin_to_russian(&chars).0.into_iter().collect()
+    latin_to_russian(&chars, &typed_signs(&chars)).0.into_iter().collect()
 }
 
 /// Текст, набранный в русской раскладке, как он вышел бы в английской: «Руддщ цщкдв» → «Hello world».
@@ -298,11 +455,15 @@ fn to_english(text: &str) -> String {
 
 // ─── Распознавание ──────────────────────────────────────────────────────────
 
-/// Адрес, путь, код, число, цвет: знаки, каких в речи нет, и их сочетания. Скобки `{ } < > ~` — только в начале слова перед
-/// буквой: так выходят заглавные Х, Ъ, Б, Ю, Ё в английской раскладке («{jhjij» — «Хорошо»).
-fn looks_technical(chars: &[char]) -> bool {
-    const SIGNS: &str = "\\@#$%^&*=+|_";
+/// Адрес, путь, код, число, цвет: знаки, каких в речи нет, и их сочетания. `@ # $ ^ &` — кроме русской пунктуации, набранной
+/// клавишами английской раскладки (`typed_signs`). Скобки `{ } < > ~` — только в начале слова перед буквой: так выходят
+/// заглавные Х, Ъ, Б, Ю, Ё в английской раскладке («{jhjij» — «Хорошо»).
+fn looks_technical(chars: &[char], typed: &[Typed]) -> bool {
+    const SIGNS: &str = "\\%*=+|_";
     if chars.iter().any(|&c| SIGNS.contains(c)) {
+        return true;
+    }
+    if chars.iter().enumerate().any(|(i, &c)| "@#$^&".contains(c) && !typed.iter().any(|t| t.at == i)) {
         return true;
     }
     let text: String = chars.iter().collect();
@@ -334,7 +495,11 @@ fn english_plausible(out: &[char], letter: &[bool]) -> bool {
 /// или не речь (адрес, путь, код, число, слишком короткий, смесь письменностей).
 pub fn suggest(text: &str) -> Option<Fix> {
     let chars: Vec<char> = text.chars().collect();
-    if chars.len() > MAX_CHARS || looks_technical(&chars) {
+    if chars.len() > MAX_CHARS {
+        return None;
+    }
+    let typed = typed_signs(&chars);
+    if looks_technical(&chars, &typed) {
         return None;
     }
     let (mut latin, mut cyrillic) = (0usize, 0usize);
@@ -356,6 +521,13 @@ pub fn suggest(text: &str) -> Option<Fix> {
     if letters < MIN_LETTERS || (words.len() == 1 && letters < MIN_LETTERS_ONE_WORD) {
         return None;
     }
+    // Одно короткое слово заглавными — сокращение (`LGTM`, `HTTP`), а не набранное в не той раскладке.
+    if words.len() == 1
+        && letters <= MAX_ACRONYM
+        && chars.iter().filter(|c| c.is_alphabetic()).all(|c| c.is_uppercase())
+    {
+        return None;
+    }
     let signs = chars.iter().filter(|c| !c.is_whitespace() && !c.is_ascii_digit()).count();
     if (letters as f32) < MIN_LETTER_SHARE * signs as f32 {
         return None;
@@ -370,7 +542,7 @@ pub fn suggest(text: &str) -> Option<Fix> {
         if name {
             return None;
         }
-        (To::Russian, latin_to_russian(&chars))
+        (To::Russian, latin_to_russian(&chars, &typed))
     } else {
         if chars.contains(&'/') {
             return None;
@@ -417,7 +589,11 @@ pub fn suggest(text: &str) -> Option<Fix> {
     // Вес пары — до 2, поэтому доля — вес, делённый на удвоенное число пар.
     let scale = 2.0 * pairs as f32;
     let (like_to, like_from) = (to_weight as f32 / scale, from_weight as f32 / scale);
-    (like_to >= MIN_TARGET && like_to - like_from >= MARGIN).then(|| Fix { text: out.into_iter().collect(), to })
+    // Знак вроде `ltkf&` в английском тексте не бывает: короткое «Ult ns&» (английские пары `ul`, `lt`, `ns` частые)
+    // узнаётся и без сравнения с исходным.
+    let typed_after_word = to == To::Russian && typed.iter().any(|t| t.after_word);
+    let sure = like_to >= MIN_TARGET && like_to - like_from >= MARGIN;
+    (sure || (typed_after_word && like_to >= MIN_TARGET_TYPED)).then(|| Fix { text: out.into_iter().collect(), to })
 }
 
 #[cfg(test)]
@@ -428,13 +604,38 @@ mod tests {
         suggest(text).map(|f| (f.text, f.to))
     }
 
-    /// Русская фраза, как она вышла бы в английской раскладке; английская — как в русской.
+    /// Русская фраза, как она выходит, если набрать её клавишами при английской раскладке: точка — `/`, запятая — Shift+`/`,
+    /// вопрос — Shift+7, кавычка — Shift+2, «№» — Shift+3, точка с запятой — Shift+4, двоеточие — Shift+6. Таблица своя, не
+    /// из кода: тест не проверяет код им же.
     fn typed_in_en(ru: &str) -> String {
-        to_english(ru)
+        ru.chars()
+            .map(|c| match c {
+                '.' => '/',
+                ',' => '?',
+                '?' => '&',
+                '"' => '@',
+                '№' => '#',
+                ';' => '$',
+                ':' => '^',
+                c => letter_to_key(c).unwrap_or(c),
+            })
+            .collect()
     }
 
+    /// Английская фраза, набранная клавишами при русской раскладке (знаки — как выше, в обратную сторону).
     fn typed_in_ru(en: &str) -> String {
-        en.chars().map(|c| key_to_ru(c).unwrap_or(c)).collect()
+        en.chars()
+            .map(|c| match c {
+                '/' => '.',
+                '?' => ',',
+                '&' => '?',
+                '@' => '"',
+                '#' => '№',
+                '$' => ';',
+                '^' => ':',
+                c => key_to_ru(c).unwrap_or(c),
+            })
+            .collect()
     }
 
     #[test]
@@ -519,7 +720,76 @@ mod tests {
         assert_eq!(to_english("Руддщб цщкдв!"), "Hello, world!", "б — клавиша запятой");
         assert_eq!(to_english("вщтэе"), "don't");
         assert_eq!(to_english("ЙЦУКЕН"), "QWERTY");
-        assert_eq!(to_english("Привет, мир 12"), "Ghbdtn, vbh 12", "запятая, цифры и пробелы остаются");
+        // Знаки русской раскладки — клавиши английской: запятая — Shift+/ (`?`), вопрос — Shift+7 (`&`), точка — `/`.
+        assert_eq!(to_english("Рщц фку нщг,"), "How are you?", "запятая в конце — это вопрос");
+        assert_eq!(to_english("Привет, мир 12"), "Ghbdtn? vbh 12", "запятая — Shift+/, цифры и пробелы остаются");
+        assert_eq!(to_english("Ыуу нщг фе 5ю"), "See you at 5.", "точка английской раскладки — буква «ю»");
+        assert_eq!(to_english("фтв.щк"), "and/or", "точка русской раскладки — это `/`");
+        assert_eq!(to_english("Сфдд ьуЖ тщц"), "Call me: now", "Shift+; — «Ж»");
+        assert_eq!(to_english("Ру ыфшв ЭнуыЭ"), "He said \"yes\"", "Shift+' — «Э»");
+        assert_eq!(
+            to_english("№5 \"а\"; б: в?"),
+            "#5 @f@$ ,^ d&",
+            "№ Shift+3, \" Shift+2, ; Shift+4, : Shift+6, ? Shift+7"
+        );
+    }
+
+    #[test]
+    fn russian_punctuation_typed_with_the_english_layout_comes_back() {
+        // Запятая — Shift+/ (`?`), вопрос — Shift+7 (`&`), кавычка — Shift+2 (`@`), двоеточие — Shift+6 (`^`).
+        assert_eq!(to_russian("Ghbdtn? rfr ltkf&"), "Привет, как дела?");
+        assert_eq!(to_russian("Jr? gjyzk/"), "Ок, понял.");
+        assert_eq!(to_russian("Ult ns&"), "Где ты?");
+        assert_eq!(to_russian("Crf;b @lf@"), "Скажи \"да\"");
+        assert_eq!(to_russian("@Ghbdtn vbh@ - crfpfk jy"), "\"Привет мир\" - сказал он", "кавычки на несколько слов");
+        assert_eq!(to_russian("Dhtvz^ 10 vbyen"), "Время: 10 минут");
+        assert_eq!(to_russian("Dcnhtxf d 15^00"), "Встреча в 15:00", "двоеточие между цифрами");
+        assert_eq!(to_russian("Gbnm 1?5 kbnhf"), "Пить 1,5 литра", "запятая между цифрами");
+        // Настоящими клавишами запятая, точка с запятой и точка в конце слова — буквы б, ж, ю; без них — знаки.
+        assert_eq!(to_russian("Vfcinf, df;ty? ve; ljvf"), "Масштаб важен, муж дома");
+        assert_eq!(to_russian("D;bde. ghjdthtyj? yt ghjdthtyj"), "Вживую проверено, не проверено");
+        assert_eq!(
+            to_russian("Ve; ljvf"),
+            "Му; дома",
+            "без признаков настоящего набора точка с запятой остаётся знаком"
+        );
+        assert_eq!(to_russian("(ghjdthtyj ntcnjd 34)/"), "(проверено тестов 34).", "точка после скобки");
+        assert_eq!(to_russian("Ljujdjh #15"), "Договор №15", "`#` перед числом — «№»");
+        assert_eq!(to_russian("Vjkjrj$ csh$ vfckj"), "Молоко; сыр; масло", "точка с запятой — Shift+4");
+        assert_eq!(to_russian("Xnj&! Rfr&&"), "Что?! Как??", "знаки подряд");
+        assert_eq!(to_russian("Ghbdtn (rfr ltkf)? z"), "Привет (как дела), я", "запятая после скобки");
+        assert_eq!(to_russian("Crf;b @lf@? b"), "Скажи \"да\", и", "запятая после кавычки");
+        // Запятая: за ней идёт слово, большая буква ему не мешает (Вася); последний `?` текста — вопрос.
+        assert_eq!(to_russian("Ghbdtn? dfcz"), "Привет, вася");
+        assert_eq!(to_russian("Ghbdtn? Dfcz"), "Привет, Вася");
+        assert_eq!(to_russian("Ghbdtn?"), "Привет?");
+        assert_eq!(to_russian("Ghbdtn?\nrfr ltkf&"), "Привет,\nкак дела?");
+        // Обычная запятая в тексте — тогда `?` остаётся вопросом, как в образце из задачи.
+        assert_eq!(to_russian("Ghbdtn, rfr ltkf?"), "Привет, как дела?");
+        assert_eq!(to_russian("Ghbdtn, rfr ltkf&"), "Привет, как дела?", "смесь: запятая — запятая, `&` — вопрос");
+    }
+
+    #[test]
+    fn signs_of_code_stay_code_even_in_a_russian_looking_text() {
+        for text in [
+            "user@example.com ghbdtn vbh",
+            "@username ghbdtn vbh",
+            "ghbdtn @vbh",
+            "ghbdtn vbh@",
+            "ghbdtn #tag vbh",
+            "ghbdtn $HOME vbh",
+            "ghbdtn $5 vbh",
+            "x^2 ghbdtn vbh",
+            "ghbdtn a&&b vbh",
+            "AT&T ghbdtn vbh",
+            "^start ghbdtn vbh",
+            "foo(&bar) ghbdtn vbh",
+            "ghbdtn 10^ vbh",
+            "ghbdtn &amp; vbh",
+            "ghbdtn#15 vbh",
+        ] {
+            assert_eq!(offered(text), None, "{text}");
+        }
     }
 
     #[test]
@@ -538,6 +808,33 @@ mod tests {
         assert_eq!(offered("Руддщ цщкдв"), Some(("Hello world".into(), To::English)));
         assert_eq!(offered("Руддщб цщкдв!"), Some(("Hello, world!".into(), To::English)));
         assert_eq!(offered("вщтэе дщыу"), Some(("don't lose".into(), To::English)));
+    }
+
+    /// Вопросы, набранные по-настоящему — клавишами не той раскладки (запятая `?`, вопрос `&`), — узнаются.
+    #[test]
+    fn typed_questions_and_punctuation_are_offered() {
+        for (typed, fixed) in [
+            ("Ghbdtn? rfr ltkf&", "Привет, как дела?"),
+            ("Jr? gjyzk/", "Ок, понял."),
+            ("Ult ns&", "Где ты?"),
+            ("Crf;b @lf@", "Скажи \"да\""),
+            ("Dhtvz^ 10 vbyen", "Время: 10 минут"),
+            ("Dcnhtxf d 15^00", "Встреча в 15:00"),
+            ("Xnj yjdjuj&", "Что нового?"),
+        ] {
+            assert_eq!(offered(typed), Some((fixed.into(), To::Russian)), "{typed}");
+        }
+        for (typed, fixed) in [
+            ("Рщц фку нщг,", "How are you?"),
+            ("Руддщб рщц фку нщг,", "Hello, how are you?"),
+            ("Ыуу нщг фе 5ю", "See you at 5."),
+            ("Сфдд ьуЖ тщц", "Call me: now"),
+            ("Ру ыфшв ЭнуыЭ", "He said \"yes\""),
+        ] {
+            assert_eq!(offered(typed), Some((fixed.into(), To::English)), "{typed}");
+        }
+        // Вопрос из одного слова.
+        assert_eq!(offered("Ghbdtn&"), Some(("Привет?".into(), To::Russian)));
     }
 
     /// Фраза, набранная клавишами не той раскладки, узнаётся и возвращается как была.
@@ -563,8 +860,26 @@ mod tests {
             "программа",
             "клавиатура",
             "сообщение",
+            // С настоящей пунктуацией: запятая, вопрос, точка, двоеточие, кавычки, номер.
+            "Привет, как дела?",
+            "Привет, как дела",
+            "Как дела?",
+            "Я дома.",
+            "Где ты?",
+            "Ок, понял.",
+            "Скажи \"да\"",
+            "Время: 10 минут",
+            "Встреча в 15:00",
+            "Привет, Вася",
+            "Что нового?",
+            "Мы дома",
+            "Когда придёшь, позвони",
+            "Договор №15 подписан",
+            "Молоко; сыр; масло",
+            "Ты дома? Я скоро буду.",
+            "Спасибо, всё получилось!",
         ] {
-            assert_eq!(offered(&typed_in_en(ru)), Some((ru.into(), To::Russian)), "{ru}");
+            assert_eq!(offered(&typed_in_en(ru)), Some((ru.into(), To::Russian)), "{ru} → {}", typed_in_en(ru));
         }
         for en in [
             "Hello, how are you?",
@@ -577,8 +892,17 @@ mod tests {
             "settings",
             "clipboard history",
             "Don't forget the keys",
+            // С настоящей пунктуацией: `?` выходит запятой, `/` — точкой, `:` и `"` — «Ж» и «Э».
+            "How are you?",
+            "Is it ready?",
+            "See you at 5.",
+            "Call me: now",
+            "He said \"yes\"",
+            "Wait, what?",
+            "Where is the meeting?",
+            "Thanks! See you tomorrow.",
         ] {
-            assert_eq!(offered(&typed_in_ru(en)), Some((en.into(), To::English)), "{en}");
+            assert_eq!(offered(&typed_in_ru(en)), Some((en.into(), To::English)), "{en} → {}", typed_in_ru(en));
         }
     }
 
@@ -612,6 +936,15 @@ mod tests {
         for text in ["ok", "да", "rj", "ghb", "rjl", "pdf", "png", "css", "git", "ntl", "a", "", "   "] {
             assert_eq!(offered(text), None, "{text:?}");
         }
+        // Одно слово заглавными до пяти букв — сокращение, а не слово с Caps Lock: «LGTM» не «ДПЕЬ».
+        for text in ["LGTM", "HTTP", "ASAP", "NASA", "UEFI", "HDMI", "ГОСТ", "ЖКХ"] {
+            assert_eq!(offered(text), None, "{text:?}");
+        }
+        assert_eq!(
+            offered("GHBDTN").map(|(t, _)| t),
+            Some("ПРИВЕТ".into()),
+            "а слово подлиннее — Caps Lock, предлагаем"
+        );
         // Слово из четырёх букв и несколько слов — уже можно.
         assert_eq!(offered("ntcn").map(|(t, _)| t), Some("тест".into()));
         assert_eq!(offered("ntcn ntcn").map(|(t, _)| t), Some("тест тест".into()));
