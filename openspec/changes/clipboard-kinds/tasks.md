@@ -16,7 +16,7 @@
 - [x] 2.2 `checks.py fmt test clippy` зелёные
 - [x] 2.3 docs (`guide/usage.md`, `architecture/overview.md`), `docs/ui-guideline.md`, SPEC («Этап 2.3 — Буфер»),
       HANDOFF
-- [ ] 2.4 Сверка судьёй
+- [x] 2.4 Сверка судьёй
 
 ## 3. Круг по судье (27.10.2026)
 

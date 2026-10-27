@@ -18,7 +18,7 @@
 - [x] 3.2 `checks.py fmt test clippy` зелёные
 - [x] 3.3 docs (`guide/usage.md`, `architecture/overview.md`), `docs/ui-guideline.md`, SPEC («Этап 2.2 — Поиск
       действий»), HANDOFF
-- [ ] 3.4 Сверка судьёй
+- [x] 3.4 Сверка судьёй
 
 ## 4. Круг исправлений по судье
 

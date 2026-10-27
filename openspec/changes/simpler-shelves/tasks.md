@@ -33,7 +33,7 @@
 - [x] 4.2 `checks.py fmt test clippy` зелёные
 - [x] 4.3 docs (`guide/usage.md`, `architecture/overview.md`, `README.md`, `docs/README.md`), `docs/img`,
       `docs/ui-guideline.md` (правила полок и правки, журнал), SPEC, HANDOFF
-- [ ] 4.4 сверка судьёй: docs против кода (за оркестратором)
+- [x] 4.4 сверка судьёй: docs против кода (за оркестратором)
 
 ## 5. Круг исправлений по судье
 
