@@ -331,6 +331,12 @@ pub struct App {
     shot: Option<crate::shot::Shot>,
     /// Обновления (`anvil-update`); в демо и тестах — нет.
     updater: Option<anvil_update::Updater>,
+    /// Когда программа запущена (первая проверка обновлений — через `update::FIRST_CHECK`) и когда повторить проверку, что
+    /// не удалась сама (`update::RETRY`).
+    launched: Instant,
+    update_retry: Option<Instant>,
+    /// Высота баннера обновления над карточками в прошлом кадре: своя высота полки растёт на неё (иначе баннер теснит карточки).
+    banner_h: f32,
 }
 
 /// Сочетание в виде, который ждёт поток клавиш: модификаторы и клавиша.
@@ -435,6 +441,9 @@ impl App {
             no_activate: None,
             shot: crate::shot::Shot::from_env(),
             updater,
+            launched: Instant::now(),
+            update_retry: None,
+            banner_h: 0.0,
         };
         // Для снимков: `ANTRESOL_VIEW=search` — сразу вид поиска, `ANTRESOL_QUERY=1080` — с этим запросом.
         if app.view == View::Search {
@@ -520,7 +529,8 @@ impl App {
         if let Some(h) = self.held {
             return h;
         }
-        let own = self.settings.shelves.get(self.shelf).and_then(|s| s.height).map(f32::from);
+        // Своя высота — у карточек: баннер обновления над ними прибавляется (у «по полке» он и так в замере).
+        let own = self.settings.shelves.get(self.shelf).and_then(|s| s.height).map(|h| f32::from(h) + self.banner_h);
         let fit = self.fit.get(self.shelf).copied().flatten();
         own.or(fit).unwrap_or(self.height).clamp(MIN_HEIGHT, MAX_HEIGHT)
     }
@@ -960,9 +970,23 @@ impl App {
 
     fn tick(&mut self, ctx: &egui::Context) {
         motion::tick(ctx);
-        // Обновления: при запуске и раз в сутки, если включено.
-        if let Some(u) = &self.updater {
+        // Обновления: через минуту после запуска и раз в сутки, если включено; не удалась сама (нет сети) — ещё раз через 15 мин.
+        if let Some(u) = &self.updater
+            && self.launched.elapsed() >= crate::update::FIRST_CHECK
+        {
             u.auto(&self.settings.common);
+            let common = &self.settings.common;
+            let lost = common.check_updates && matches!(u.state(), anvil_update::State::Failed { update: None, .. });
+            match self.update_retry {
+                None if lost => self.update_retry = Some(Instant::now() + crate::update::RETRY),
+                Some(at) if Instant::now() >= at => {
+                    self.update_retry = None;
+                    if lost {
+                        u.check(common.prerelease, common.skip_version.as_deref(), false);
+                    }
+                }
+                _ => {}
+            }
         }
         if let Some(shot) = &mut self.shot {
             shot.tick(ctx);
@@ -2509,9 +2533,15 @@ impl App {
     /// Сам меряется вместе с полкой: карточкам под ним меньше места, и высота по полке растёт на его высоту.
     fn update_banner(&mut self, ui: &mut Ui) {
         let Some(u) = self.updater.clone() else { return };
+        if matches!(u.state(), anvil_update::State::Ready { .. }) {
+            // В баннере есть «Перезапустить»: новая версия должна знать, чей выход ждать.
+            crate::update::arm_restart();
+        }
+        let top = ui.cursor().top();
         if anvil_update::ui::banner(ui, &u, &mut self.settings.common) {
             self.save();
         }
+        self.banner_h = ui.cursor().top() - top;
     }
 
     /// «Обновления» в настройках: проверять ли, предлагать ли пред-выпуски, что сейчас и одна кнопка по состоянию.
@@ -2544,10 +2574,13 @@ impl App {
                     match button {
                         Button::Check => u.check(self.settings.common.prerelease, None, true),
                         Button::Install | Button::Retry => u.install(),
-                        Button::Restart => match u.restart() {
-                            Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
-                            Err(e) => self.toasts.push(format!("{}: {e}", t.failed), Tone::Danger),
-                        },
+                        Button::Restart => {
+                            crate::update::arm_restart();
+                            match u.restart() {
+                                Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                                Err(e) => self.toasts.push(format!("{}: {e}", t.failed), Tone::Danger),
+                            }
+                        }
                         Button::None => {}
                     }
                 }
@@ -3324,6 +3357,11 @@ impl App {
         let body = Rect::from_min_max(Pos2::new(inner.left(), BODY_TOP), inner.max);
         let mut body_ui = content.new_child(UiBuilder::new().max_rect(body));
         let device = self.monitor().map(|m| m.device.clone()).unwrap_or_default();
+        // «Что нового» открыт: его Esc закрывает только его (диалог закрывается в баннере, раньше общего Esc ниже).
+        let notes_open: bool = ctx.data(|d| d.get_temp(egui::Id::new("anvil-update-notes"))).unwrap_or(false);
+        if self.view != View::Cards {
+            self.banner_h = 0.0;
+        }
         match self.view {
             View::Cards => {
                 self.update_banner(&mut body_ui);
@@ -3339,6 +3377,7 @@ impl App {
             self.grips(ui, panel, ppp);
         }
         if ctx.input(|i| i.key_pressed(egui::Key::Escape))
+            && !notes_open
             && self.grip.is_none()
             && self.capture.is_none()
             && !self.capture_panel
@@ -4097,6 +4136,9 @@ mod tests {
                 no_activate: None,
                 shot: None,
                 updater,
+                launched: Instant::now(),
+                update_retry: None,
+                banner_h: 0.0,
             }
         }
     }

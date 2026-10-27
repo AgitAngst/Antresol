@@ -184,13 +184,17 @@
 
 `src/update.rs` — обёртка над `anvil-update` (тег набора тот же, что у `anvil-ui`): `update::new` заводит `Updater`
 (`Config::new("antresol", версия, "AgitAngst/Antresol")`), кроме демо и тестов (`sys::isolated` — сети там нет), и
-зовёт `anvil_update::cleanup` (остатки прошлой подмены exe). `App::tick` зовёт `Updater::auto` (при запуске и раз в
-сутки, если `common.check_updates`); баннер — `anvil_update::ui::banner` в начале тела вида карточек (`update_banner`),
+зовёт `anvil_update::cleanup` (остатки прошлой подмены exe). `App::tick` зовёт `Updater::auto` не раньше
+`update::FIRST_CHECK` (60 с) после запуска и раз в сутки, если `common.check_updates`; проверка, что не удалась сама
+(`Failed` без выпуска — нет сети), повторяется через `update::RETRY` (15 мин; у крейта следующая — через сутки). Своя высота
+полки растёт на высоту баннера (`App::banner_h`); Esc при открытом «Что нового» (временный флаг крейта
+`anvil-update-notes`) общего Esc не делает; баннер — `anvil_update::ui::banner` в начале тела вида карточек (`update_banner`),
 раздел в настройках — `updates_ui` (кнопка по состоянию — `update::button`). Выпуск кладёт общий workflow семьи
 (`release.yml` → `rust-release.yml`): `antresol-X.Y.Z-windows-x64.zip` и `SHA256SUMS`, без которого крейт не ставит.
-Перезапуск: `Updater::restart` запускает новый exe, панель закрывается; новый процесс в начале `main`
-(`update::wait_for_previous`) ждёт прежний по номеру из `ANTRESOL_RESTARTED` (`sys::wait_process_exit`, до 10 с) и пишет
-туда свой. Только в debug-сборке `ANTRESOL_UPDATE_AS=2.7.0` выдаёт себя за старую версию — проверить путь на копии.
+Перезапуск: перед `Updater::restart` (кнопка в настройках; у баннера — пока он в состоянии `Ready`) `update::arm_restart`
+пишет номер процесса в `ANTRESOL_RESTARTED`; новый exe его наследует, панель закрывается; новый процесс в начале `main`
+(`update::wait_for_previous`) ждёт прежний (`sys::wait_process_exit`, до 20 с) и стирает переменную — программам,
+запущенным из панели, она не достаётся. Только в debug-сборке `ANTRESOL_UPDATE_AS=2.7.0` выдаёт себя за старую версию — проверить путь на копии.
 
 ## Демо-режим и тесты: выдуманный мир
 
