@@ -396,6 +396,55 @@ DynamicWin). Изменение OpenSpec `meetings`.
 пределом) приняты. Не делалось: мелочь 4 (общий запускатель) — по решению оркестратора; мелочь 9 (рамка ошибки у поля) — в kit-v0.6.1 её
 у поля ввода нет, ошибку говорят значок и слова под полем.
 
+## Этап 2.6 — Наушники одним щелчком (сделан 27.10.2026, решение владельца)
+
+Владелец 26.10.2026: идеи «второго круга» со звёздочкой — по одной (после HDR, сцен, поиска, буфера, живых плашек и встреч — наушники; «доделай что
+осталось»). Макет — холст «Antresol — новый вид», страница «Идеи ★ — 26.10», доска «Система», карточка «Bluetooth» (ToothTray — образец пути, кода оттуда
+нет). Изменение OpenSpec `bt-connect`.
+
+- **Подключить и отключить одним щелчком.** Звуковое сопряжённое устройство (наушники, гарнитура, колонка; класс «аудио и видео») подключается и
+  отключается щелчком по строке карточки «Bluetooth», Enter у строки с фокусом или кнопкой «Подключить» (у не подключённого); подсказка «Щелчок —
+  подключить» / «Щелчок — отключить». Пока идёт — «Подключение…» («Отключение…») с вертушкой; Windows спрашивается раз в секунду, до 15 с (отключение — до
+  10). Подключилось — «Подключено» и заряд; не вышло — строка снова прежняя и уведомление «Не удалось подключить «Наушники»: включите устройство и поднесите
+  ближе» (у отключения — «Не удалось отключить «Наушники»»). Мышь, клавиатура, геймпад — без кнопки и без щелчка: Windows подключает их сама, подсказка
+  «Подключается само, когда устройство включают». Радио Bluetooth выключено — «Подключить» серая, подсказка «Bluetooth выключен», щелчок ничего не делает.
+  Своё подключение плашки «подключено» не даёт. Меню по правому щелчку нет — «Параметры Bluetooth» кнопкой внизу, как было.
+- **Как.** Просьба драйверу, как у «Параметров Windows»: звуковые точки Windows (`EnumAudioEndpoints`, все состояния) → у каждой топология → фильтр Bluetooth-аудио
+  (`{2}.\\?\bth…`, музыка `bthenum` и звонки `bthhfenum`) → `IKsControl::KsProperty` с `KSPROPSETID_BtAudio`, `Id` 0 («переподключить») или 1 («отключить»),
+  всем фильтрам устройства. Устройство и его точки связывает ContainerId (у точки — `PKEY_Device_ContainerId`, у узла `BTHENUM` с адресом — `DEVPKEY_Device_ContainerId`),
+  а не адрес в id фильтра. Всё — в потоке с COM (MTA). Писатель — за заслоном (`sys::blocked("bt connect <имя>")` / `("bt disconnect <имя>")`, `real_write`
+  перед `KsProperty`). Подробно — `docs/architecture/overview.md`, «Bluetooth: подключить и отключить из панели».
+- **Поиск.** «Подключить «Наушники»» / «Отключить «Наушники»» у каждого звукового сопряжённого устройства (место «Bluetooth · Система»; слова «наушники колонка гарнитура
+  bluetooth headphones speaker headset»); радио выключено — серое, «Bluetooth выключен»; с устройством что-то делают — серое.
+- **Демо и тесты** — выдуманный мир: «Headphones» (подключены, 80 %), «Mouse» (подключена, 45 %), «Speaker» (звуковая, не подключена — «Подключить»), «Keyboard» (не подключена, без
+  кнопки); «Speaker» подключается 1,4 с, как в макете; мир помнит, что в него записали. Снимки — `shelf-system-*`, `bluetooth-connecting-*`, `bluetooth-off-*`.
+
+Версия 2.6.0: после 2.5.x вторая цифра даёт 2.6.0. Новые возможности `windows`: `Win32_Media_Audio`, `Win32_Media_KernelStreaming`, `Win32_System_Com_StructuredStorage`,
+`Win32_System_Variant`, `Win32_UI_Shell_PropertiesSystem`; зависимостей не прибавилось. `sound.rs` и `sys/kamerton.rs` не тронуты.
+
+**Отступления от design:**
+
+1. ContainerId устройства берётся у узлов `BTHENUM` и `BTHLEDEVICE` (design — только `BTHENUM`), сначала у присутствующих, не нашлось — у всех (`bt::containers_of`); контейнер
+   «нет» (`{00000000-0000-0000-FFFF-FFFFFFFFFFFF}`) и пустой не сопоставляются — иначе подошли бы чужие устройства.
+2. Больше шести фильтров у одного устройства — отказ без запроса (design: «всем фильтрам устройства»): так не бывает, и это защита чужих устройств от ошибки сопоставления.
+3. Фильтр соединителя ищется по цепочке `GetConnectedTo` → `IPart` → `GetTopologyObject` → `GetDeviceId`, а если цепочка не вышла — `GetDeviceIdConnectedTo` (запасной путь,
+   design его не называет).
+4. «Принял просьбу» — успех или `ERROR_MORE_DATA` (действие «в один выстрел» выполнено). Ни один фильтр не принял — «Не удалось подключить» сразу, без ожидания 15 секунд (design:
+   опрос до 15 с; у «звуковое, но точек нет» — то же). Принял, но не подключилось — 15 с, как в design.
+5. Чтения устройств нумеруются: запоздавший ответ (старее применённого) отбрасывается, иначе строка на миг возвращала бы «Не подключено» после подключения (design этого не требует).
+6. Радио Bluetooth читается вместе со списком, пока карточка на виду (раз в 1,5 с), а не в фоне для плашек (раз в 5 с): плашкам оно не нужно; `None` (радио нет, Windows не ответила) не мешает.
+7. Действие поиска не делает обратного написанному: «Подключить» не отключит устройство, что успело подключиться само, и наоборот (`bluetooth:connect:<адрес>`,
+   `bluetooth:disconnect:<адрес>`).
+8. Вид: зазор между строками 4, а не 8 макета (четыре выдуманных устройства иначе не влезают в карточку 340 высотой); «Подключить» и бейдж заряда нарисованы в строке (одна область
+   нажатия — фокус и щелчок у строки); заряд по-русски «80 %», по-английски «80%» (как на макете; раньше было «80%» на обоих языках); у серой строки Tab не берёт.
+9. В демо добавлены сцены снимков `ANTRESOL_VIEW=bluetooth-connecting` и `bluetooth-off` (design — только обычная); выдуманные «Speaker» (адрес 4) и «Keyboard» (3) стоят в порядке
+   «Headphones», «Mouse», «Speaker», «Keyboard», чтобы «Подключить» была третьей строкой, как на макете.
+10. «Подключить» и «Отключить» в `texts.rs` уже были (для VPN) — не продублированы; в английских словах апостроф типографский («Couldn’t»), как в остальных строках.
+
+Не вошло: включить радио Bluetooth из панели; мышь, клавиатура, геймпад; поиск новых устройств и сопряжение; меню по правому щелчку; устройства LE Audio отдельным путём. **Живьём не
+проверено** (см. HANDOFF): сама просьба драйверу (`KsProperty` не вызывался на настоящем устройстве ни разу — только перечисление точек и фильтров, и оно на ПК автора отработало: у каждого звукового
+сопряжённого устройства нашлись фильтры Bluetooth-аудио).
+
 ## Кандидаты этапов — по аналогам (22.10.2026, не согласованы, порядок решит владелец)
 
 Собраны по программам, которые обсуждают в r/software и r/Windows11 (сам Reddit прочитать не удалось —
@@ -414,7 +463,7 @@ DynamicWin). Изменение OpenSpec `meetings`.
 | ✓ 0.7, температура — 1.7 | Ресурсы | ЦП, видеокарта, память, сеть, батарея, температура | [Command Palette Dock](https://pureinfotech.com/powertoys-command-palette-dock-windows-11/) |
 | ✓ 0.8 | История буфера обмена | Последние скопированные тексты, вставить щелчком | [Notchify](https://www.windowscentral.com/software-apps/want-your-pc-to-be-a-bit-more-like-a-mac-the-dynamic-island-for-windows-just-got-a-big-update), [Command Palette Dock](https://windowslatest.com/2026/02/07/windows-11-is-testing-an-optional-dock-that-sits-on-the-top-of-the-screen-with-music-playback-control-cpu-gpu-ram-stats-and-more) |
 | ✓ 0.8 (без перетаскивания наружу) | Лоток файлов | Бросить файл в панель, забрать или открыть позже | [DynamicWin](https://github.com/FlorianButz/DynamicWin) |
-| ✓ 0.9 (без подключения из панели) | Bluetooth-устройства | Подключить наушники и мышь, увидеть заряд | [DynamicWin](https://github.com/FlorianButz/DynamicWin) |
+| ✓ 0.9 (подключение из панели — 2.6) | Bluetooth-устройства | Подключить наушники и мышь, увидеть заряд | [DynamicWin](https://github.com/FlorianButz/DynamicWin) |
 | ✓ 0.9 (стрелками, без «только значки») | Режим правки | Перетаскивать модули, включать и выключать, показывать только значки | [Command Palette Dock](https://windowslatest.com/2026/02/07/windows-11-is-testing-an-optional-dock-that-sits-on-the-top-of-the-screen-with-music-playback-control-cpu-gpu-ram-stats-and-more) |
 | ✓ 1.0 (без календаря) | Таймеры, напоминания, календарь | Короткий таймер, «помидор», ближайшие события | [Command Palette Dock](https://windowslatest.com/2026/02/07/windows-11-is-testing-an-optional-dock-that-sits-on-the-top-of-the-screen-with-music-playback-control-cpu-gpu-ram-stats-and-more), [DynamicWin](https://github.com/FlorianButz/DynamicWin) |
 | ✓ 1.3 | Интеграция Kamerton | Звук в панели — из Kamerton (после согласования с владельцем) | [Kamerton](https://github.com/AgitAngst/Kamerton) |
@@ -448,7 +497,7 @@ DynamicWin). Изменение OpenSpec `meetings`.
 | ✓ 2.5 | Встречи | Ближайшая встреча из календаря по ссылке .ics (Google, Outlook — без учётной записи Windows) и «Подключиться» к Zoom, Meet, Teams; плашка за пару минут | средне | [MeetingBar](https://github.com/leits/meetingbar), [DynamicWin](https://github.com/FlorianButz/DynamicWin) |
 | ★ | Микрофон «без звука» | Для всех программ сразу, с клавишей и красной меткой у края, пока выключен; через Kamerton | средне | [SoundSwitch](https://github.com/Belphemur/SoundSwitch), [MicKey](https://www.ghacks.net/2021/04/27/mute-your-microphone-with-a-hotkey-using-mickey/), [Easymic](https://github.com/k1tbyte/easymic) |
 | ✓ 2.0 (в сцены вошёл в 2.1) | HDR одним щелчком | На каждый монитор отдельно (Win+Alt+B переключает все сразу и бывает занят Game Bar); входит в сцены | просто | [HDRTray](https://www.warp2search.net/story/hdrtray-053/), [HDR Toggle](https://www.raycast.com/abdullah_shabib/hdr-toggle) |
-| ★ | Наушники одним щелчком | Подключить или отключить сопряжённое устройство из карточки «Bluetooth» (отложено в 0.9) | сложно | [ToothTray](https://github.com/m2jean/ToothTray) |
+| ✓ 2.6 | Наушники одним щелчком | Подключить или отключить сопряжённое звуковое устройство из карточки «Bluetooth» (отложено в 0.9) | сложно | [ToothTray](https://github.com/m2jean/ToothTray) |
 | ✓ 2.3 (без «Без форматирования») | Буфер: картинки и фильтр | Картинки, ссылки, цвета пипетки в истории (отложено в 0.8); «Исправить раскладку» («ghbdtn» → «привет»), «Без форматирования» | средне | [Raycast](https://en.wikipedia.org/wiki/Raycast_(software)), [Notchify](https://www.windowscentral.com/software-apps/want-your-pc-to-be-a-bit-more-like-a-mac-the-dynamic-island-for-windows-just-got-a-big-update) |
 | | Вывод звука чипами | «Динамики / Наушники» в карточке «Звук» одним щелчком; через Kamerton | просто | [SoundSwitch](https://github.com/Belphemur/SoundSwitch), [boring.notch](https://newreleases.io/project/github/TheBoredTeam/boring.notch/release/v2.8-rc.0) |
 | | Зеркало | Превью веб-камеры перед созвоном по щелчку; закрыл карточку — камера выключена | средне | [NotchNook](https://www.macworld.com/article/2406934/notfhnook-macbook-dynamic-island-widgets-files-tray.html), [boring.notch](https://github.com/TheBoredTeam/boring.notch) |
