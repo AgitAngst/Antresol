@@ -7230,7 +7230,13 @@ mod tests {
     #[test]
     fn the_plaque_slides_in_over_layout_and_out_over_leave_and_the_next_waits_for_the_window() {
         let mut rig = Rig::new();
-        anvil_ui::motion::set_reduced(&rig.ctx, false);
+        // Движение — прямо в состоянии набора (`Motion` под ключом `anvil-ui-motion`, как в `anvil_ui::motion`):
+        // `set_reduced(false)` не включит его, если анимации выключены в Windows, как на машинах сборки GitHub.
+        // Сначала ставится «выключено» — так ключ проверяется на любой машине.
+        let key = egui::Id::new("anvil-ui-motion");
+        rig.ctx.data_mut(|d| d.insert_temp(key, anvil_ui::motion::Motion { enabled: false }));
+        assert!(!anvil_ui::motion::Motion::of(&rig.ctx).enabled, "набор хранит движение под другим ключом");
+        rig.ctx.data_mut(|d| d.insert_temp(key, anvil_ui::motion::Motion { enabled: true }));
         rig.app.edge = Edge::default();
         let t0 = Instant::now();
         let mut frame = 0u32;
