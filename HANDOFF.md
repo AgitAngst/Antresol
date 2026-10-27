@@ -18,7 +18,7 @@
   `src/sys/shell.rs` (новый: «Загрузки», `SHDoDragDrop`), `Module::events(&Settings)` вместо `attention` (таймер, Bluetooth, GitHub),
   `gh::Run` с номером и веткой и `gh::read_runs`, `bt::Device::audio`, `config::Plaques`, тексты одним блоком в `texts.rs` (`plaques*`,
   `plaque_*`, функции `plaque_size`, `plaque_text` в конце файла). Новые возможности `windows`: `Win32_System_IO`, `Win32_System_Ioctl`,
-  `Win32_System_Diagnostics_Debug`; зависимостей не прибавилось. `sound.rs` и `sys/kamerton.rs` не тронуты. Проверено на ПК: fmt, тесты (421 + 7
+  `Win32_System_Diagnostics_Debug`; зависимостей не прибавилось. `sound.rs` и `sys/kamerton.rs` не тронуты. Проверено на ПК: fmt, тесты (422 + 7
   `--ignored`; в том числе очередь, разбор событий, потоки на настоящей временной папке (в `target` репозитория) и плашка в окне
   без окна: щелчки, «Извлечь» с итогом, перетаскивание, уведомление при выдвинутой панели, таймер без выезда при выключенной полоске),
   clippy; живое чтение без записи (`--ignored`): узел диска и родитель системного тома находятся, съёмных томов с носителем на ПК нет;

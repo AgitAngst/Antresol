@@ -6870,6 +6870,71 @@ mod tests {
         assert!(!may_show(false, 0.0, false, true), "игра во весь экран");
     }
 
+    /// Выезд плашки — `LAYOUT` (200 мс), уход — `LEAVE` (120 мс) по шкале набора; пока она уезжает, рисуется прежняя, а следующая
+    /// встаёт, только когда окно её убрало. Движение включено (в других тестах оно выключено ради мгновенных кадров).
+    #[test]
+    fn the_plaque_slides_in_over_layout_and_out_over_leave_and_the_next_waits_for_the_window() {
+        let mut rig = Rig::new();
+        anvil_ui::motion::set_reduced(&rig.ctx, false);
+        rig.app.edge = Edge::default();
+        let t0 = Instant::now();
+        let mut frame = 0u32;
+        let mut step = |rig: &mut Rig| -> f32 {
+            // Время кадров идёт дальше от того, где остановился стенд (egui в первом кадре не знает, сколько прошло).
+            let now = t0 + Duration::from_millis(33 * u64::from(frame));
+            let time = rig.time;
+            rig.time += 1.0 / 30.0;
+            frame += 1;
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, PLAQUE)),
+                time: Some(time),
+                ..Default::default()
+            };
+            let app = &mut rig.app;
+            let mut out = rig.ctx.run_ui(input, |ui| app.plaque_frame(ui.ctx(), now, false, true));
+            // Рисовать некому: изменения текстур никто не применит (как в `Rig::frame`).
+            out.textures_delta.clear();
+            rig.app.plaque_t
+        };
+        // Событий нет — окна у края нет.
+        for _ in 0..3 {
+            assert_eq!(step(&mut rig), 0.0);
+        }
+        // Событие: доля растёт плавно до 1 примерно за 200 мс (шесть-семь кадров по 33 мс), а не прыжком.
+        rig.app.plaques.push(plaque::sample("usb", Lang::En).unwrap(), t0);
+        let rise: Vec<f32> = (0..10).map(|_| step(&mut rig)).collect();
+        assert!(rise.windows(2).all(|w| w[0] <= w[1]), "доля не убывает: {rise:?}");
+        assert!(rise.iter().any(|&t| t > 0.0 && t < 1.0), "выезд идёт по кадрам, а не прыжком: {rise:?}");
+        assert!(rise[..2].iter().all(|&t| t < 1.0) && rise[7..].iter().all(|&t| t == 1.0), "200 мс: {rise:?}");
+        assert!(rig.app.plaque_drawn.is_some());
+        // Плашка ушла: окно доезжает вверх за 120 мс (три-четыре кадра), пока рисуется прежняя; новая ждёт, пока окно её не уберёт.
+        rig.app.plaques.dismiss();
+        rig.app.plaques.push(plaque::sample("github", Lang::En).unwrap(), t0);
+        let mut fall = Vec::new();
+        loop {
+            let t = step(&mut rig);
+            if t == 0.0 {
+                break;
+            }
+            fall.push(t);
+            assert!(fall.len() <= 6, "уход затянулся: {fall:?}");
+            assert_eq!(
+                rig.app.plaque_drawn.as_ref().map(|p| p.key.as_str()),
+                Some("usb:E:\\"),
+                "пока уезжает, рисуется прежняя"
+            );
+            assert!(rig.app.plaques.current().is_none(), "следующая ждёт, пока окно её не убрало");
+        }
+        assert!(!fall.is_empty() && fall.windows(2).all(|w| w[0] >= w[1]), "уход идёт по кадрам: {fall:?}");
+        assert!(fall[0] < 1.0, "{fall:?}");
+        assert!(rig.app.plaque_drawn.is_none(), "окно убрало прежнюю");
+        // Теперь встала следующая и выезжает.
+        let again: Vec<f32> = (0..10).map(|_| step(&mut rig)).collect();
+        assert_eq!(rig.app.plaques.current().map(|p| p.key.as_str()), Some("gh:demo/site"));
+        assert_eq!(*again.last().unwrap(), 1.0, "{again:?}");
+        assert_eq!(rig.app.plaque_drawn.as_ref().map(|p| p.key.as_str()), Some("gh:demo/site"));
+    }
+
     /// Заглушка с событием: отдаёт плашку один раз.
     struct Chime(Option<Plaque>);
 
