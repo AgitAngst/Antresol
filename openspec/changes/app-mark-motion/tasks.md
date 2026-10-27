@@ -21,4 +21,4 @@
 
 - [x] 4.1 `checks.py fmt test clippy` зелёные; снимки (обе темы, RU/EN); значок exe — `ExtractAssociatedIcon`
 - [x] 4.2 docs: `usage.md`, `ui-guideline.md` (раздел 7), `Anvil/docs/ICONS.md` (строка, оттенок 88°) и `MOTION.md`, SPEC, HANDOFF (только docs программы — остальное позже)
-- [ ] 4.3 Сверка судьёй (Opus); версия 2.10.0
+- [x] 4.3 Сверка судьёй (Opus); версия 2.10.0
