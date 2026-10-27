@@ -3,6 +3,7 @@
 
 mod app;
 mod config;
+mod ics;
 mod layout;
 mod look;
 mod modules;

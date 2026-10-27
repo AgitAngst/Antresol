@@ -6,6 +6,7 @@ pub mod ddc;
 pub mod dib;
 pub mod display;
 pub mod gh;
+pub mod ical;
 pub mod kamerton;
 pub mod media;
 pub mod monitor;

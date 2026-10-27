@@ -56,6 +56,34 @@ pub fn local_offset() -> i32 {
     if ok { offset(&utc, &local) } else { 0 }
 }
 
+/// Смещение пояса этого ПК от UTC в секундах на момент UTC `utc` (секунды с 1970 года), с летним временем того момента:
+/// встреча завтра считается по завтрашнему смещению, а не по сегодняшнему. Не узнать — 0.
+pub fn local_offset_at(utc: i64) -> i32 {
+    let Some(at) = system_time(utc) else { return 0 };
+    let mut local = SYSTEMTIME::default();
+    let ok = unsafe { windows::Win32::System::Time::SystemTimeToTzSpecificLocalTime(None, &at, &mut local) }.is_ok();
+    if ok { offset(&at, &local) * 60 } else { 0 }
+}
+
+/// Момент по секундам с 1970 года в виде `SYSTEMTIME` (UTC); вне годов 1601–30827 — `None`.
+fn system_time(unix: i64) -> Option<SYSTEMTIME> {
+    let (days, rest) = (unix.div_euclid(86_400), unix.rem_euclid(86_400));
+    let (y, m, d) = crate::ics::civil_from_days(days);
+    if !(1601..=30_827).contains(&y) {
+        return None;
+    }
+    Some(SYSTEMTIME {
+        wYear: y as u16,
+        wMonth: m as u16,
+        wDayOfWeek: (days + 4).rem_euclid(7) as u16,
+        wDay: d as u16,
+        wHour: (rest / 3600) as u16,
+        wMinute: (rest / 60 % 60) as u16,
+        wSecond: (rest % 60) as u16,
+        wMilliseconds: 0,
+    })
+}
+
 /// Разница двух моментов (местное − UTC) в минутах, с учётом смены суток.
 fn offset(utc: &SYSTEMTIME, local: &SYSTEMTIME) -> i32 {
     let minutes = |t: &SYSTEMTIME| days(t) * 1440 + t.wHour as i64 * 60 + t.wMinute as i64;
@@ -98,6 +126,27 @@ mod tests {
         assert_eq!(utc_label(330), "UTC+5:30");
         assert_eq!(utc_label(-180), "UTC−3");
         assert_eq!(utc_label(0), "UTC");
+    }
+
+    #[test]
+    fn a_unix_moment_becomes_a_system_time() {
+        let t = system_time(0).unwrap();
+        assert_eq!((t.wYear, t.wMonth, t.wDay, t.wHour, t.wDayOfWeek), (1970, 1, 1, 0, 4), "четверг");
+        let t = system_time(1_792_645_920).unwrap();
+        assert_eq!((t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond), (2026, 10, 22, 5, 12, 0));
+        assert!(system_time(-20_000_000_000).is_none(), "раньше 1601 года Windows времени не знает");
+    }
+
+    /// Смещение этого ПК на любой момент — целое число четвертей часа в пределах суток; какое именно — зависит от ПК. На
+    /// «сейчас» оно то же, что даёт `local_offset` (если между двумя вопросами не перевели часы).
+    #[test]
+    fn the_local_offset_is_a_sane_number() {
+        for t in [0, 1_700_000_000, 1_792_645_920, 1_800_000_000] {
+            let off = local_offset_at(t);
+            assert!(off.abs() <= 14 * 3600 && off % 900 == 0, "{off}");
+        }
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        assert_eq!(local_offset_at(now), local_offset() * 60);
     }
 
     /// Живое: пояса Windows есть, Токио — UTC+9 (летнего времени нет).
