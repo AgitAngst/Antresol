@@ -2,10 +2,12 @@
 // занять заметное время — в своём потоке, окно читает готовое.
 // Наушники одним щелчком (2.6): звуковое устройство (наушники, гарнитура, колонка) подключается и отключается щелчком по
 // строке, Enter или «Подключить» (`btaudio`: просьба драйверу — без прав администратора, по замыслу). Идёт в своём потоке:
-// строка — «Подключение…» с вертушкой, поток спрашивает устройства раз в секунду, до 15 с (отключение — до 10 с); подключилось
-// — «Подключено» и заряд, нет — строка снова прежняя и уведомление своими словами (`problems`). Мышь, клавиатура и геймпад без
-// кнопки: Windows подключает их сама, когда их включают. Радио Bluetooth выключено — «Подключить» серая с причиной. Своё
-// подключение плашки «подключено» не даёт (`Shared::apply`): строка и так показывает.
+// строка — «Подключение…» с вертушкой, поток спрашивает устройства раз в секунду, до 15 с от щелчка (отключение — до 10 с);
+// подключилось — «Подключено» и заряд, нет — строка снова прежняя и уведомление своими словами (`problems`; просьба не ушла —
+// другие слова: сделайте это в «Параметрах Bluetooth»). Завис сам вызов драйвера — окно снимает «Подключение…» по сроку (20 с,
+// отключение — 15 с), а запоздавший итог потока отбрасывает (`Shared::expire`). Мышь, клавиатура и геймпад без кнопки: Windows
+// подключает их сама, когда их включают. Радио Bluetooth выключено — над списком причина, «Подключить» серая. Своё подключение
+// плашки «подключено» не даёт (`Shared::apply`): строка и так показывает.
 // Плашки у края (2.4): аудиоустройство подключилось («Наушники: подключено», заряд) и любое устройство разряжается (15 % и
 // ниже, раз за разряд: «Мышь: разряжается»). О мыши и клавиатуре «подключено» не говорят — они засыпают и просыпаются сами, и
 // каждое пробуждение было бы плашкой. Устройство считается отключённым, когда оно не подключено в двух чтениях подряд: после
@@ -17,7 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use anvil_ui::widgets::{self as w, Kind};
+use anvil_ui::widgets as w;
 use anvil_ui::{Icon, Palette, Tone};
 use eframe::egui::{self, Color32, FontId, Pos2, Rect, Sense, Stroke, Ui, UiBuilder, Vec2};
 
@@ -36,12 +38,17 @@ pub const RECOVERED: u8 = 20;
 /// Сколько чтений подряд подключённое устройство должно быть не подключено, чтобы считаться отключённым.
 const OFF_READS: u8 = 2;
 /// Сколько ждать, пока устройство подключится после просьбы драйверу (design §2), и сколько — пока отключится; опрос — раз в
-/// секунду, а в тестах быстрее ([`waits`]).
+/// секунду, а в тестах быстрее ([`waits`]). Отсчёт — от щелчка: сама просьба драйверу входит в срок.
 const CONNECT_WAIT: Duration = Duration::from_secs(15);
 const DISCONNECT_WAIT: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_secs(1);
-/// Строка устройства: не ниже 38 (макет). Зазор между строками 4, а не 8 макета: выдуманные четыре устройства иначе не влезают
-/// в карточку 340 высотой.
+/// Срок на всю операцию — на случай, когда завис сам вызов драйвера и поток не дошёл до опроса: окно (`Module::background`) снимает
+/// «Подключение…» и говорит неудачу, а запоздавший итог потока отбрасывает ([`Shared::expire`]). Больше срока потока, чтобы
+/// обычный ход дел кончался раньше.
+const CONNECT_LIMIT: Duration = Duration::from_secs(20);
+const DISCONNECT_LIMIT: Duration = Duration::from_secs(15);
+/// Строка устройства: не ниже 38 (макет). Зазор между строками 4, а не 8 макета: ради четырёх выдуманных устройств без прокрутки в
+/// карточке 340 высотой (на усмотрение владельца).
 const ROW_H: f32 = 38.0;
 const ROW_GAP: f32 = 4.0;
 /// Слова для поиска у «Подключить» и «Отключить»: оба языка сразу.
@@ -54,12 +61,25 @@ enum Doing {
     Disconnecting,
 }
 
-/// Что не вышло в потоке: панель скажет об этом своими словами (`Module::problems`), а английский текст ошибки остаётся в
-/// журнале. Имя устройства — как в Windows.
+/// Операция над устройством: что делают, как устройство называется (для уведомления), под каким номером и до какого срока.
+/// Поток отчитывается только за свой номер: операция, что вышла по сроку или заменена новой, его итог не принимает.
+#[derive(Clone, Debug)]
+struct Op {
+    doing: Doing,
+    name: String,
+    id: u64,
+    deadline: Instant,
+}
+
+/// Что не вышло с устройством: панель скажет об этом своими словами (`Module::problems`), а код ответа остаётся в журнале. Имя
+/// устройства — как в Windows. `asked` — просьба дошла до драйвера (он принял её, а устройство не стало таким за срок) — совет
+/// «включите устройство и поднесите ближе»; нет — просьба не ушла (нет контейнера или звуковых точек Windows, драйвер отверг) —
+/// совет «сделайте это в «Параметрах Bluetooth»».
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Failure {
-    Connect(String),
-    Disconnect(String),
+struct Failure {
+    doing: Doing,
+    name: String,
+    asked: bool,
 }
 
 /// Сколько ждать и как часто спрашивать, пока устройство станет таким, как просили. В тестах — доли секунды: «не вышло» не ждёт 15
@@ -69,6 +89,11 @@ fn waits(doing: Doing) -> (Duration, Duration) {
         return (Duration::from_millis(400), Duration::from_millis(20));
     }
     (if doing == Doing::Connecting { CONNECT_WAIT } else { DISCONNECT_WAIT }, POLL)
+}
+
+/// Срок на всю операцию от щелчка.
+fn limit(doing: Doing) -> Duration {
+    if doing == Doing::Connecting { CONNECT_LIMIT } else { DISCONNECT_LIMIT }
 }
 
 fn lock(shared: &Mutex<Shared>) -> MutexGuard<'_, Shared> {
@@ -198,8 +223,12 @@ struct Shared {
     warned: HashSet<u64>,
     /// Изменения, что ещё не стали плашками.
     pending: Vec<Change>,
-    /// Что подключают или отключают сейчас, по адресу устройства: строка показывает «Подключение…», второй щелчок не нужен.
-    ops: HashMap<u64, Doing>,
+    /// Что подключают или отключают сейчас, по адресу устройства: строка показывает «Подключение…», нажатие ничего не запускает.
+    ops: HashMap<u64, Op>,
+    /// Номер следующей операции ([`Op::id`]).
+    next_op: u64,
+    /// Сколько потоков подключения и отключения ещё работают — и те, чей итог уже не нужен (вышел срок): тест ждёт, пока они кончат.
+    workers: usize,
     /// Радио Bluetooth: `Some(false)` — выключено; `None` — не знаем (радио нет или Windows не ответила): тогда не мешаем.
     radio: Option<bool>,
     /// Что не вышло с прошлого раза: панель скажет уведомлением, даже если карточку не рисуют.
@@ -216,11 +245,16 @@ impl Shared {
         let believed = settle(self.prev.as_deref(), list.clone(), &mut self.off);
         let mut found = changes(self.prev.as_deref(), &believed, &mut self.warned);
         // Своё подключение (щелчок в карточке, действие поиска) плашки «подключено» не даёт: строка и так показывает.
-        found.retain(|c| !matches!(c, Change::Connected(d) if self.ops.get(&d.address) == Some(&Doing::Connecting)));
+        found.retain(|c| !matches!(c, Change::Connected(d) if self.doing(d.address) == Some(Doing::Connecting)));
         self.pending.extend(found);
         self.prev = Some(believed);
         self.list = list;
         self.loaded = true;
+    }
+
+    /// Что делают с устройством сейчас.
+    fn doing(&self, address: u64) -> Option<Doing> {
+        self.ops.get(&address).map(|op| op.doing)
     }
 
     /// Номер нового чтения: его берут до того, как читать устройства.
@@ -238,6 +272,19 @@ impl Shared {
         self.apply(list);
         true
     }
+
+    /// Снять операции, чей срок вышел к `now`: строка снова обычная, неудача сказана (просьба до драйвера дошла — устройство не
+    /// отозвалось), а поток, что ещё висит у драйвера, свой итог потом не примет (у операции его номер не тот). Ответ — сколько снято.
+    fn expire(&mut self, now: Instant) -> usize {
+        let late: Vec<u64> =
+            self.ops.iter().filter(|(_, op)| now >= op.deadline).map(|(address, _)| *address).collect();
+        for address in &late {
+            if let Some(op) = self.ops.remove(address) {
+                self.failed.push(Failure { doing: op.doing, name: op.name, asked: true });
+            }
+        }
+        late.len()
+    }
 }
 
 pub struct Bluetooth {
@@ -252,11 +299,17 @@ impl Default for Bluetooth {
     fn default() -> Self {
         let shared = Arc::new(Mutex::new(Shared::default()));
         // Для снимков (только в демо-режиме): `ANTRESOL_VIEW=bluetooth-connecting` — выдуманная колонка «подключается» и до конца
-        // не доходит (потока нет), `bluetooth-off` — радио выключено, подключённых нет.
+        // не доходит (потока нет, срок — час), `bluetooth-off` — радио выключено, подключённых нет.
         if sys::demo() {
             match std::env::var("ANTRESOL_VIEW").as_deref() {
                 Ok("bluetooth-connecting") => {
-                    lock(&shared).ops.insert(bt::FAKE_SPEAKER, Doing::Connecting);
+                    let op = Op {
+                        doing: Doing::Connecting,
+                        name: "Speaker".into(),
+                        id: 0,
+                        deadline: Instant::now() + Duration::from_secs(3600),
+                    };
+                    lock(&shared).ops.insert(bt::FAKE_SPEAKER, op);
                 }
                 Ok("bluetooth-off") => {
                     net::fake_bluetooth(false);
@@ -301,7 +354,7 @@ impl Bluetooth {
     /// Ничего не делает, если устройство не звуковое, с ним уже что-то делают или радио выключено (подключать нечем). Работа
     /// идёт в потоке, итог — в строке и в `problems`. Ответ — начали ли.
     fn toggle(&mut self, address: u64, want: Option<Doing>) -> bool {
-        let (doing, name) = {
+        let (doing, name, id) = {
             let mut s = lock(&self.shared);
             let Some(d) = s.list.iter().find(|d| d.address == address) else { return false };
             let (audio, name) = (d.audio, d.name.clone());
@@ -310,51 +363,71 @@ impl Bluetooth {
             if !audio || no_radio || s.ops.contains_key(&address) || want.is_some_and(|wanted| wanted != doing) {
                 return false;
             }
-            s.ops.insert(address, doing);
-            (doing, name)
+            let id = s.next_op;
+            s.next_op += 1;
+            s.workers += 1;
+            s.ops.insert(address, Op { doing, name: name.clone(), id, deadline: Instant::now() + limit(doing) });
+            (doing, name, id)
         };
         let shared = self.shared.clone();
-        std::thread::spawn(move || work(&shared, address, &name, doing));
+        std::thread::spawn(move || work(&shared, address, &name, doing, id));
         true
     }
 }
 
+/// Стало ли устройство таким, как просили: подключено (`on`) — оно есть в чтении и подключено; отключено — оно есть в чтении и не
+/// подключено. Нет в чтении — ничего не известно: после сна Windows отвечает неполным списком (ради этого и `settle`), и
+/// «пропало» не значит «отключилось».
+fn became(list: &[bt::Device], address: u64, on: bool) -> bool {
+    list.iter().find(|d| d.address == address).is_some_and(|d| d.connected == on)
+}
+
 /// Работа потока: попросить драйвер и ждать, пока устройство станет таким, как просили, — опрос раз в секунду, не дольше
-/// [`CONNECT_WAIT`] или [`DISCONNECT_WAIT`]. Итог — в общем состоянии: строка снова обычная, а не вышло — уведомление
-/// (`Module::problems`), английский текст ошибки — в журнал. Список и «ничего не делаем» меняются разом, под одним замком: строка
-/// не мигает прежним состоянием, а плашка «подключено» своё подключение не видит (`Shared::apply`).
-fn work(shared: &Mutex<Shared>, address: u64, name: &str, doing: Doing) {
+/// [`CONNECT_WAIT`] или [`DISCONNECT_WAIT`] от щелчка. Итог — в общем состоянии: строка снова обычная, а не вышло — уведомление
+/// (`Module::problems`), код ответа — в журнал. Список и «ничего не делаем» меняются разом, под одним замком: строка не мигает
+/// прежним состоянием, а плашка «подключено» своё подключение не видит (`Shared::apply`). Срок на всю операцию — в окне
+/// (`Shared::expire`): вышел раньше — итог потока никому не нужен и не принимается.
+fn work(shared: &Mutex<Shared>, address: u64, name: &str, doing: Doing, id: u64) {
     let _com = btaudio::Com::enter();
     let on = doing == Doing::Connecting;
     let (limit, poll) = waits(doing);
     let started = Instant::now();
     let mut last: Option<(u64, Vec<bt::Device>)> = None;
-    let done = match btaudio::set_connected(address, name, on) {
-        Ok(_) => loop {
-            let read = lock(shared).next_read();
-            let list = bt::devices();
-            let reached = list.iter().any(|d| d.address == address && d.connected) == on;
-            last = Some((read, list));
-            if reached {
-                break true;
-            }
-            if started.elapsed() >= limit {
-                break false;
-            }
-            std::thread::sleep(poll);
-        },
+    // `asked` — просьба ушла (драйвер принял её хотя бы на одном фильтре); `done` — устройство стало таким, как просили.
+    let (asked, done) = match btaudio::set_connected(address, name, on) {
+        Ok(_) => {
+            let done = loop {
+                let read = lock(shared).next_read();
+                let list = bt::devices();
+                let reached = became(&list, address, on);
+                last = Some((read, list));
+                if reached {
+                    break true;
+                }
+                if started.elapsed() >= limit {
+                    break false;
+                }
+                std::thread::sleep(poll);
+            };
+            (true, done)
+        }
         Err(e) => {
-            eprintln!("bluetooth: {} failed: {e}", if on { "connect" } else { "disconnect" });
-            false
+            eprintln!("bluetooth: {} not sent: {e}", if on { "connect" } else { "disconnect" });
+            (false, false)
         }
     };
     let mut s = lock(shared);
+    s.workers -= 1;
+    // Срок вышел раньше (окно уже сняло операцию и сказало неудачу) или у устройства уже новая операция: итог запоздал.
+    if s.ops.get(&address).map(|op| op.id) != Some(id) {
+        return;
+    }
     if let Some((read, list)) = last {
         s.take(read, list);
     }
     s.ops.remove(&address);
     if !done {
-        s.failed.push(if on { Failure::Connect(name.to_string()) } else { Failure::Disconnect(name.to_string()) });
+        s.failed.push(Failure { doing, name: name.to_string(), asked });
     }
 }
 
@@ -374,28 +447,22 @@ fn fit(ui: &Ui, text: &str, font: FontId, color: Color32, room: f32) -> Arc<egui
     ui.painter().layout_job(job)
 }
 
-/// Бейдж заряда — как `w::badge` набора, но нарисованный прямо в строке: у строки одна область нажатия, и виджет поверх неё
-/// мешал бы наведению. `right` — правый край, ответ — левый.
-fn paint_badge(ui: &Ui, p: &Palette, right: f32, mid: f32, text: &str, tone: Tone) -> f32 {
-    let color = tone.color(p);
-    let galley = ui.painter().layout_no_wrap(text.to_owned(), anvil_ui::semibold(12.0), color);
-    let size = Vec2::new(galley.size().x + 14.0, 20.0);
-    let rect = Rect::from_min_size(Pos2::new(right - size.x, mid - size.y / 2.0), size);
-    ui.painter().rect_filled(rect, 10, p.badge_fill(color));
-    ui.painter().galley(rect.center() - galley.size() / 2.0, galley, color);
-    rect.left()
-}
-
-/// Строка устройства по макету: слева точка (подключено), кольцо (нет) или вертушка (подключают, отключают), имя и под ним
-/// состояние; справа — заряд подключённого или «Подключить» у звукового, что не подключено. Звуковое нажимается (щелчок или
-/// Enter — подключить или отключить), остальные — нет: Windows подключает их сама, когда их включают. `off` — радио Bluetooth
-/// выключено: «Подключить» серая, щелчок ничего не делает. Ответ — нажали ли.
+/// Строка устройства по макету: слева точка (подключено), кольцо (нет) или вертушка (подключают, отключают) — всё из набора, —
+/// имя и под ним состояние; справа — заряд подключённого (`w::badge`) или «Подключить» у звукового, что не подключено. Звуковое
+/// нажимается (щелчок или Enter — подключить или отключить), остальные — нет: Windows подключает их сама, когда их включают.
+/// Пока с устройством идёт работа, строка остаётся в Tab и держит кольцо фокуса, но нажатие ничего не запускает. `off` — радио
+/// Bluetooth выключено: «Подключить» серая, строка в Tab не берётся, нажатие ничего не делает. Ответ — нажали ли.
 fn row(ui: &mut Ui, t: &Tr, lang: anvil_ui::Lang, d: &bt::Device, doing: Option<Doing>, off: bool) -> bool {
     let p = Palette::of(ui);
-    // Нажимается: звуковое, с ним ничего не делают сейчас, а подключать — только при включённом радио.
-    let live = d.audio && doing.is_none() && (d.connected || !off);
-    let sense = if live { Sense::click() } else { Sense::hover() };
-    let (rect, r) = ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_H), sense);
+    // Берёт Tab и кольцо фокуса: звуковое — и пока с ним идёт работа (фокус не пропадает на «Подключении…»), кроме серого при
+    // выключенном радио. Нажатие запускает работу, только когда с устройством ничего не делают.
+    let focusable = d.audio && (doing.is_some() || d.connected || !off);
+    let live = focusable && doing.is_none();
+    let (_, rect) = ui.allocate_space(Vec2::new(ui.available_width(), ROW_H));
+    // Номер виджета — по адресу устройства, а не по месту в списке: устройство подключилось или отключилось само, список
+    // пересортировался (подключённые сверху), а фокус и Enter остались при том же устройстве.
+    let sense = if focusable { Sense::click() } else { Sense::hover() };
+    let r = ui.interact(rect, egui::Id::new(("bt-row", d.address)), sense);
     anchor(ui, rect, &format!("bt-{:x}", d.address));
     let mid = rect.center().y;
     let hovered = live && r.hovered();
@@ -403,18 +470,21 @@ fn row(ui: &mut Ui, t: &Tr, lang: anvil_ui::Lang, d: &bt::Device, doing: Option<
     if hovered {
         ui.painter().rect_filled(rect, 6, p.hover);
     }
-    // Точка, кольцо или вертушка — в слоте 8 у левого края (поля строки 6).
-    let slot = Pos2::new(rect.left() + 6.0 + 4.0, mid);
+    // Точка, кольцо или вертушка — в слоте 8 у левого края (поля строки 6). Виджеты набора только наводятся (`Sense::hover`):
+    // щелчок остаётся у строки.
+    let center = Pos2::new(rect.left() + 6.0 + 4.0, mid);
     match doing {
         Some(_) => {
-            let mut spinner = ui.new_child(UiBuilder::new().max_rect(Rect::from_center_size(slot, Vec2::splat(12.0))));
-            w::spinner(&mut spinner, 12.0);
-        }
-        None if d.connected => {
-            ui.painter().circle_filled(slot, 4.0, Tone::Success.color(&p));
+            let mut mark = ui.new_child(UiBuilder::new().max_rect(Rect::from_center_size(center, Vec2::splat(12.0))));
+            w::spinner(&mut mark, 12.0);
         }
         None => {
-            ui.painter().circle_stroke(slot, 3.25, Stroke::new(1.5, p.weak));
+            let mut mark = ui.new_child(UiBuilder::new().max_rect(Rect::from_center_size(center, Vec2::splat(10.0))));
+            if d.connected {
+                w::dot(&mut mark, Tone::Success);
+            } else {
+                w::ring(&mut mark);
+            }
         }
     }
     // Справа: «Подключить» (рисунок кнопки `Secondary` 28 высотой, текст 12,5) или заряд.
@@ -438,7 +508,10 @@ fn row(ui: &mut Ui, t: &Tr, lang: anvil_ui::Lang, d: &bt::Device, doing: Option<
         right = button.left() - 10.0;
     } else if let Some(percent) = d.battery.filter(|_| d.connected && doing.is_none()) {
         let tone = if percent <= 20 { Tone::Warning } else { Tone::Neutral };
-        right = paint_badge(ui, &p, right, mid, &texts::scene_percent(lang, percent), tone) - 10.0;
+        let area = Rect::from_min_max(Pos2::new(rect.left() + 24.0, mid - 10.0), Pos2::new(right, mid + 10.0));
+        let layout = egui::Layout::right_to_left(egui::Align::Center);
+        let mut chip = ui.new_child(UiBuilder::new().max_rect(area).layout(layout));
+        right = w::badge(&mut chip, &texts::scene_percent(lang, percent), tone).rect.left() - 10.0;
     }
     // Имя и состояние (оба тихие, пока не подключено).
     let left = rect.left() + 24.0;
@@ -488,6 +561,59 @@ fn row(ui: &mut Ui, t: &Tr, lang: anvil_ui::Lang, d: &bt::Device, doing: Option<
     clicked
 }
 
+/// «Параметры Bluetooth» внизу карточки: `Ghost` набора со значком `Gear`, но со значком «наружу» за словом — кнопка открывает
+/// «Параметры Windows» (общий гайдлайн §4), как «Подключиться» во «Встречах»; у кнопки набора такого значка нет. Тесно — без
+/// шестерёнки, ещё теснее — слово режется многоточием.
+fn settings_button(ui: &mut Ui, label: &str) -> egui::Response {
+    let p = Palette::of(ui);
+    let enabled = ui.is_enabled();
+    let room = ui.available_width();
+    // Поля 12 по бокам, значок «наружу» 12 через 5 за словом; шестерёнка 16 через 7 перед ним.
+    let chrome = 12.0 * 2.0 + 5.0 + 12.0;
+    let gear = 16.0 + 7.0;
+    let font = FontId::proportional(14.0);
+    let full = ui.painter().layout_no_wrap(label.to_owned(), font.clone(), Color32::PLACEHOLDER).size().x;
+    let with_gear = chrome + gear + full <= room;
+    let lead = if with_gear { gear } else { 0.0 };
+    let galley = fit(ui, label, font, Color32::PLACEHOLDER, room - chrome - lead);
+    let (rect, r) = ui.allocate_exact_size(Vec2::new(chrome + lead + galley.size().x, 30.0), Sense::click());
+    anchor(ui, rect, "bt-settings");
+    let hovered = r.hovered() && enabled;
+    let fill = if r.is_pointer_button_down_on() && enabled {
+        p.border
+    } else if hovered {
+        p.hover
+    } else {
+        Color32::TRANSPARENT
+    };
+    let ink = if !enabled {
+        p.faint
+    } else if hovered {
+        p.text
+    } else {
+        p.weak
+    };
+    let radius = anvil_ui::theme::radius::CONTROL;
+    ui.painter().rect(rect, radius, fill, Stroke::new(1.0, Color32::TRANSPARENT), egui::StrokeKind::Inside);
+    let mut x = rect.left() + 12.0;
+    if with_gear {
+        anvil_ui::icons::paint(
+            ui.painter(),
+            Rect::from_min_size(Pos2::new(x, rect.center().y - 8.0), Vec2::splat(16.0)),
+            Icon::Gear,
+            ink,
+        );
+        x += gear;
+    }
+    let text_w = galley.size().x;
+    ui.painter().galley(Pos2::new(x, rect.center().y - galley.size().y / 2.0), galley, ink);
+    let arrow = Rect::from_center_size(Pos2::new(x + text_w + 5.0 + 6.0, rect.center().y), Vec2::splat(12.0));
+    super::paint_external(ui.painter(), arrow, ink);
+    w::focus_ring(ui, rect, &r, anvil_ui::theme::radius::CONTROL);
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
+    if enabled { r.on_hover_cursor(egui::CursorIcon::PointingHand) } else { r }
+}
+
 impl Module for Bluetooth {
     fn key(&self) -> &'static str {
         "bluetooth"
@@ -501,8 +627,10 @@ impl Module for Bluetooth {
         self.read(true);
     }
 
-    /// Слежка для плашек: пока они включены, устройства читаются и при спрятанной панели.
+    /// Каждый кадр, и при спрятанной панели: срок операций (завис вызов драйвера — «Подключение…» не висит вечно) и слежка для
+    /// плашек: пока они включены, устройства читаются и при спрятанной панели.
     fn background(&mut self, settings: &Settings) {
+        lock(&self.shared).expire(Instant::now());
         let on = settings.plaques.on(plaque::Kind::Bluetooth);
         if on != self.watching {
             self.watching = on;
@@ -533,9 +661,10 @@ impl Module for Bluetooth {
     /// звукового сопряжённого устройства, то же, что щелчок по строке (мыши и клавиатуре Windows подключает сама — действий у
     /// них нет). Радио выключено — «Подключить» серая с причиной; с устройством что-то делают — серое («Подключение…»).
     fn actions(&self, t: &Tr, _lang: anvil_ui::Lang, _settings: &Settings) -> Vec<Action> {
-        let (list, ops, radio) = {
+        let (list, doings, radio) = {
             let s = lock(&self.shared);
-            (s.list.clone(), s.ops.clone(), s.radio)
+            let doings: HashMap<u64, Doing> = s.ops.iter().map(|(address, op)| (*address, op.doing)).collect();
+            (s.list.clone(), doings, s.radio)
         };
         let settings = Action::new("bluetooth:settings", t.bt_settings, t.bluetooth, Icon::Gear);
         let mut out = vec![settings.words("блютуз устройства наушники сопряжение bluetooth devices pair headphones")];
@@ -544,7 +673,7 @@ impl Module for Bluetooth {
                 if d.connected { ("disconnect", t.bt_search_disconnect) } else { ("connect", t.bt_search_connect) };
             let id = format!("bluetooth:{verb}:{:x}", d.address);
             let action = Action::new(id, template.replace("{}", &d.name), t.bluetooth, Icon::Broadcast).words(WORDS);
-            out.push(match ops.get(&d.address) {
+            out.push(match doings.get(&d.address) {
                 Some(Doing::Connecting) => action.off(t.bt_connecting),
                 Some(Doing::Disconnecting) => action.off(t.bt_disconnecting),
                 None => action.off_if(!d.connected && radio == Some(false), t.bt_off),
@@ -570,32 +699,49 @@ impl Module for Bluetooth {
         }
     }
 
-    /// Не вышло подключить или отключить в потоке: «Не удалось подключить «Наушники»: включите устройство и поднесите ближе» —
-    /// словами программы, английский текст ошибки остался в журнале. Панель берёт это сама каждый кадр.
+    /// Не вышло подключить или отключить: «Не удалось подключить «Наушники»: включите устройство и поднесите ближе» (просьба дошла до
+    /// драйвера, а устройство не отозвалось за срок) или «Не удалось подключить «Наушники» из панели — подключите в «Параметрах
+    /// Bluetooth»» (просьба не ушла) — словами программы, код ответа остался в журнале. Панель берёт это сама каждый кадр.
     fn problems(&mut self, t: &Tr) -> Vec<(String, Tone)> {
         let failed = std::mem::take(&mut lock(&self.shared).failed);
         failed
             .into_iter()
-            .map(|what| match what {
-                Failure::Connect(name) => (t.bt_connect_failed.replace("{}", &name), Tone::Danger),
-                Failure::Disconnect(name) => (t.bt_disconnect_failed.replace("{}", &name), Tone::Danger),
+            .map(|f| {
+                let template = match (f.doing, f.asked) {
+                    (Doing::Connecting, true) => t.bt_connect_failed,
+                    (Doing::Connecting, false) => t.bt_connect_refused,
+                    (Doing::Disconnecting, true) => t.bt_disconnect_failed,
+                    (Doing::Disconnecting, false) => t.bt_disconnect_refused,
+                };
+                (template.replace("{}", &f.name), Tone::Danger)
             })
             .collect()
     }
 
     fn ui(&mut self, ui: &mut Ui, cx: &mut Ctx) {
         let (t, lang) = (cx.t, cx.lang);
-        let (list, loaded, ops, radio) = {
+        let (list, loaded, doings, radio) = {
             let s = lock(&self.shared);
-            (s.list.clone(), s.loaded, s.ops.clone(), s.radio)
+            let doings: HashMap<u64, Doing> = s.ops.iter().map(|(address, op)| (*address, op.doing)).collect();
+            (s.list.clone(), s.loaded, doings, s.radio)
         };
         if !loaded {
             w::spinner(ui, 16.0);
             return;
         }
+        let off = radio == Some(false);
+        // Радио выключено: причина видна сразу, а не только в подсказке к серым кнопкам; что сделать — в «Параметрах Bluetooth»
+        // внизу (общий гайдлайн §7: состояние родителя видно в детях).
+        if off {
+            w::note(ui, t.bt_off_note);
+            ui.add_space(4.0);
+        }
         let settings_h = 34.0;
         if list.is_empty() {
-            w::note(ui, t.bt_none);
+            // Список при выключенном радио может быть пуст из-за него, а не потому, что устройств нет.
+            if !off {
+                w::note(ui, t.bt_none);
+            }
         } else {
             let mut clicked = None;
             egui::ScrollArea::vertical()
@@ -605,7 +751,7 @@ impl Module for Bluetooth {
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = ROW_GAP;
                     for d in &list {
-                        if row(ui, t, lang, d, ops.get(&d.address).copied(), radio == Some(false)) {
+                        if row(ui, t, lang, d, doings.get(&d.address).copied(), off) {
                             clicked = Some(d.address);
                         }
                     }
@@ -614,7 +760,7 @@ impl Module for Bluetooth {
                 self.toggle(address, None);
             }
         }
-        if w::button(ui, Kind::Ghost, Some(Icon::Gear), t.bt_settings).clicked() {
+        if settings_button(ui, t.bt_settings).clicked() {
             open_settings();
         }
     }
@@ -842,7 +988,7 @@ mod tests {
 
     use anvil_ui::Lang;
 
-    /// Выдуманный мир один на все тесты: кто его меняет, берёт `WORLD_TEST` и начинает с чистого.
+    /// Выдуманный мир один на все тесты: кто его меняет, берёт `WORLD_TEST` и начинает с чистого (ворота открыты).
     fn world() -> std::sync::MutexGuard<'static, ()> {
         let guard = sys::WORLD_TEST.lock().unwrap_or_else(|e| e.into_inner());
         sys::reset_fake_world();
@@ -855,6 +1001,23 @@ mod tests {
         while !cond() {
             assert!(start.elapsed() < Duration::from_secs(10), "не дождались: {what}");
             std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Ворота выдуманного драйвера: пока закрыты, просьба подключить или отключить «у драйвера» стоит на месте — тест видит
+    /// «Подключение…» и сам решает, когда драйвер «ответит», не гадая о времени. Открываются при `drop`, и когда тест упал.
+    struct Gate;
+
+    impl Gate {
+        fn close() -> Gate {
+            bt::fake_hold(true);
+            Gate
+        }
+    }
+
+    impl Drop for Gate {
+        fn drop(&mut self) {
+            bt::fake_hold(false);
         }
     }
 
@@ -873,12 +1036,26 @@ mod tests {
         card.shared.lock().unwrap().list.iter().any(|d| d.address == address && d.connected)
     }
 
+    /// Ничего не делают ни с одним устройством.
     fn idle(card: &Bluetooth) -> bool {
         card.shared.lock().unwrap().ops.is_empty()
     }
 
+    /// Ничего не делают, и ни один поток подключения не работает (и тот, чей итог уже не нужен).
+    fn quiet(card: &Bluetooth) -> bool {
+        let s = card.shared.lock().unwrap();
+        s.ops.is_empty() && s.workers == 0
+    }
+
     fn doing(card: &Bluetooth, address: u64) -> Option<Doing> {
-        card.shared.lock().unwrap().ops.get(&address).copied()
+        card.shared.lock().unwrap().doing(address)
+    }
+
+    /// «Подключение» без потока: строка останется в нём, пока тест не снимет.
+    fn pend(card: &Bluetooth, address: u64, doing: Doing) {
+        let op =
+            Op { doing, name: "Pending".into(), id: u64::MAX, deadline: Instant::now() + Duration::from_secs(3600) };
+        card.shared.lock().unwrap().ops.insert(address, op);
     }
 
     /// Остановил ли заслон запись с такой меткой.
@@ -896,9 +1073,12 @@ mod tests {
         let (on, en) = (Settings::default(), texts::tr(Lang::En));
         assert!(card.events(&on).is_empty(), "первое чтение тихое");
         assert!(!connected(&card, SPEAKER));
+        let gate = Gate::close();
         assert!(card.toggle(SPEAKER, None), "звуковое, не подключено, радио включено — начали");
         assert_eq!(doing(&card, SPEAKER), Some(Doing::Connecting));
         assert!(!card.toggle(SPEAKER, None), "пока идёт, второй раз не начинают");
+        assert!(!connected(&card, SPEAKER), "драйвер ещё не ответил");
+        drop(gate);
         wait_for("конец подключения", || idle(&card));
         let list = card.shared.lock().unwrap().list.clone();
         let speaker = list.iter().find(|d| d.address == SPEAKER).unwrap();
@@ -919,25 +1099,21 @@ mod tests {
     /// Свою «подключено» плашка не говорит, а чужую — да: колонку включили сами, а наушники подключили из карточки.
     #[test]
     fn a_connect_from_the_card_gives_no_plaque_but_a_foreign_one_does() {
-        let card = Bluetooth::default();
+        let mut card = Bluetooth::default();
         let on = Settings::default();
-        let apply = |list: Vec<bt::Device>| card.shared.lock().unwrap().apply(list);
-        apply(vec![audio(1, "Headphones", false, None), audio(2, "Speaker", false, None)]);
-        card.shared.lock().unwrap().ops.insert(1, Doing::Connecting);
-        apply(vec![audio(1, "Headphones", true, Some(80)), audio(2, "Speaker", true, Some(60))]);
-        let mut card = card;
+        let apply = |card: &Bluetooth, list: Vec<bt::Device>| card.shared.lock().unwrap().apply(list);
+        apply(&card, vec![audio(1, "Headphones", false, None), audio(2, "Speaker", false, None)]);
+        pend(&card, 1, Doing::Connecting);
+        apply(&card, vec![audio(1, "Headphones", true, Some(80)), audio(2, "Speaker", true, Some(60))]);
         let told: Vec<Say> = card.events(&on).into_iter().map(|p| p.title).collect();
         assert_eq!(told, [Say::Connected("Speaker".into())], "о наушниках молчок, о колонке — плашка");
         // Отключили из карточки (плашки не даёт и так), потом подключили снова — опять своё.
-        card.shared.lock().unwrap().ops.insert(1, Doing::Disconnecting);
+        pend(&card, 1, Doing::Disconnecting);
         let off = || vec![audio(1, "Headphones", false, None), audio(2, "Speaker", true, Some(60))];
-        card.shared.lock().unwrap().apply(off());
-        card.shared.lock().unwrap().apply(off());
-        card.shared.lock().unwrap().ops.insert(1, Doing::Connecting);
-        card.shared
-            .lock()
-            .unwrap()
-            .apply(vec![audio(1, "Headphones", true, Some(80)), audio(2, "Speaker", true, Some(60))]);
+        apply(&card, off());
+        apply(&card, off());
+        pend(&card, 1, Doing::Connecting);
+        apply(&card, vec![audio(1, "Headphones", true, Some(80)), audio(2, "Speaker", true, Some(60))]);
         assert!(card.events(&on).is_empty());
     }
 
@@ -966,24 +1142,52 @@ mod tests {
         );
     }
 
-    /// Звуковое, но точек Windows у него нет: кнопка есть, щелчок — сразу уведомление о неудаче (без ожидания всех секунд).
+    /// Отключение не вышло, хоть просьба принята: строка прежняя и своё уведомление.
     #[test]
-    fn a_device_without_endpoints_fails_at_once_with_the_same_words() {
+    fn a_disconnect_that_does_not_happen_is_reported() {
+        let _world = world();
+        bt::fake_set_stuck(1, true);
+        let mut card = loaded();
+        assert!(card.toggle(1, None));
+        assert_eq!(doing(&card, 1), Some(Doing::Disconnecting));
+        wait_for("конец ожидания", || idle(&card));
+        assert_eq!(
+            card.problems(texts::tr(Lang::En)),
+            [("Couldn’t disconnect “Headphones”".to_string(), Tone::Danger)]
+        );
+        assert!(connected(&card, 1), "наушники так и подключены");
+    }
+
+    /// Просьба до драйвера не ушла (у устройства нет звуковых точек Windows): кнопка есть, щелчок — сразу уведомление, и
+    /// слова другие: совет «включите устройство» тут не про то, нужны «Параметры Bluetooth».
+    #[test]
+    fn a_request_that_did_not_go_out_says_so_in_other_words() {
         let _world = world();
         bt::fake_set_no_points(SPEAKER, true);
+        bt::fake_set_no_points(1, true);
         let mut card = loaded();
+        let (ru, en) = (texts::tr(Lang::Ru), texts::tr(Lang::En));
         assert!(card.toggle(SPEAKER, None), "кнопка есть, нажать можно");
         wait_for("отказ", || idle(&card));
-        let words = card.problems(texts::tr(Lang::En));
-        assert_eq!(words.len(), 1);
-        assert!(words[0].0.starts_with("Couldn’t connect “Speaker”"), "{words:?}");
-        // И у отключения свои слова.
-        bt::fake_set_no_points(1, true);
+        assert_eq!(
+            card.problems(en),
+            [("Couldn’t connect “Speaker” from the panel — use Bluetooth settings".to_string(), Tone::Danger)]
+        );
         assert!(card.toggle(1, None));
         wait_for("отказ отключения", || idle(&card));
         assert_eq!(
-            card.problems(texts::tr(Lang::Ru)),
-            [("Не удалось отключить «Headphones»".to_string(), Tone::Danger)]
+            card.problems(ru),
+            [(
+                "Не удалось отключить «Headphones» из панели — отключите в «Параметрах Bluetooth»".to_string(),
+                Tone::Danger
+            )]
+        );
+        assert_eq!(
+            [en.bt_disconnect_refused.replace("{}", "X"), ru.bt_connect_refused.replace("{}", "X")],
+            [
+                "Couldn’t disconnect “X” from the panel — use Bluetooth settings",
+                "Не удалось подключить «X» из панели — подключите в «Параметрах Bluetooth»"
+            ]
         );
         assert!(connected(&card, 1), "наушники так и подключены");
     }
@@ -992,8 +1196,11 @@ mod tests {
     fn disconnecting_headphones_shows_its_own_progress() {
         let _world = world();
         let mut card = loaded();
+        let gate = Gate::close();
         assert!(card.toggle(1, None));
         assert_eq!(doing(&card, 1), Some(Doing::Disconnecting));
+        assert!(connected(&card, 1), "пока драйвер молчит, наушники подключены");
+        drop(gate);
         wait_for("конец отключения", || idle(&card));
         assert!(!connected(&card, 1) && connected(&card, 2), "наушники отключены, мышь — как была");
         assert!(blocked("bt disconnect Headphones"));
@@ -1063,10 +1270,10 @@ mod tests {
             card.actions(ru, Lang::Ru, &Settings::default()).into_iter().map(|a| a.title).collect();
         assert_eq!(titles[1..], ["Отключить «Headphones»", "Подключить «Speaker»"]);
         // С устройством что-то делают — серое, с причиной.
-        card.shared.lock().unwrap().ops.insert(SPEAKER, Doing::Connecting);
+        pend(&card, SPEAKER, Doing::Connecting);
         let busy = card.actions(en, Lang::En, &Settings::default()).remove(2);
         assert!(!busy.enabled && busy.reason.as_deref() == Some("Connecting…"));
-        card.shared.lock().unwrap().ops.insert(SPEAKER, Doing::Disconnecting);
+        pend(&card, SPEAKER, Doing::Disconnecting);
         let busy = card.actions(en, Lang::En, &Settings::default()).remove(2);
         assert_eq!(busy.reason.as_deref(), Some("Disconnecting…"));
     }
@@ -1094,8 +1301,10 @@ mod tests {
             card.command(&Command::RunAction(id.to_string()), &mut cx);
             assert!(idle(&card), "{id}");
         }
+        let gate = Gate::close();
         card.command(&Command::RunAction("bluetooth:connect:4".to_string()), &mut cx);
         assert_eq!(doing(&card, SPEAKER), Some(Doing::Connecting));
+        drop(gate);
         wait_for("конец подключения", || idle(&card));
         assert!(connected(&card, SPEAKER));
         card.command(&Command::RunAction("bluetooth:disconnect:4".to_string()), &mut cx);
@@ -1116,15 +1325,69 @@ mod tests {
         assert!(s.take(new, on.clone()), "тот же номер ещё применяется");
     }
 
-    /// Ожидание — как в design: 15 с на подключение, 10 с на отключение, опрос раз в секунду (в тестах — короче).
+    /// Устройство, которого нет в чтении, не «отключилось» и не «подключилось»: после сна Windows отдаёт неполный список.
+    #[test]
+    fn a_device_missing_from_a_read_has_not_changed_state() {
+        let list = [audio(1, "A", true, Some(50)), audio(2, "B", false, None)];
+        assert!(became(&list, 1, true) && !became(&list, 1, false));
+        assert!(became(&list, 2, false) && !became(&list, 2, true));
+        assert!(!became(&list, 3, true) && !became(&list, 3, false), "нет в чтении — ничего не известно");
+        assert!(!became(&[], 1, false));
+    }
+
+    /// Ожидание — как в design: 15 с на подключение, 10 с на отключение, опрос раз в секунду (в тестах — короче); срок на всю
+    /// операцию в окне — 20 и 15 с, больше срока потока.
     #[test]
     fn the_waits_follow_the_design_and_are_short_in_tests() {
         assert_eq!(
             (CONNECT_WAIT, DISCONNECT_WAIT, POLL),
             (Duration::from_secs(15), Duration::from_secs(10), Duration::from_secs(1))
         );
-        let (limit, poll) = waits(Doing::Connecting);
-        assert!(limit < Duration::from_secs(5) && poll < limit, "в тестах ждать недолго");
+        assert_eq!((CONNECT_LIMIT, DISCONNECT_LIMIT), (Duration::from_secs(20), Duration::from_secs(15)));
+        assert!(
+            CONNECT_LIMIT > CONNECT_WAIT && DISCONNECT_LIMIT > DISCONNECT_WAIT,
+            "обычный ход дел кончается раньше срока"
+        );
+        assert_eq!((limit(Doing::Connecting), limit(Doing::Disconnecting)), (CONNECT_LIMIT, DISCONNECT_LIMIT));
+        let (wait, poll) = waits(Doing::Connecting);
+        assert!(wait < Duration::from_secs(5) && poll < wait, "в тестах ждать недолго");
+    }
+
+    /// Завис сам вызов драйвера: по сроку (20 с, отключение — 15) окно снимает «Подключение…» и говорит неудачу, а итог потока, что
+    /// очнулся позже, не принимается — ни для этой операции, ни для новой на том же устройстве.
+    #[test]
+    fn a_hung_driver_call_is_cut_at_its_limit_and_the_late_result_is_ignored() {
+        let _world = world();
+        let mut card = loaded();
+        let (ru, en) = (texts::tr(Lang::Ru), texts::tr(Lang::En));
+        let gate = Gate::close();
+        assert!(card.toggle(SPEAKER, None));
+        // Срок не вышел — ничего не снято. Часы вперёд: ждать 20 секунд не нужно.
+        assert_eq!(card.shared.lock().unwrap().expire(Instant::now()), 0);
+        assert_eq!(doing(&card, SPEAKER), Some(Doing::Connecting));
+        let late = Instant::now() + CONNECT_LIMIT + Duration::from_secs(1);
+        assert_eq!(card.shared.lock().unwrap().expire(late), 1);
+        assert!(idle(&card), "строка снова обычная");
+        assert_eq!(
+            card.problems(en),
+            [("Couldn’t connect “Speaker”: turn the device on and bring it closer".to_string(), Tone::Danger)]
+        );
+        // Можно снова, хотя первый поток ещё висит у драйвера. И у отключения срок свой, короче.
+        assert!(card.toggle(SPEAKER, None));
+        assert!(card.toggle(1, None));
+        assert_eq!(card.shared.lock().unwrap().expire(Instant::now() + DISCONNECT_LIMIT + Duration::from_secs(1)), 1);
+        assert_eq!(doing(&card, SPEAKER), Some(Doing::Connecting), "срок подключения (20 с) ещё не вышел");
+        assert_eq!(
+            card.problems(ru),
+            [("Не удалось отключить «Headphones»".to_string(), Tone::Danger)],
+            "у отключения 15 с, а не 20"
+        );
+        // Драйвер «ответил»: все три потока кончают; свой итог принимает только вторая операция колонки.
+        drop(gate);
+        wait_for("потоки", || quiet(&card));
+        assert!(connected(&card, SPEAKER), "вторая операция довела дело");
+        assert!(card.problems(ru).is_empty(), "запоздавшие итоги ничего не сказали");
+        assert!(card.events(&Settings::default()).is_empty());
     }
 
     // ─── Карточка в кадрах ──────────────────────────────────────────────────
@@ -1228,15 +1491,34 @@ mod tests {
             painted(&self.shapes).iter().any(|(t, _)| t == word)
         }
 
+        /// Где нарисовано слово (середина).
+        fn at(&self, word: &str) -> Pos2 {
+            painted(&self.shapes)
+                .into_iter()
+                .find(|(t, _)| t == word)
+                .unwrap_or_else(|| panic!("нет надписи «{word}»:\n{}", self.text()))
+                .1
+        }
+
         /// Сколько раз нарисовано слово.
         fn count(&self, word: &str) -> usize {
             painted(&self.shapes).iter().filter(|(t, _)| t == word).count()
         }
 
+        /// Прямоугольник виджета, помеченного `anchor`.
+        fn anchor(&self, key: &str) -> Rect {
+            let id = egui::Id::new(("anchor", key.to_string()));
+            self.ctx.read_response(id).unwrap_or_else(|| panic!("нет «{key}»:\n{}", self.text())).rect
+        }
+
         /// Прямоугольник строки устройства.
         fn row(&self, address: u64) -> Rect {
-            let id = egui::Id::new(("anchor", format!("bt-{address:x}")));
-            self.ctx.read_response(id).unwrap_or_else(|| panic!("строки нет:\n{}", self.text())).rect
+            self.anchor(&format!("bt-{address:x}"))
+        }
+
+        /// У кого фокус клавиатуры.
+        fn focused(&self) -> Option<egui::Id> {
+            self.ctx.memory(|m| m.focused())
         }
 
         fn move_to(&mut self, pos: Pos2) {
@@ -1277,6 +1559,11 @@ mod tests {
         }
     }
 
+    /// Номер строки в фокусе — по адресу устройства, как у самой строки.
+    fn row_id(address: u64) -> egui::Id {
+        egui::Id::new(("bt-row", address))
+    }
+
     /// Строки по макету: у подключённого — точка, имя, «Подключено» и заряд; у звукового не подключённого — «Не подключено» и
     /// «Подключить»; у не звукового не подключённого — «Не подключено» без кнопки. Имена, заряд — по языку.
     #[test]
@@ -1296,9 +1583,10 @@ mod tests {
             assert_eq!(rig.count(connect), 1, "кнопка одна — у колонки; у клавиатуры её нет:\n{shown}");
             assert!(charges.iter().all(|c| rig.has(c)), "заряд подключённых:\n{shown}");
             assert!(rig.has(texts::tr(lang).bt_settings), "«Параметры Bluetooth» внизу");
+            assert!(!rig.has(texts::tr(lang).bt_off_note), "радио включено — причины над списком нет");
             // Кнопка — в строке колонки, справа; клавиатура — ниже без неё.
             let speaker = rig.row(SPEAKER);
-            let button = painted(&rig.shapes).into_iter().find(|(t, _)| t == connect).unwrap().1;
+            let button = rig.at(connect);
             assert!(speaker.contains(button) && button.x > speaker.center().x, "кнопка справа в строке колонки");
             assert!(rig.row(3).top() > speaker.bottom() - 1.0, "четыре строки идут друг под другом");
         }
@@ -1319,7 +1607,12 @@ mod tests {
         let at = rig.row(SPEAKER).center();
         rig.move_to(at);
         assert_eq!(rig.cursor, egui::CursorIcon::PointingHand, "над звуковой строкой — «рука»");
+        let gate = Gate::close();
         rig.click(at);
+        assert!(rig.has("Connecting…"), "пока драйвер молчит:\n{}", rig.text());
+        assert_eq!(rig.count("Connect"), 0, "кнопки на время работы нет");
+        assert_ne!(rig.cursor, egui::CursorIcon::PointingHand, "и «руки» над строкой в работе нет");
+        drop(gate);
         rig.until_idle();
         assert!(!rig.has("Connecting…"));
         assert_eq!(rig.count("Connected"), 3, "наушники, мышь и теперь колонка:\n{}", rig.text());
@@ -1333,13 +1626,13 @@ mod tests {
         assert_eq!(rig.count("Connect"), 1, "«Подключить» вернулась");
     }
 
-    /// Пока идёт — «Подключение…», вертушка вместо кнопки и точки, а имя не серое; второй щелчок ничего не запускает.
+    /// Пока идёт — «Подключение…», вертушка вместо кнопки и точки, а имя не серое; нажатие ничего не запускает.
     #[test]
     fn while_connecting_the_row_shows_the_wait() {
         let _world = world();
         let mut rig = Rig::new(Lang::En, 380.0);
         // «Подключение» без потока: строка останется в нём, пока мы не снимем.
-        rig.card.shared.lock().unwrap().ops.insert(SPEAKER, Doing::Connecting);
+        pend(&rig.card, SPEAKER, Doing::Connecting);
         rig.settle();
         assert!(rig.has("Connecting…"), "{}", rig.text());
         assert_eq!(rig.count("Connect"), 0, "кнопки нет");
@@ -1349,9 +1642,9 @@ mod tests {
         let at = rig.row(SPEAKER).center();
         rig.click(at);
         assert_eq!(doing(&rig.card, SPEAKER), Some(Doing::Connecting));
-        assert!(!rig.card.shared.lock().unwrap().busy);
+        assert_eq!(rig.card.shared.lock().unwrap().workers, 0, "щелчок по строке в работе потока не заводит");
         // «Отключение…» — своё слово.
-        rig.card.shared.lock().unwrap().ops.insert(1, Doing::Disconnecting);
+        pend(&rig.card, 1, Doing::Disconnecting);
         rig.settle();
         assert!(rig.has("Disconnecting…") && !rig.has("80%"), "заряд на время отключения не показан:\n{}", rig.text());
     }
@@ -1363,12 +1656,81 @@ mod tests {
         let mut rig = Rig::new(Lang::En, 380.0);
         rig.key(Key::Tab);
         rig.key(Key::Tab);
-        let focused = rig.ctx.memory(|m| m.focused()).expect("фокус где-то есть");
-        assert_eq!(rig.ctx.read_response(focused).map(|r| r.rect), Some(rig.row(SPEAKER)), "вторая по Tab — колонка");
+        assert_eq!(rig.focused(), Some(row_id(SPEAKER)), "вторая по Tab — колонка");
         rig.key(Key::Enter);
         assert!(doing(&rig.card, SPEAKER).is_some() || connected(&rig.card, SPEAKER), "Enter подключил");
         rig.until_idle();
         assert!(connected(&rig.card, SPEAKER));
+    }
+
+    /// Фокус не пропадает, пока с устройством идёт работа: строка остаётся в Tab, Enter и щелчок второй работы не заводят, а
+    /// после — тот же фокус (раньше строка на время работы теряла фокус, и Tab шёл сначала).
+    #[test]
+    fn the_focus_stays_on_the_row_while_it_works() {
+        let _world = world();
+        let mut rig = Rig::new(Lang::En, 380.0);
+        rig.key(Key::Tab);
+        rig.key(Key::Tab);
+        assert_eq!(rig.focused(), Some(row_id(SPEAKER)));
+        let gate = Gate::close();
+        rig.key(Key::Enter);
+        assert_eq!(doing(&rig.card, SPEAKER), Some(Doing::Connecting));
+        assert!(rig.has("Connecting…"));
+        assert_eq!(rig.focused(), Some(row_id(SPEAKER)), "фокус не пропал на «Подключение…»");
+        rig.key(Key::Enter);
+        let at = rig.row(SPEAKER).center();
+        rig.click(at);
+        assert_eq!(rig.card.shared.lock().unwrap().workers, 1, "работа одна: повторные нажатия её не множат");
+        drop(gate);
+        rig.until_idle();
+        assert!(connected(&rig.card, SPEAKER));
+        assert_eq!(rig.focused(), Some(row_id(SPEAKER)), "и после неё фокус при той же строке");
+    }
+
+    /// Номер строки — по адресу устройства, а не по месту в списке: список пересортировался (подключённые сверху), а фокус и
+    /// Enter остались при том же устройстве, а не переехали на соседа.
+    #[test]
+    fn a_reordered_list_keeps_the_focus_and_enter_on_the_same_device() {
+        let _world = world();
+        let mut rig = Rig::new(Lang::En, 380.0);
+        rig.key(Key::Tab);
+        rig.key(Key::Tab);
+        assert_eq!(rig.focused(), Some(row_id(SPEAKER)), "вторая по Tab — колонка");
+        let before = rig.row(SPEAKER);
+        // Колонка встала первой, как после «подключилась сама» и сортировки.
+        {
+            let mut s = rig.card.shared.lock().unwrap();
+            let at = s.list.iter().position(|d| d.address == SPEAKER).unwrap();
+            let speaker = s.list.remove(at);
+            s.list.insert(0, speaker);
+        }
+        rig.settle();
+        assert!(rig.row(SPEAKER).top() < before.top(), "строка колонки переехала наверх");
+        assert_eq!(rig.focused(), Some(row_id(SPEAKER)), "фокус поехал вместе с колонкой");
+        rig.key(Key::Enter);
+        assert!(doing(&rig.card, SPEAKER).is_some() || connected(&rig.card, SPEAKER), "Enter подключил колонку");
+        assert!(doing(&rig.card, 1).is_none() && connected(&rig.card, 1), "а наушники не тронуты");
+        rig.until_idle();
+        assert!(connected(&rig.card, SPEAKER) && connected(&rig.card, 1));
+    }
+
+    /// Точка, бейдж заряда и вертушка — виджеты набора поверх строки, но щелчок остаётся у строки: по бейджу и по точке подключённых
+    /// наушников они отключаются, по кольцу — подключаются.
+    #[test]
+    fn a_click_on_the_dot_or_the_badge_is_a_click_on_the_row() {
+        let _world = world();
+        let mut rig = Rig::new(Lang::En, 380.0);
+        let badge = rig.at("80%");
+        rig.move_to(badge);
+        assert_eq!(rig.cursor, egui::CursorIcon::PointingHand, "над бейджем — «рука» строки");
+        rig.click(badge);
+        rig.until_idle();
+        assert!(!connected(&rig.card, 1), "щелчок по бейджу отключил наушники");
+        let row = rig.row(1);
+        let ring = Pos2::new(row.left() + 6.0 + 4.0, row.center().y);
+        rig.click(ring);
+        rig.until_idle();
+        assert!(connected(&rig.card, 1), "щелчок по кольцу подключил их снова");
     }
 
     /// Радио выключено: «Подключить» нарисована, но серая; щелчок ничего не запускает, а Tab её не берёт.
@@ -1386,14 +1748,43 @@ mod tests {
         assert_ne!(rig.cursor, egui::CursorIcon::PointingHand, "и «руки» над серой строкой нет");
         // Серая строка не берёт Tab: первой фокус получает подключённая (наушники), а не колонка.
         rig.key(Key::Tab);
-        let focused = rig.ctx.memory(|m| m.focused()).expect("фокус где-то есть");
-        assert_eq!(rig.ctx.read_response(focused).map(|r| r.rect), Some(rig.row(1)));
+        assert_eq!(rig.focused(), Some(row_id(1)));
         // Включили радио — кнопка снова живая.
         net::fake_bluetooth(true);
         rig.card.read(true);
         wait_for("чтение радио", || rig.card.shared.lock().unwrap().radio == Some(true));
         rig.settle();
         assert_eq!(ink_of(&rig.shapes, "Connect"), Some(p.text));
+    }
+
+    /// Радио выключено: над списком причина и что делать («Bluetooth выключен — включите его в «Параметрах Bluetooth»»); список
+    /// при этом может быть пуст из-за самого радио — тогда «Сопряжённых устройств нет.» не говорим. Радио включено или не известно —
+    /// причины нет.
+    #[test]
+    fn with_the_radio_off_the_reason_is_written_above_the_list() {
+        let _world = world();
+        for (lang, note, none) in [
+            (Lang::En, "Bluetooth is off — turn it on in Bluetooth settings", "No paired devices."),
+            (Lang::Ru, "Bluetooth выключен — включите его в «Параметрах Bluetooth»", "Сопряжённых устройств нет."),
+        ] {
+            assert_eq!(texts::tr(lang).bt_off_note, note);
+            net::fake_bluetooth(false);
+            let mut rig = Rig::new(lang, 380.0);
+            assert!(rig.has(note), "причина видна без наведения:\n{}", rig.text());
+            assert!(rig.at(note).y < rig.row(1).top(), "и стоит над списком");
+            assert!(rig.has(texts::tr(lang).bt_settings), "«Параметры Bluetooth» — внизу, как были");
+            // Список пуст — только причина.
+            rig.card.shared.lock().unwrap().list.clear();
+            rig.settle();
+            assert!(rig.has(note) && !rig.has(none), "{}", rig.text());
+            // Радио не известно или включено — причины нет, а пустой список — «нет сопряжённых».
+            for radio in [None, Some(true)] {
+                rig.card.shared.lock().unwrap().radio = radio;
+                rig.settle();
+                assert!(!rig.has(note) && rig.has(none), "{radio:?}: {}", rig.text());
+            }
+            net::fake_bluetooth(true);
+        }
     }
 
     /// Узкая карточка: имя режется многоточием, а кнопка остаётся целой.
@@ -1406,5 +1797,37 @@ mod tests {
         let speaker = rig.row(SPEAKER);
         let inside = painted(&rig.shapes).into_iter().all(|(_, at)| at.x < speaker.right() + 1.0);
         assert!(inside, "ничего не за краем:\n{shown}");
+    }
+
+    /// «Параметры Bluetooth» — `Ghost` с шестерёнкой и значком «наружу» за словом (шире кнопки набора ровно на этот значок с отступом);
+    /// тесно — без шестерёнки, ещё теснее — слово режется, а кнопка не выходит за карточку.
+    #[test]
+    fn the_settings_button_has_the_external_mark_and_fits_a_narrow_card() {
+        let _world = world();
+        let rig = Rig::new(Lang::En, 380.0);
+        let wide = rig.anchor("bt-settings");
+        // Кнопка набора с шестерёнкой — для сравнения: у нашей за словом ещё значок «наружу» 12 и отступ 5.
+        let mut set_width = 0.0;
+        let input =
+            egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, rig.size)), ..Default::default() };
+        let _ = rig.ctx.run_ui(input, |ui| {
+            set_width =
+                w::button(ui, anvil_ui::widgets::Kind::Ghost, Some(Icon::Gear), "Bluetooth settings").rect.width();
+        });
+        assert!((wide.width() - (set_width + 17.0)).abs() < 0.5, "{} против {}", wide.width(), set_width);
+        assert!(rig.has("Bluetooth settings"));
+        // Тесно: 120 — шестерёнки нет, слово режется многоточием, кнопка в карточке.
+        let tight = Rig::new(Lang::En, 120.0);
+        assert!(tight.anchor("bt-settings").width() <= 120.5, "{}", tight.anchor("bt-settings").width());
+        // Слово обрезано: у надписи в кадре многоточие (текст у галереи остаётся прежним, а `elided` — истина).
+        fn elided(shape: &egui::Shape) -> bool {
+            match shape {
+                egui::Shape::Text(t) => t.galley.text().starts_with("Bluetooth settings") && t.galley.elided,
+                egui::Shape::Vec(list) => list.iter().any(elided),
+                _ => false,
+            }
+        }
+        assert!(tight.shapes.iter().any(|s| elided(&s.shape)), "{}", tight.text());
+        assert!(!rig.shapes.iter().any(|s| elided(&s.shape)), "на широкой карточке слово целое");
     }
 }

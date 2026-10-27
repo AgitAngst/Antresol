@@ -140,16 +140,19 @@ const FAKE_DEVICES: [(&str, u64, bool, u8); 4] = [
 ];
 
 /// Выдуманный мир помнит, что в него записали: кто подключён (вначале наушники и мышь); у кого выключено питание — подключение
-/// не выходит (для проверки «не удалось подключить»); у кого нет звуковых точек — звуковое устройство, но подключать нечем.
+/// не выходит (для проверки «не удалось подключить»), у «зависшего» — не выходит отключение; у кого нет звуковых точек —
+/// звуковое устройство, но подключать нечем.
 struct World {
     connected: [bool; FAKE_DEVICES.len()],
     unreachable: [bool; FAKE_DEVICES.len()],
+    stuck: [bool; FAKE_DEVICES.len()],
     no_points: [bool; FAKE_DEVICES.len()],
 }
 
 const WORLD_START: World = World {
     connected: [true, true, false, false],
     unreachable: [false; FAKE_DEVICES.len()],
+    stuck: [false; FAKE_DEVICES.len()],
     no_points: [false; FAKE_DEVICES.len()],
 };
 
@@ -164,11 +167,13 @@ pub fn fake_has_points(address: u64) -> bool {
     fake_index(address).is_some_and(|i| !WORLD.lock().unwrap_or_else(|e| e.into_inner()).no_points[i])
 }
 
-/// Писатель выдуманного мира: подключить или отключить выдуманное устройство. Выключенное (`unreachable`) не подключается.
+/// Писатель выдуманного мира: подключить или отключить выдуманное устройство. Выключенное (`unreachable`) не подключается,
+/// «зависшее» (`stuck`) не отключается.
 pub fn fake_connect(address: u64, on: bool) {
     let Some(i) = fake_index(address) else { return };
     let mut world = WORLD.lock().unwrap_or_else(|e| e.into_inner());
-    if !on || !world.unreachable[i] {
+    let ignores = if on { world.unreachable[i] } else { world.stuck[i] };
+    if !ignores {
         world.connected[i] = on;
     }
 }
@@ -178,10 +183,33 @@ pub fn fake_disconnect_all() {
     WORLD.lock().unwrap_or_else(|e| e.into_inner()).connected = [false; FAKE_DEVICES.len()];
 }
 
-/// Выдуманный мир как вначале (для тестов).
+/// Выдуманный мир как вначале, ворота открыты (для тестов).
 #[cfg(test)]
 pub fn fake_reset() {
     *WORLD.lock().unwrap_or_else(|e| e.into_inner()) = WORLD_START;
+    fake_hold(false);
+}
+
+/// Ворота для тестов: пока закрыты, выдуманная просьба драйверу стоит на месте ([`fake_wait_hold`]) — тест видит «Подключение…»
+/// и сам решает, когда драйвер «ответит», не гадая о времени.
+#[cfg(test)]
+static HOLD: (Mutex<bool>, std::sync::Condvar) = (Mutex::new(false), std::sync::Condvar::new());
+
+/// Закрыть (`true`) или открыть ворота.
+#[cfg(test)]
+pub fn fake_hold(closed: bool) {
+    *HOLD.0.lock().unwrap_or_else(|e| e.into_inner()) = closed;
+    HOLD.1.notify_all();
+}
+
+/// Ждёт, пока ворота открыты, но не дольше 20 с: тест, что упал с закрытыми воротами, не должен вешать чужие потоки.
+#[cfg(test)]
+pub fn fake_wait_hold() {
+    let start = std::time::Instant::now();
+    let mut closed = HOLD.0.lock().unwrap_or_else(|e| e.into_inner());
+    while *closed && start.elapsed() < std::time::Duration::from_secs(20) {
+        closed = HOLD.1.wait_timeout(closed, std::time::Duration::from_millis(20)).unwrap_or_else(|e| e.into_inner()).0;
+    }
 }
 
 /// Выдуманное устройство «выключено»: подключение принимается, но не выходит (для тестов).
@@ -189,6 +217,14 @@ pub fn fake_reset() {
 pub fn fake_set_unreachable(address: u64, on: bool) {
     if let Some(i) = fake_index(address) {
         WORLD.lock().unwrap_or_else(|e| e.into_inner()).unreachable[i] = on;
+    }
+}
+
+/// Выдуманное устройство «зависло»: отключение принимается, но не выходит (для тестов).
+#[cfg(test)]
+pub fn fake_set_stuck(address: u64, on: bool) {
+    if let Some(i) = fake_index(address) {
+        WORLD.lock().unwrap_or_else(|e| e.into_inner()).stuck[i] = on;
     }
 }
 
@@ -308,7 +344,11 @@ mod tests {
         fake_connect(FAKE_SPEAKER, true);
         assert!(!speaker().connected, "выключенное не подключается");
         fake_connect(2, false);
-        assert!(!devices().iter().any(|d| d.address == 2 && d.connected), "а отключается всегда");
+        assert!(!devices().iter().any(|d| d.address == 2 && d.connected), "а отключается без помех");
+        // «Зависшее» не отключается, хотя подключается.
+        fake_set_stuck(1, true);
+        fake_connect(1, false);
+        assert!(devices().iter().any(|d| d.address == 1 && d.connected), "наушники не отключились");
         assert!(fake_has_points(FAKE_SPEAKER) && !fake_has_points(0xdead));
         fake_set_no_points(FAKE_SPEAKER, true);
         assert!(!fake_has_points(FAKE_SPEAKER));

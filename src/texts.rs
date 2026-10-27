@@ -330,6 +330,10 @@ pub struct Tr {
     pub bt_disconnect_failed: &'static str,
     pub bt_search_connect: &'static str,
     pub bt_search_disconnect: &'static str,
+    // Круг по судье (27.10.2026): причина над списком, пока радио выключено, и слова, когда просьба до драйвера не дошла.
+    pub bt_off_note: &'static str,
+    pub bt_connect_refused: &'static str,
+    pub bt_disconnect_refused: &'static str,
 }
 
 const RU: Tr = Tr {
@@ -654,6 +658,9 @@ const RU: Tr = Tr {
     bt_disconnect_failed: "Не удалось отключить «{}»",
     bt_search_connect: "Подключить «{}»",
     bt_search_disconnect: "Отключить «{}»",
+    bt_off_note: "Bluetooth выключен — включите его в «Параметрах Bluetooth»",
+    bt_connect_refused: "Не удалось подключить «{}» из панели — подключите в «Параметрах Bluetooth»",
+    bt_disconnect_refused: "Не удалось отключить «{}» из панели — отключите в «Параметрах Bluetooth»",
 };
 
 const EN: Tr = Tr {
@@ -978,6 +985,9 @@ const EN: Tr = Tr {
     bt_disconnect_failed: "Couldn’t disconnect “{}”",
     bt_search_connect: "Connect “{}”",
     bt_search_disconnect: "Disconnect “{}”",
+    bt_off_note: "Bluetooth is off — turn it on in Bluetooth settings",
+    bt_connect_refused: "Couldn’t connect “{}” from the panel — use Bluetooth settings",
+    bt_disconnect_refused: "Couldn’t disconnect “{}” from the panel — use Bluetooth settings",
 };
 
 pub fn tr(lang: Lang) -> &'static Tr {
@@ -1814,6 +1824,9 @@ mod tests {
                 t.bt_disconnect_failed,
                 t.bt_search_connect,
                 t.bt_search_disconnect,
+                t.bt_off_note,
+                t.bt_connect_refused,
+                t.bt_disconnect_refused,
             ]
         };
         assert_eq!(
@@ -1833,6 +1846,9 @@ mod tests {
                 "Не удалось отключить «{}»",
                 "Подключить «{}»",
                 "Отключить «{}»",
+                "Bluetooth выключен — включите его в «Параметрах Bluetooth»",
+                "Не удалось подключить «{}» из панели — подключите в «Параметрах Bluetooth»",
+                "Не удалось отключить «{}» из панели — отключите в «Параметрах Bluetooth»",
             ]
         );
         assert_eq!(
@@ -1852,14 +1868,26 @@ mod tests {
                 "Couldn’t disconnect “{}”",
                 "Connect “{}”",
                 "Disconnect “{}”",
+                "Bluetooth is off — turn it on in Bluetooth settings",
+                "Couldn’t connect “{}” from the panel — use Bluetooth settings",
+                "Couldn’t disconnect “{}” from the panel — use Bluetooth settings",
             ]
         );
         // Имя подставляется в `{}` — по одному на строку, где оно есть; без `{}` в остальных.
         for t in [ru, en] {
-            for named in [t.bt_connect_failed, t.bt_disconnect_failed, t.bt_search_connect, t.bt_search_disconnect] {
+            for named in [
+                t.bt_connect_failed,
+                t.bt_disconnect_failed,
+                t.bt_connect_refused,
+                t.bt_disconnect_refused,
+                t.bt_search_connect,
+                t.bt_search_disconnect,
+            ] {
                 assert_eq!(named.matches("{}").count(), 1, "{named}");
             }
-            for plain in [t.bt_connected, t.bt_not_connected, t.bt_connecting, t.bt_disconnecting, t.bt_off] {
+            for plain in
+                [t.bt_connected, t.bt_not_connected, t.bt_connecting, t.bt_disconnecting, t.bt_off, t.bt_off_note]
+            {
                 assert!(!plain.contains("{}"), "{plain}");
             }
         }

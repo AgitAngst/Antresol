@@ -13,6 +13,9 @@
 // знаков, а у `bthhfenum` (звонки) адреса в id нет вовсе. Права администратора, по замыслу, не нужны (подтвердить вживую).
 // Писатель — за заслоном (`sys::blocked`): в демо и в тестах Windows не трогается, подключение выдумано (`bt::fake_connect`).
 // Всё идёт в потоке с COM (MTA, [`Com`]); объекты COM из потока не выходят.
+// Фильтр «принял» просьбу только при успехе: по документации у `KSPROPERTY_ONESHOT_*` значения нет (NULL), успех — STATUS_SUCCESS, а
+// другой ответ (в том числе `ERROR_MORE_DATA`) — просьба не выполнена. Код ответа каждого фильтра, и успешного тоже, идёт в
+// журнал (`{:#010x}`, по-английски, без имён и адресов): по нему видно, что ответил драйвер (в debug-сборке — в консоли).
 
 use std::time::Duration;
 
@@ -30,7 +33,7 @@ use windows::Win32::System::Com::StructuredStorage::{PropVariantClear, PropVaria
 use windows::Win32::System::Com::{
     CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, STGM_READ,
 };
-use windows::core::{Error, HRESULT, Interface, PCWSTR, PWSTR};
+use windows::core::{Error, Interface, PCWSTR, PWSTR};
 
 use super::bt;
 
@@ -45,9 +48,6 @@ const NO_CONTAINER: u128 = 0x0000_0000_0000_0000_ffff_ffff_ffff_ffff;
 /// Больше фильтров Bluetooth-аудио у одного устройства не бывает (музыка и звонки, по одному; запас — на LE Audio). Нашлось больше —
 /// сопоставление ошиблось, и запрос не уходит ни одному: он мог бы отключить чужое устройство.
 const MOST_FILTERS: usize = 6;
-
-/// `ERROR_MORE_DATA`: драйвер принял запрос, но у него есть что отдать, а буфер нулевой, — запрос ушёл.
-const MORE_DATA: HRESULT = HRESULT(0x8007_00EAu32 as i32);
 
 /// Что за фильтр у звуковой точки.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,6 +135,11 @@ impl Drop for Com {
     }
 }
 
+/// Код ошибки Windows для журнала: `0x80070490`. Текст ошибки на языке системы в журнал не идёт.
+fn code(e: &Error) -> String {
+    format!("{:#010x}", e.code().0)
+}
+
 /// Строка из COM-памяти: прочитать и вернуть память Windows.
 unsafe fn take(text: PWSTR) -> Option<String> {
     if text.is_null() {
@@ -179,10 +184,12 @@ pub fn points() -> Result<Vec<Point>, String> {
         return Ok(Vec::new());
     }
     unsafe {
-        let enumerator: IMMDeviceEnumerator =
-            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).map_err(|e| e.message())?;
-        let all = enumerator.EnumAudioEndpoints(eAll, DEVICE_STATE(DEVICE_STATEMASK_ALL)).map_err(|e| e.message())?;
-        let count = all.GetCount().map_err(|e| e.message())?;
+        let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
+            .map_err(|e| format!("creating the device enumerator failed: {}", code(&e)))?;
+        let all = enumerator
+            .EnumAudioEndpoints(eAll, DEVICE_STATE(DEVICE_STATEMASK_ALL))
+            .map_err(|e| format!("listing the audio endpoints failed: {}", code(&e)))?;
+        let count = all.GetCount().map_err(|e| format!("counting the audio endpoints failed: {}", code(&e)))?;
         let mut out = Vec::new();
         for i in 0..count {
             let Ok(endpoint) = all.Item(i) else { continue };
@@ -201,12 +208,13 @@ pub fn points() -> Result<Vec<Point>, String> {
     }
 }
 
-/// Одна команда одному фильтру: открыть его (`GetDevice`), взять `IKsControl` и послать `KsProperty`.
-unsafe fn ask(enumerator: &IMMDeviceEnumerator, filter: &str, on: bool) -> windows::core::Result<()> {
+/// Одна команда одному фильтру: открыть его (`GetDevice`), взять `IKsControl` и послать `KsProperty`. Не вышло — на каком шаге и
+/// с каким кодом.
+unsafe fn ask(enumerator: &IMMDeviceEnumerator, filter: &str, on: bool) -> Result<(), (&'static str, Error)> {
     unsafe {
         let id = super::wide(filter);
-        let device = enumerator.GetDevice(PCWSTR(id.as_ptr()))?;
-        let control: IKsControl = device.Activate(CLSCTX_ALL, None)?;
+        let device = enumerator.GetDevice(PCWSTR(id.as_ptr())).map_err(|e| ("GetDevice", e))?;
+        let control: IKsControl = device.Activate(CLSCTX_ALL, None).map_err(|e| ("Activate", e))?;
         let command = if on { KSPROPERTY_ONESHOT_RECONNECT } else { KSPROPERTY_ONESHOT_DISCONNECT };
         let request = KSIDENTIFIER {
             Anonymous: KSIDENTIFIER_0 {
@@ -219,14 +227,16 @@ unsafe fn ask(enumerator: &IMMDeviceEnumerator, filter: &str, on: bool) -> windo
         };
         let mut returned = 0u32;
         super::real_write("IKsControl::KsProperty");
-        control.KsProperty(&request, size_of::<KSIDENTIFIER>() as u32, std::ptr::null_mut(), 0, &mut returned)
+        control
+            .KsProperty(&request, size_of::<KSIDENTIFIER>() as u32, std::ptr::null_mut(), 0, &mut returned)
+            .map_err(|e| ("KsProperty", e))
     }
 }
 
 /// Попросить драйвер подключить (`on`) или отключить устройство — каждому его фильтру Bluetooth-аудио. Ответ — сколько фильтров
-/// приняли запрос; ошибка — по-английски, для журнала (пользователю говорит модуль своими словами). Ничего не принял — ошибка:
-/// подключаться нечему. Принял — подключилось ли, видно только из чтения устройств (`bt::devices`): драйвер отвечает сразу, а
-/// соединение занимает секунды. Звать из потока с [`Com`].
+/// приняли запрос (только успех — `Ok`, любой код ошибки, и `ERROR_MORE_DATA` тоже, — отказ); ошибка — по-английски и с кодами,
+/// для журнала (пользователю говорит модуль своими словами). Ничего не принял — ошибка: просьба не ушла. Принял — подключилось ли,
+/// видно только из чтения устройств (`bt::devices`): драйвер отвечает сразу, а соединение занимает секунды. Звать из потока с [`Com`].
 pub fn set_connected(address: u64, name: &str, on: bool) -> Result<usize, String> {
     if super::blocked(&format!("bt {} {name}", if on { "connect" } else { "disconnect" })) {
         return fake_set(address, on);
@@ -244,30 +254,43 @@ pub fn set_connected(address: u64, name: &str, on: bool) -> Result<usize, String
     }
     let kinds = |kind: Filter| filters.iter().filter(|f| bluetooth_filter(f) == Some(kind)).count();
     let (music, calls) = (kinds(Filter::Music), kinds(Filter::Calls));
-    let enumerator: IMMDeviceEnumerator =
-        unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }.map_err(|e| e.message())?;
+    let enumerator: IMMDeviceEnumerator = unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }
+        .map_err(|e| format!("creating the device enumerator failed: {}", code(&e)))?;
+    let verb = if on { "connect" } else { "disconnect" };
     let mut accepted = 0;
-    let mut refused: Option<Error> = None;
-    for filter in &filters {
+    let mut first_refusal: Option<String> = None;
+    for (n, filter) in filters.iter().enumerate() {
+        let kind = bluetooth_filter(filter);
         match unsafe { ask(&enumerator, filter, on) } {
-            Ok(()) => accepted += 1,
-            // Драйвер хотел отдать данные, а буфер нулевой: действие «в один выстрел» всё равно выполнено.
-            Err(e) if e.code() == MORE_DATA => accepted += 1,
-            Err(e) => {
-                eprintln!("bluetooth audio: a filter refused the request: {:#010x}", e.code().0);
-                refused = Some(e);
+            Ok(()) => {
+                accepted += 1;
+                // Успех у обёртки — один (`S_OK`): другой код она не отдаёт.
+                eprintln!(
+                    "bluetooth audio: {verb}, filter {} of {} ({kind:?}): KsProperty {:#010x}",
+                    n + 1,
+                    filters.len(),
+                    0
+                );
+            }
+            Err((step, e)) => {
+                eprintln!(
+                    "bluetooth audio: {verb}, filter {} of {} ({kind:?}): {step} {}",
+                    n + 1,
+                    filters.len(),
+                    code(&e)
+                );
+                first_refusal.get_or_insert_with(|| format!("{step} {}", code(&e)));
             }
         }
     }
     eprintln!(
-        "bluetooth audio: {} to {} filters (music {music}, calls {calls}), {accepted} accepted",
-        if on { "connect" } else { "disconnect" },
+        "bluetooth audio: {verb} to {} filters (music {music}, calls {calls}), {accepted} accepted",
         filters.len()
     );
     if accepted > 0 {
         Ok(accepted)
     } else {
-        Err(refused.map(|e| e.message()).unwrap_or_else(|| "no filter accepted the request".into()))
+        Err(format!("no filter accepted the request: {}", first_refusal.unwrap_or_else(|| "no answer".into())))
     }
 }
 
@@ -277,16 +300,20 @@ fn fake_set(address: u64, on: bool) -> Result<usize, String> {
     if !bt::fake_has_points(address) {
         return Err("no Bluetooth audio filter behind the device's endpoints".into());
     }
+    // Ворота тестов: пока закрыты, просьба «у драйвера» — тест видит «Подключение…», не гадая о времени.
+    #[cfg(test)]
+    bt::fake_wait_hold();
     std::thread::sleep(fake_delay(on));
     bt::fake_connect(address, on);
     // Как у гарнитуры: два фильтра, музыка и звонки.
     Ok(2)
 }
 
-/// Сколько «занимает» выдуманное подключение: 1,4 с, как в макете; отключение быстрее. В тестах — доли секунды.
+/// Сколько «занимает» выдуманное подключение: 1,4 с, как в макете; отключение быстрее. В тестах — нисколько: когда нужно,
+/// просьбу держат воротами (`bt::fake_hold`), а не временем.
 fn fake_delay(on: bool) -> Duration {
     if cfg!(test) {
-        Duration::from_millis(30)
+        Duration::ZERO
     } else if on {
         Duration::from_millis(1400)
     } else {
