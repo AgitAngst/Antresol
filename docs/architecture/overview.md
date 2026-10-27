@@ -134,7 +134,8 @@
 - Папка «Загрузки» — `SHGetKnownFolderPath(FOLDERID_Downloads)` каждый раз (её можно перенести); в демо и в тестах её нет
   вовсе (`sys::isolated` — `None`), тесты берут свою временную папку. Перетаскивание файла с плашки — `SHDoDragDrop`:
   `SHCreateItemFromParsingName` → `IShellItem::BindToHandler(BHID_DataObject)` → обычное перетаскивание Windows
-  (`DROPEFFECT_COPY | DROPEFFECT_LINK`, переноса нет); OLE уже подключён окном (winit, `with_drag_and_drop`). Вживую не проверено.
+  (`DROPEFFECT_COPY | DROPEFFECT_LINK`, переноса нет); OLE уже подключён окном (winit, `with_drag_and_drop`). Данные файла с `CF_HDROP`
+  проверены живым чтением (`cargo test -- --ignored the_shell_gives_a_file_list_for_a_file`); само перетаскивание вживую не проверено.
 - Какие карточки где стоят — полки (`Settings::shelves`, см. «Полки и правка полок»); `refresh` зовётся только у
   карточек открытой полки и у «Экрана» (его читают чипы сцен в шапке), у «Быстрых настроек» и «Яркости» — если сцены что-то у
   них отмечают, а при правке сцены у всех трёх (`App::refresh_set`); `background` и `events` — у всех, в том числе у
